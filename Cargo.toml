@@ -1,7 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*"
+    "crates/leptos_ui_kit",
+    "crates/leptos_ui_kit_cli",
+    "crates/leptos_ui_kit_codegen",
+    "crates/leptos_ui_kit_primitives",
+    "crates/leptos_ui_kit_registry",
 ]
 
 [workspace.package]
@@ -17,6 +21,9 @@ rust-version = "1.92.0"
 unsafe_code = "forbid"
 
 [workspace.dependencies]
+leptos_ui_kit_codegen = { version = "0.1.0", path = "crates/leptos_ui_kit_codegen" }
+leptos_ui_kit_primitives = { version = "0.1.0", path = "crates/leptos_ui_kit_primitives" }
+leptos_ui_kit_registry = { version = "0.1.0", path = "crates/leptos_ui_kit_registry" }
 
 [profile.release]
 codegen-units = 1

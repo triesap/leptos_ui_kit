@@ -1,0 +1,15 @@
+[package]
+name = "leptos_ui_kit_codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+leptos_ui_kit_registry.workspace = true
+
+[lints]
+workspace = true
