@@ -7,7 +7,9 @@ use std::{
     process,
 };
 
-use leptos_ui_kit_registry::{InfoOutput, build_info_output};
+use leptos_ui_kit_registry::{
+    InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
+};
 
 fn main() {
     if let Err(error) = run(env::args_os().skip(1).collect(), &current_dir()) {
@@ -23,6 +25,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
 
     match command {
         "info" => run_info(&args[1..], cwd),
+        "view" => run_view(&args[1..], cwd),
         _ => Err(usage()),
     }
 }
@@ -60,6 +63,39 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut source: Option<String> = None;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for view: {value}"));
+            }
+            value => {
+                if source.is_some() {
+                    return Err("view accepts exactly one registry source".to_owned());
+                }
+
+                source = Some(value.to_owned());
+            }
+        }
+    }
+
+    let source = source.ok_or_else(|| "view requires a registry source".to_owned())?;
+    let item = load_registry_item(&source, cwd)
+        .map_err(|error| format!("failed to load registry item {source}: {error}"))?;
+
+    println!("{}", render_registry_item(&item, json)?);
+
+    Ok(())
+}
+
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(output)
@@ -86,8 +122,23 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     ))
 }
 
+fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(item)
+            .map_err(|error| format!("failed to serialize registry item: {error}"));
+    }
+
+    Ok(format!(
+        "name: {}\ntype: {}\nsource_kind: {:?}\nsource_path: {}",
+        item.item.name,
+        item.item.kind,
+        item.source_kind,
+        item.source_path.display()
+    ))
+}
+
 fn usage() -> String {
-    "usage: leptos_ui_kit_cli info [--json] [path]".to_owned()
+    "usage: leptos_ui_kit_cli <info|view> [--json] [path-or-source]".to_owned()
 }
 
 fn current_dir() -> PathBuf {
@@ -144,5 +195,15 @@ leptos = { version = "0.8.17", features = ["csr"] }
         assert!(output.contains("\"project_root\""));
         assert!(output.contains("\"render_mode\": \"csr\""));
         assert!(output.contains("\"css_entry\""));
+    }
+
+    #[test]
+    fn view_json_outputs_built_in_registry_item() {
+        let item = load_registry_item("button", Path::new(".")).expect("load built-in item");
+        let output = render_registry_item(&item, true).expect("render json");
+
+        assert!(output.contains("\"name\": \"button\""));
+        assert!(output.contains("\"source_kind\": \"built-in\""));
+        assert!(output.contains("\"type\": \"registry:ui\""));
     }
 }

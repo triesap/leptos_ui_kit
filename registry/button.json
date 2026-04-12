@@ -1,0 +1,18 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry-item.json",
+  "name": "button",
+  "type": "registry:ui",
+  "title": "Button",
+  "description": "Trigger actions with a consistent button surface.",
+  "author": "triesap",
+  "files": [
+    {
+      "path": "ui/button.rs",
+      "type": "registry:ui"
+    }
+  ],
+  "categories": [
+    "ui",
+    "forms"
+  ]
+}
