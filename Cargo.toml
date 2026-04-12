@@ -21,6 +21,8 @@ rust-version = "1.92.0"
 unsafe_code = "forbid"
 
 [workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 leptos_ui_kit_codegen = { version = "0.1.0", path = "crates/leptos_ui_kit_codegen" }
 leptos_ui_kit_primitives = { version = "0.1.0", path = "crates/leptos_ui_kit_primitives" }
 leptos_ui_kit_registry = { version = "0.1.0", path = "crates/leptos_ui_kit_registry" }
