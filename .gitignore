@@ -56,6 +56,9 @@ node_modules/
 
 # Local tooling
 /tmp/
+/docs/
+.beads/dolt/
+.beads/dolt-access.lock
 
 # Beads / Dolt files (added by bd init)
 .dolt/
