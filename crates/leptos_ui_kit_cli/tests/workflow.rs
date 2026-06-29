@@ -22,6 +22,7 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
     assert_success(&project, &["add", "button"]);
     assert_success(&project, &["doctor", "--strict", "--json"]);
+    assert_cargo_check(&project);
 
     assert!(project.join("src/components/ui/button.rs").is_file());
     assert!(
@@ -29,6 +30,53 @@ fn homepage_fixture_cli_workflow_smoke() {
             .join(".leptos-ui/baselines/builtin-button/button.rs")
             .is_file()
     );
+}
+
+fn assert_cargo_check(project: &Path) {
+    let rustc = rustup_tool("1.92.0", "rustc");
+    let output = Command::new("rustup")
+        .current_dir(project)
+        .env("CARGO_TARGET_DIR", project.join(".target"))
+        .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTFLAGS")
+        .env("RUSTC", rustc)
+        .env_remove("RUSTDOC")
+        .args([
+            "run",
+            "1.92.0",
+            "cargo",
+            "check",
+            "--target",
+            "wasm32-unknown-unknown",
+        ])
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn rustup_tool(toolchain: &str, tool: &str) -> PathBuf {
+    let output = Command::new("rustup")
+        .args(["which", "--toolchain", toolchain, tool])
+        .output()
+        .expect("run rustup which");
+
+    assert!(
+        output.status.success(),
+        "rustup which failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    PathBuf::from(String::from_utf8(output.stdout).expect("utf8 path").trim())
 }
 
 fn assert_success(project: &Path, args: &[&str]) {
