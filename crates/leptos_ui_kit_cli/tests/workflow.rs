@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -22,6 +22,7 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
     assert_success(&project, &["add", "button"]);
     assert_success(&project, &["doctor", "--strict", "--json"]);
+    assert_cargo_subcommand_success(&project, &["doctor", "--strict", "--json"]);
     assert_cargo_check(&project);
 
     assert!(project.join("src/components/ui/button.rs").is_file());
@@ -95,10 +96,42 @@ fn assert_success(project: &Path, args: &[&str]) {
     );
 }
 
+fn assert_cargo_subcommand_success(project: &Path, args: &[&str]) {
+    let bin = cargo_cli_bin();
+    let bin_dir = bin.parent().expect("cargo cli bin parent");
+    let mut paths = vec![bin_dir.to_path_buf()];
+    if let Some(path) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&path));
+    }
+    let path = env::join_paths(paths).expect("join path");
+
+    let output = Command::new("cargo")
+        .current_dir(project)
+        .env("PATH", path)
+        .arg("leptos_ui_kit")
+        .args(args)
+        .output()
+        .expect("run cargo leptos_ui_kit");
+
+    assert!(
+        output.status.success(),
+        "cargo leptos_ui_kit {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn cli_bin() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_leptos_ui_kit")
         .map(PathBuf::from)
         .expect("CARGO_BIN_EXE_leptos_ui_kit should be set by Cargo")
+}
+
+fn cargo_cli_bin() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_cargo-leptos_ui_kit")
+        .map(PathBuf::from)
+        .expect("CARGO_BIN_EXE_cargo-leptos_ui_kit should be set by Cargo")
 }
 
 fn fixture_root() -> PathBuf {

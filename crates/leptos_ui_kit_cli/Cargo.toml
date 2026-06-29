@@ -13,6 +13,10 @@ rust-version.workspace = true
 name = "leptos_ui_kit"
 path = "src/main.rs"
 
+[[bin]]
+name = "cargo-leptos_ui_kit"
+path = "src/bin/cargo-leptos_ui_kit.rs"
+
 [dependencies]
 leptos_ui_kit_codegen.workspace = true
 leptos_ui_kit_registry.workspace = true
