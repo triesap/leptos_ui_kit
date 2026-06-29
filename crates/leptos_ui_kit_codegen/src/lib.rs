@@ -11,9 +11,10 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    ComponentsConfig, ConfigError, RegistryError, SCHEMA_VERSION, canonical_components_json,
-    components_config_to_json, components_config_with_desired_item, desired_builtin_button_item,
-    load_built_in_registry_item, parse_components_json_str, read_built_in_registry_source,
+    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, SCHEMA_VERSION,
+    canonical_components_json, components_config_to_json, components_config_with_desired_item,
+    desired_builtin_button_item, load_built_in_registry_item, parse_components_json_str,
+    read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -247,6 +248,7 @@ pub struct AddPlan {
     pub item_id: String,
     pub item_name: String,
     pub content_hash: String,
+    pub cargo_plan: Vec<CargoPlanEntry>,
     pub files: Vec<PlannedFile>,
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
@@ -264,6 +266,7 @@ impl AddPlan {
 pub struct SyncPlan {
     pub project_root: PathBuf,
     pub item_ids: Vec<String>,
+    pub cargo_plan: Vec<CargoPlanEntry>,
     pub files: Vec<PlannedFile>,
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
@@ -533,6 +536,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         item_id,
         item_name,
         content_hash,
+        cargo_plan: sync.cargo_plan,
         files: sync.files,
         changes: sync.changes,
         diagnostics: sync.diagnostics,
@@ -586,12 +590,14 @@ fn plan_sync_from_config(
     let mut state = load_or_empty_state(project_root, config_hash.clone())?;
     state.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
+    let mut cargo_plan = Vec::new();
 
     for desired_item in &config.items {
         let item = load_built_in_registry_item(desired_item.item_name())?;
         let item_id =
             plan_built_in_item(project_root, &mut files, &mut changes, &mut state, &item)?;
         item_ids.push(item_id);
+        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
     }
 
     state.validate()?;
@@ -615,11 +621,24 @@ fn plan_sync_from_config(
     Ok(SyncPlan {
         project_root: project_root.to_path_buf(),
         item_ids,
+        cargo_plan,
         files,
         changes,
         diagnostics,
         state,
     })
+}
+
+fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
+    for entry in entries {
+        let mut entry = entry.clone();
+        entry.features.sort();
+        entry.features.dedup();
+        if !plan.contains(&entry) {
+            plan.push(entry);
+        }
+    }
+    plan.sort();
 }
 
 fn plan_built_in_item(
@@ -1916,6 +1935,12 @@ mod tests {
             plan.state.style_blocks_by_id.get("button"),
             Some(&"builtin:button".to_owned())
         );
+        assert_eq!(plan.cargo_plan.len(), 2);
+        assert!(
+            plan.cargo_plan
+                .iter()
+                .any(|entry| entry.crate_name == "leptos" && entry.features == ["csr".to_owned()])
+        );
     }
 
     #[test]
@@ -1943,6 +1968,7 @@ mod tests {
         assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.rs"));
         assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.css"));
         assert!(paths.contains(&".leptos-ui/state.json"));
+        assert_eq!(plan.cargo_plan.len(), 2);
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert!(
             !root

@@ -16,7 +16,8 @@ use leptos_ui_kit_codegen::{
     plan_sync,
 };
 use leptos_ui_kit_registry::{
-    ComponentsConfig, DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
+    CargoPlanEntry, ComponentsConfig, DependencyRequirement, DependencyStatus, InfoOutput,
+    ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
     load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
 };
 use serde::Serialize;
@@ -468,6 +469,7 @@ fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
+    append_cargo_plan_text(&mut output, &plan.cargo_plan);
     Ok(output)
 }
 
@@ -489,7 +491,42 @@ fn render_sync_plan(plan: &SyncPlan, json: bool, status: CommandStatus) -> Resul
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
+    append_cargo_plan_text(&mut output, &plan.cargo_plan);
     Ok(output)
+}
+
+fn append_cargo_plan_text(output: &mut String, cargo_plan: &[CargoPlanEntry]) {
+    if cargo_plan.is_empty() {
+        return;
+    }
+
+    output.push_str("\nrequired cargo dependencies:");
+    for entry in cargo_plan {
+        output.push_str(&format!("\n- {}", cargo_plan_entry_label(entry)));
+    }
+}
+
+fn cargo_plan_entry_label(entry: &CargoPlanEntry) -> String {
+    let source = match entry.source.kind {
+        leptos_ui_kit_registry::CargoPlanSourceKind::Version => entry
+            .source
+            .version
+            .as_deref()
+            .map(|version| format!("version {version}"))
+            .unwrap_or_else(|| "version <missing>".to_owned()),
+        leptos_ui_kit_registry::CargoPlanSourceKind::Git => {
+            let url = entry.source.url.as_deref().unwrap_or("<missing-url>");
+            let rev = entry.source.rev.as_deref().unwrap_or("<missing-rev>");
+            format!("git {url} rev {rev}")
+        }
+    };
+    let features = if entry.features.is_empty() {
+        String::new()
+    } else {
+        format!(" features [{}]", entry.features.join(", "))
+    };
+
+    format!("{} ({source}){features}", entry.crate_name)
 }
 
 fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Result<String, String> {
@@ -641,6 +678,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
             );
 
             checks.extend(state_checks(cwd, strict, info.components_config.as_ref()));
+            checks.extend(registry_dependency_checks(cwd, strict, &info));
         }
         Err(error) => {
             checks.push(DoctorCheck::fail("project", error.to_string()));
@@ -832,6 +870,96 @@ fn state_checks(
     checks.extend(git_metadata_checks(cwd, strict, &state));
 
     checks
+}
+
+fn registry_dependency_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
+    let cargo_plan = registry_cargo_plan(cwd, info);
+    if cargo_plan.is_empty() {
+        return Vec::new();
+    }
+
+    match detect_cargo_plan_requirements(cwd, &cargo_plan) {
+        Ok(requirements) => requirements
+            .iter()
+            .map(|requirement| registry_dependency_check(strict, requirement))
+            .collect(),
+        Err(error) => vec![DoctorCheck::fail(
+            "dependency.registry",
+            format!("failed to inspect registry dependency plan: {error}"),
+        )],
+    }
+}
+
+fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
+    let mut cargo_plan = Vec::new();
+
+    if let Some(config) = info.components_config.as_ref() {
+        for item in &config.items {
+            if let Ok(registry_item) = load_built_in_registry_item(item.item_name()) {
+                merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
+            }
+        }
+    }
+
+    if cargo_plan.is_empty() {
+        if let Some(state) = read_installed_state(cwd) {
+            for item in state.items.values() {
+                if let Ok(registry_item) = load_built_in_registry_item(&item.name) {
+                    merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
+                }
+            }
+        }
+    }
+
+    cargo_plan
+}
+
+fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
+    for entry in entries {
+        let mut entry = entry.clone();
+        entry.features.sort();
+        entry.features.dedup();
+        if !plan.contains(&entry) {
+            plan.push(entry);
+        }
+    }
+    plan.sort();
+}
+
+fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) -> DoctorCheck {
+    let name = format!("dependency.registry.{}", requirement.crate_name);
+    match requirement.status {
+        DependencyStatus::Satisfied => DoctorCheck::pass(
+            name,
+            format!(
+                "{} dependency satisfies registry plan",
+                requirement.crate_name
+            ),
+        ),
+        DependencyStatus::Missing if !requirement.required => DoctorCheck::pass(
+            name,
+            format!(
+                "optional {} dependency is not present",
+                requirement.crate_name
+            ),
+        ),
+        DependencyStatus::Missing => strict_check(
+            strict,
+            name,
+            format!(
+                "{} dependency required by registry plan is missing",
+                requirement.crate_name
+            ),
+        ),
+        DependencyStatus::Incompatible => strict_check(
+            strict,
+            name,
+            format!(
+                "{} dependency does not satisfy registry plan",
+                requirement.crate_name
+            ),
+        ),
+    }
 }
 
 fn compare_config_hash(cwd: &Path, strict: bool, state: &InstallState) -> DoctorCheck {
@@ -1288,6 +1416,9 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"name\": \"button\""));
         assert!(output.contains("\"source_kind\": \"built-in\""));
         assert!(output.contains("\"kind\": \"ui\""));
+        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"source\""));
+        assert!(output.contains("\"features\""));
     }
 
     #[test]
@@ -1382,6 +1513,8 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"add\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemName\": \"button\""));
+        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
         assert!(output.contains("\"path\": \".leptos-ui/baselines/builtin-button/button.rs\""));
         assert!(!root.join("src/components/ui/button.rs").exists());
@@ -1449,6 +1582,8 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemIds\": ["));
         assert!(output.contains("\"builtin:button\""));
+        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"crate\": \"leptos_router\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
     }
 
@@ -1521,6 +1656,8 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"success\""));
         assert!(output.contains("\"name\": \"registry\""));
         assert!(output.contains("\"status\": \"pass\""));
+        assert!(output.contains("\"name\": \"dependency.registry.leptos\""));
+        assert!(output.contains("\"name\": \"dependency.registry.leptos_router\""));
     }
 
     #[test]

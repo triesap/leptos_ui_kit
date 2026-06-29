@@ -17,16 +17,19 @@ pub use config::{
     normalize_single_crate_project, parse_components_json_str,
 };
 pub use detect::{
-    DependencyPlan, DependencyRequirement, DependencyStatus, DetectedProject, DetectionError,
-    InfoOutput, build_info_output, detect_single_crate_project,
+    DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,
+    DetectedProject, DetectionError, InfoOutput, build_info_output,
+    dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
+    detect_single_crate_project,
 };
 pub use item::{
-    CargoPlanEntry, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError,
-    RegistryFileTarget, RegistryFileTargetKind, RegistryItem, RegistryItemFile, RegistryItemKind,
-    RegistryItemStyle, RegistryLeptos, RegistryRoot, RegistryRootItem, RegistrySourceKind,
-    RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
-    ResolvedStyleBlockTarget, ResolvedUiTarget, load_built_in_registry_item,
-    load_built_in_registry_root, load_registry_item, parse_registry_item_str,
-    parse_registry_root_str, read_built_in_registry_source, registry_item_content_hash,
-    resolve_built_in_registry_items, resolve_registry_targets, validate_registry_graph,
+    CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, REGISTRY_ITEM_SCHEMA_URL,
+    REGISTRY_SCHEMA_URL, RegistryError, RegistryFileTarget, RegistryFileTargetKind, RegistryItem,
+    RegistryItemFile, RegistryItemKind, RegistryItemStyle, RegistryLeptos, RegistryRoot,
+    RegistryRootItem, RegistrySourceKind, RegistryStyleTarget, RegistryStyleTargetKind,
+    ResolvedRegistryItem, ResolvedRegistryTargets, ResolvedStyleBlockTarget, ResolvedUiTarget,
+    WEB_UI_PRIMITIVES_GIT_URL, load_built_in_registry_item, load_built_in_registry_root,
+    load_registry_item, parse_registry_item_str, parse_registry_root_str,
+    read_built_in_registry_source, registry_item_content_hash, resolve_built_in_registry_items,
+    resolve_registry_targets, validate_registry_graph,
 };

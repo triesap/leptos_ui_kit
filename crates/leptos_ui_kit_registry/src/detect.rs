@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
 
 use crate::{
-    ComponentsConfig, ConfigError, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions,
-    NormalizedProjectConfig, RenderMode, WorkspaceMode, normalize_single_crate_project,
-    parse_components_json_str,
+    CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ComponentsConfig, ConfigError,
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig, RenderMode,
+    WorkspaceMode, normalize_single_crate_project, parse_components_json_str,
 };
 
 #[derive(Debug)]
@@ -89,9 +89,24 @@ pub struct DependencyPlan {
 
 impl DependencyPlan {
     fn from_manifest(manifest: &TomlValue) -> Self {
-        let leptos = dependency_requirement(manifest, "leptos", LEPTOS_VERSION, true);
-        let leptos_router =
-            dependency_requirement(manifest, "leptos_router", LEPTOS_ROUTER_VERSION, false);
+        let leptos = dependency_requirement_for_cargo_plan(
+            manifest,
+            &CargoPlanEntry {
+                crate_name: "leptos".to_owned(),
+                source: CargoPlanSource::version(LEPTOS_VERSION),
+                features: vec!["csr".to_owned()],
+                required: true,
+            },
+        );
+        let leptos_router = dependency_requirement_for_cargo_plan(
+            manifest,
+            &CargoPlanEntry {
+                crate_name: "leptos_router".to_owned(),
+                source: CargoPlanSource::version(LEPTOS_ROUTER_VERSION),
+                features: Vec::new(),
+                required: true,
+            },
+        );
 
         Self {
             leptos,
@@ -103,10 +118,20 @@ impl DependencyPlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyRequirement {
     pub crate_name: String,
-    pub required_version: String,
-    pub found_version: Option<String>,
+    pub required: bool,
+    pub required_source: CargoPlanSource,
+    pub required_features: Vec<String>,
+    pub found_source: Option<DetectedDependencySource>,
     pub features: Vec<String>,
     pub status: DependencyStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedDependencySource {
+    pub kind: CargoPlanSourceKind,
+    pub version: Option<String>,
+    pub url: Option<String>,
+    pub rev: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +263,25 @@ pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionErr
     })
 }
 
+pub fn detect_cargo_plan_requirements(
+    project_root: &Path,
+    cargo_plan: &[CargoPlanEntry],
+) -> Result<Vec<DependencyRequirement>, DetectionError> {
+    let cargo_manifest_path = project_root.join("Cargo.toml");
+    if !cargo_manifest_path.is_file() {
+        return Err(DetectionError::MissingCargoManifest(cargo_manifest_path));
+    }
+
+    let cargo_toml = read_to_string(&cargo_manifest_path)?;
+    let manifest: TomlValue =
+        toml::from_str(&cargo_toml).map_err(DetectionError::CargoTomlParse)?;
+
+    Ok(cargo_plan
+        .iter()
+        .map(|entry| dependency_requirement_for_cargo_plan(&manifest, entry))
+        .collect())
+}
+
 fn detect_render_mode(dependency_plan: &DependencyPlan) -> Option<RenderMode> {
     if dependency_plan
         .leptos
@@ -251,51 +295,104 @@ fn detect_render_mode(dependency_plan: &DependencyPlan) -> Option<RenderMode> {
     None
 }
 
-fn dependency_requirement(
+pub fn dependency_requirement_for_cargo_plan(
     manifest: &TomlValue,
-    crate_name: &str,
-    required_version: &str,
-    require_csr_feature: bool,
+    entry: &CargoPlanEntry,
 ) -> DependencyRequirement {
     let dependency = manifest
         .get("dependencies")
         .and_then(TomlValue::as_table)
-        .and_then(|dependencies| dependencies.get(crate_name));
+        .and_then(|dependencies| dependencies.get(&entry.crate_name));
 
-    let found_version = dependency
-        .and_then(dependency_version)
-        .map(ToOwned::to_owned);
+    let found_source = dependency.and_then(dependency_source);
     let features = dependency.and_then(dependency_features).unwrap_or_default();
 
-    let status = match found_version.as_deref() {
-        None => DependencyStatus::Missing,
-        Some(version)
-            if version == required_version
-                && (!require_csr_feature || features.iter().any(|feature| feature == "csr"))
-                && !features
-                    .iter()
-                    .any(|feature| matches!(feature.as_str(), "hydrate" | "ssr" | "islands")) =>
-        {
-            DependencyStatus::Satisfied
-        }
-        Some(_) => DependencyStatus::Incompatible,
+    let status = if dependency.is_none() {
+        DependencyStatus::Missing
+    } else if found_source
+        .as_ref()
+        .is_some_and(|source| source_matches_requirement(source, &entry.source))
+        && required_features_are_present(&features, &entry.features)
+        && !has_conflicting_features(&entry.crate_name, &features)
+    {
+        DependencyStatus::Satisfied
+    } else {
+        DependencyStatus::Incompatible
     };
 
     DependencyRequirement {
-        crate_name: crate_name.to_owned(),
-        required_version: required_version.to_owned(),
-        found_version,
+        crate_name: entry.crate_name.clone(),
+        required: entry.required,
+        required_source: entry.source.clone(),
+        required_features: entry.features.clone(),
+        found_source,
         features,
         status,
     }
 }
 
-fn dependency_version(value: &TomlValue) -> Option<&str> {
+fn dependency_source(value: &TomlValue) -> Option<DetectedDependencySource> {
     match value {
-        TomlValue::String(version) => Some(version),
-        TomlValue::Table(table) => table.get("version").and_then(TomlValue::as_str),
+        TomlValue::String(version) => Some(DetectedDependencySource {
+            kind: CargoPlanSourceKind::Version,
+            version: Some(version.to_owned()),
+            url: None,
+            rev: None,
+        }),
+        TomlValue::Table(table) => {
+            if let Some(url) = table.get("git").and_then(TomlValue::as_str) {
+                return Some(DetectedDependencySource {
+                    kind: CargoPlanSourceKind::Git,
+                    version: None,
+                    url: Some(url.to_owned()),
+                    rev: table
+                        .get("rev")
+                        .and_then(TomlValue::as_str)
+                        .map(ToOwned::to_owned),
+                });
+            }
+
+            table
+                .get("version")
+                .and_then(TomlValue::as_str)
+                .map(|version| DetectedDependencySource {
+                    kind: CargoPlanSourceKind::Version,
+                    version: Some(version.to_owned()),
+                    url: None,
+                    rev: None,
+                })
+        }
         _ => None,
     }
+}
+
+fn source_matches_requirement(
+    found: &DetectedDependencySource,
+    required: &CargoPlanSource,
+) -> bool {
+    match required.kind {
+        CargoPlanSourceKind::Version => {
+            found.kind == CargoPlanSourceKind::Version && found.version == required.version
+        }
+        CargoPlanSourceKind::Git => {
+            found.kind == CargoPlanSourceKind::Git
+                && found.url == required.url
+                && found.rev == required.rev
+        }
+    }
+}
+
+fn required_features_are_present(found: &[String], required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|feature| found.iter().any(|found| found == feature))
+}
+
+fn has_conflicting_features(crate_name: &str, features: &[String]) -> bool {
+    crate_name == "leptos"
+        && features
+            .iter()
+            .any(|feature| matches!(feature.as_str(), "hydrate" | "ssr" | "islands"))
 }
 
 fn dependency_features(value: &TomlValue) -> Option<Vec<String>> {
@@ -488,6 +585,47 @@ edition = "2024"
             DependencyStatus::Incompatible
         );
         assert_eq!(detected.render_mode, None);
+    }
+
+    #[test]
+    fn dependency_requirement_reports_satisfied_git_rev_dependency() {
+        let manifest: TomlValue = toml::from_str(
+            r#"[dependencies]
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "2db87f18dbcfeadc255faa16165c7bbf332b019c", features = ["leptos"] }
+"#,
+        )
+        .expect("parse manifest");
+        let entry = CargoPlanEntry {
+            crate_name: "web_ui_primitives".to_owned(),
+            source: CargoPlanSource::git(
+                "https://github.com/triesap/web_ui_primitives",
+                "2db87f18dbcfeadc255faa16165c7bbf332b019c",
+            ),
+            features: vec!["leptos".to_owned()],
+            required: true,
+        };
+
+        let requirement = dependency_requirement_for_cargo_plan(&manifest, &entry);
+
+        assert_eq!(requirement.status, DependencyStatus::Satisfied);
+    }
+
+    #[test]
+    fn dependency_requirement_reports_missing_required_git_dependency() {
+        let manifest: TomlValue = toml::from_str("[dependencies]\n").expect("parse manifest");
+        let entry = CargoPlanEntry {
+            crate_name: "web_ui_primitives".to_owned(),
+            source: CargoPlanSource::git(
+                "https://github.com/triesap/web_ui_primitives",
+                "2db87f18dbcfeadc255faa16165c7bbf332b019c",
+            ),
+            features: vec!["leptos".to_owned()],
+            required: true,
+        };
+
+        let requirement = dependency_requirement_for_cargo_plan(&manifest, &entry);
+
+        assert_eq!(requirement.status, DependencyStatus::Missing);
     }
 
     #[test]

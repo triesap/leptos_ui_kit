@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION};
 
+pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
+
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
 pub const REGISTRY_ITEM_SCHEMA_URL: &str =
@@ -288,29 +290,148 @@ pub enum RegistryStyleTargetKind {
     ManagedCssBlock,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CargoPlanEntry {
     #[serde(rename = "crate")]
     pub crate_name: String,
-    pub version: String,
+    pub source: CargoPlanSource,
+    #[serde(default)]
+    pub features: Vec<String>,
     pub required: bool,
 }
 
 impl CargoPlanEntry {
     fn validate(&self) -> Result<(), RegistryError> {
+        self.source.validate()?;
+        validate_features("cargoPlan[].features", &self.features)?;
+
         match self.crate_name.as_str() {
-            "leptos" => expect_string("cargoPlan[].version", LEPTOS_VERSION, &self.version),
+            "leptos" => {
+                self.source
+                    .expect_version("cargoPlan[].source.version", LEPTOS_VERSION)?;
+                expect_features("cargoPlan[].features", &["csr"], &self.features)
+            }
             "leptos_router" => {
-                expect_string("cargoPlan[].version", LEPTOS_ROUTER_VERSION, &self.version)
+                self.source
+                    .expect_version("cargoPlan[].source.version", LEPTOS_ROUTER_VERSION)?;
+                expect_features("cargoPlan[].features", &[], &self.features)
+            }
+            "web_ui_primitives" => {
+                self.source
+                    .expect_git_url("cargoPlan[].source.url", WEB_UI_PRIMITIVES_GIT_URL)?;
+                expect_features("cargoPlan[].features", &["leptos"], &self.features)
             }
             value => Err(RegistryError::InvalidValue {
                 field: "cargoPlan[].crate",
-                expected: "leptos or leptos_router".to_owned(),
+                expected: "leptos, leptos_router, or web_ui_primitives".to_owned(),
                 actual: value.to_owned(),
             }),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CargoPlanSource {
+    pub kind: CargoPlanSourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+}
+
+impl CargoPlanSource {
+    pub fn version(version: impl Into<String>) -> Self {
+        Self {
+            kind: CargoPlanSourceKind::Version,
+            version: Some(version.into()),
+            url: None,
+            rev: None,
+        }
+    }
+
+    pub fn git(url: impl Into<String>, rev: impl Into<String>) -> Self {
+        Self {
+            kind: CargoPlanSourceKind::Git,
+            version: None,
+            url: Some(url.into()),
+            rev: Some(rev.into()),
+        }
+    }
+
+    fn validate(&self) -> Result<(), RegistryError> {
+        match self.kind {
+            CargoPlanSourceKind::Version => {
+                if self.url.is_some() || self.rev.is_some() {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source",
+                        expected: "version source without url or rev".to_owned(),
+                        actual: format!("{self:?}"),
+                    });
+                }
+                if self.version.as_deref().is_none_or(str::is_empty) {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source.version",
+                        expected: "non-empty version".to_owned(),
+                        actual: String::new(),
+                    });
+                }
+                Ok(())
+            }
+            CargoPlanSourceKind::Git => {
+                if self.version.is_some() {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source",
+                        expected: "git source without version".to_owned(),
+                        actual: format!("{self:?}"),
+                    });
+                }
+                if self.url.as_deref().is_none_or(str::is_empty) {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source.url",
+                        expected: "non-empty git url".to_owned(),
+                        actual: String::new(),
+                    });
+                }
+                let rev = self.rev.as_deref().unwrap_or_default();
+                validate_git_rev("cargoPlan[].source.rev", rev)
+            }
+        }
+    }
+
+    fn expect_version(&self, field: &'static str, expected: &str) -> Result<(), RegistryError> {
+        match (self.kind, self.version.as_deref()) {
+            (CargoPlanSourceKind::Version, Some(version)) => {
+                expect_string(field, expected, version)
+            }
+            _ => Err(RegistryError::InvalidValue {
+                field,
+                expected: expected.to_owned(),
+                actual: format!("{self:?}"),
+            }),
+        }
+    }
+
+    fn expect_git_url(&self, field: &'static str, expected: &str) -> Result<(), RegistryError> {
+        match (self.kind, self.url.as_deref()) {
+            (CargoPlanSourceKind::Git, Some(url)) => expect_string(field, expected, url),
+            _ => Err(RegistryError::InvalidValue {
+                field,
+                expected: expected.to_owned(),
+                actual: format!("{self:?}"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CargoPlanSourceKind {
+    Version,
+    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +783,65 @@ fn validate_safe_file_name(field: &'static str, value: &str) -> Result<(), Regis
     Ok(())
 }
 
+fn validate_features(field: &'static str, features: &[String]) -> Result<(), RegistryError> {
+    let mut seen = BTreeSet::new();
+    for feature in features {
+        if feature.is_empty()
+            || !feature.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'-' | b'+' | b'.' | b'/' | b':')
+            })
+        {
+            return Err(RegistryError::InvalidValue {
+                field,
+                expected: "ASCII Cargo feature names".to_owned(),
+                actual: feature.clone(),
+            });
+        }
+
+        if !seen.insert(feature) {
+            return Err(RegistryError::InvalidValue {
+                field,
+                expected: "deduplicated Cargo feature names".to_owned(),
+                actual: feature.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn expect_features(
+    field: &'static str,
+    expected: &[&str],
+    actual: &[String],
+) -> Result<(), RegistryError> {
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    let actual = actual.iter().map(String::as_str).collect::<BTreeSet<_>>();
+
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(RegistryError::InvalidValue {
+            field,
+            expected: expected.into_iter().collect::<Vec<_>>().join(", "),
+            actual: actual.into_iter().collect::<Vec<_>>().join(", "),
+        })
+    }
+}
+
+fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), RegistryError> {
+    if (7..=40).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(RegistryError::InvalidValue {
+            field,
+            expected: "7 to 40 hex characters".to_owned(),
+            actual: rev.to_owned(),
+        })
+    }
+}
+
 fn looks_like_local_path(source: &str) -> bool {
     source.ends_with(".json")
         || source.contains(std::path::MAIN_SEPARATOR)
@@ -772,6 +952,85 @@ mod tests {
             }"#,
         )
         .expect_err("unknown field should fail");
+
+        assert!(error.is_data());
+    }
+
+    #[test]
+    fn accepts_web_ui_primitives_git_cargo_plan_entry() {
+        let item = parse_registry_item_str(
+            r#"{
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+              "schemaVersion": "0.9.0-alpha",
+              "name": "button",
+              "kind": "ui",
+              "version": "0.9.0-alpha",
+              "title": "Button",
+              "description": "A pure-CSS Leptos button component.",
+              "leptos": {
+                "version": "0.9.0-alpha",
+                "routerVersion": "0.9.0-alpha",
+                "renderMode": "csr"
+              },
+              "files": [],
+              "styles": [],
+              "registryDependencies": [],
+              "cargoPlan": [
+                {
+                  "crate": "web_ui_primitives",
+                  "source": {
+                    "kind": "git",
+                    "url": "https://github.com/triesap/web_ui_primitives",
+                    "rev": "2db87f18dbcfeadc255faa16165c7bbf332b019c"
+                  },
+                  "features": ["leptos"],
+                  "required": true
+                }
+              ],
+              "extra": {}
+            }"#,
+        )
+        .expect("parse item");
+
+        item.validate().expect("validate item");
+    }
+
+    #[test]
+    fn rejects_unknown_cargo_plan_source_field() {
+        let error = parse_registry_item_str(
+            r#"{
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+              "schemaVersion": "0.9.0-alpha",
+              "name": "button",
+              "kind": "ui",
+              "version": "0.9.0-alpha",
+              "title": "Button",
+              "description": "A pure-CSS Leptos button component.",
+              "leptos": {
+                "version": "0.9.0-alpha",
+                "routerVersion": "0.9.0-alpha",
+                "renderMode": "csr"
+              },
+              "files": [],
+              "styles": [],
+              "registryDependencies": [],
+              "cargoPlan": [
+                {
+                  "crate": "web_ui_primitives",
+                  "source": {
+                    "kind": "git",
+                    "url": "https://github.com/triesap/web_ui_primitives",
+                    "rev": "2db87f18dbcfeadc255faa16165c7bbf332b019c",
+                    "branch": "main"
+                  },
+                  "features": ["leptos"],
+                  "required": true
+                }
+              ],
+              "extra": {}
+            }"#,
+        )
+        .expect_err("unknown source field should fail");
 
         assert!(error.is_data());
     }
