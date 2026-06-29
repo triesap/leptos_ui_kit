@@ -3,16 +3,118 @@
 use std::{
     env,
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process,
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, InitPlan, apply_add, apply_init, plan_add, plan_init,
+    AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
+    apply_add, apply_init, parse_install_state_str, plan_add, plan_init,
 };
 use leptos_ui_kit_registry::{
-    InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
+    DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
+    load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
 };
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InfoCommandOutput {
+    #[serde(flatten)]
+    info: InfoOutput,
+    registry_available: bool,
+    installed_state: Option<InstallState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryItemSourceOutput {
+    resolved: ResolvedRegistryItem,
+    sources: Vec<RegistrySourceContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistrySourceContent {
+    path: String,
+    kind: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorOutput {
+    project_root: PathBuf,
+    strict: bool,
+    checks: Vec<DoctorCheck>,
+}
+
+impl DoctorOutput {
+    fn has_failures(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|check| check.status == DoctorCheckStatus::Fail)
+    }
+
+    fn has_warnings(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|check| check.status == DoctorCheckStatus::Warning)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheck {
+    name: String,
+    status: DoctorCheckStatus,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+impl DoctorCheck {
+    fn pass(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorCheckStatus::Pass,
+            message: message.into(),
+            path: None,
+        }
+    }
+
+    fn warning(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorCheckStatus::Warning,
+            message: message.into(),
+            path: None,
+        }
+    }
+
+    fn fail(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: DoctorCheckStatus::Fail,
+            message: message.into(),
+            path: None,
+        }
+    }
+
+    fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorCheckStatus {
+    Pass,
+    Warning,
+    Fail,
+}
 
 fn main() {
     if let Err(error) = run(env::args_os().skip(1).collect(), &current_dir()) {
@@ -28,6 +130,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
 
     match command {
         "add" => run_add(&args[1..], cwd),
+        "doctor" => run_doctor(&args[1..], cwd),
         "info" => run_info(&args[1..], cwd),
         "init" => run_init(&args[1..], cwd),
         "view" => run_view(&args[1..], cwd),
@@ -78,6 +181,35 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
     };
 
     println!("{}", render_add_plan(&plan, json, status)?);
+
+    Ok(())
+}
+
+fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut strict = false;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            "--strict" => strict = true,
+            "--check" | "--trunk-build" => {
+                return Err(format!("{value} will be implemented with build checks"));
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for doctor: {value}"));
+            }
+            _ => return Err("doctor does not accept positional arguments".to_owned()),
+        }
+    }
+
+    let output = build_doctor_output(cwd, strict);
+    let status = doctor_status(&output);
+    println!("{}", render_doctor_output(&output, json, status)?);
 
     Ok(())
 }
@@ -157,7 +289,8 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
 
 fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
-    let mut source: Option<String> = None;
+    let mut include_source = false;
+    let mut registry_source: Option<String> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
@@ -166,24 +299,25 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
 
         match value {
             "--json" => json = true,
+            "--source" => include_source = true,
             value if value.starts_with('-') => {
                 return Err(format!("unsupported flag for view: {value}"));
             }
             value => {
-                if source.is_some() {
+                if registry_source.is_some() {
                     return Err("view accepts exactly one registry source".to_owned());
                 }
 
-                source = Some(value.to_owned());
+                registry_source = Some(value.to_owned());
             }
         }
     }
 
-    let source = source.ok_or_else(|| "view requires a registry source".to_owned())?;
+    let source = registry_source.ok_or_else(|| "view requires a registry source".to_owned())?;
     let item = load_registry_item(&source, cwd)
         .map_err(|error| format!("failed to load registry item {source}: {error}"))?;
 
-    println!("{}", render_registry_item(&item, json)?);
+    println!("{}", render_registry_item(&item, json, include_source)?);
 
     Ok(())
 }
@@ -229,13 +363,19 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
+    let command_output = InfoCommandOutput {
+        info: output.clone(),
+        registry_available: load_built_in_registry_item("button").is_ok(),
+        installed_state: read_installed_state(&output.detected.project_root),
+    };
+
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("info", output))
+        return serde_json::to_string_pretty(&CommandEnvelope::success("info", &command_output))
             .map_err(|error| format!("failed to serialize info output: {error}"));
     }
 
     Ok(format!(
-        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}",
+        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_state: {}",
         output.detected.project_root.display(),
         output.detected.workspace_mode,
         output.detected.source_root.display(),
@@ -245,11 +385,37 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
             .detected
             .render_mode
             .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|| "unknown".to_owned())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        command_output.registry_available,
+        command_output.installed_state.is_some()
     ))
 }
 
-fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<String, String> {
+fn render_registry_item(
+    item: &ResolvedRegistryItem,
+    json: bool,
+    include_source: bool,
+) -> Result<String, String> {
+    if include_source {
+        let output = registry_item_source_output(item)?;
+        if json {
+            return serde_json::to_string_pretty(&CommandEnvelope::success("view", output))
+                .map_err(|error| format!("failed to serialize registry item source: {error}"));
+        }
+
+        let mut rendered = format!(
+            "name: {}\nkind: {}\ncontent_hash: {}",
+            output.resolved.item.name, output.resolved.item.kind, output.resolved.content_hash
+        );
+        for source in output.sources {
+            rendered.push_str(&format!(
+                "\n--- {} ({}) ---\n{}",
+                source.path, source.kind, source.content
+            ));
+        }
+        return Ok(rendered);
+    }
+
     if json {
         return serde_json::to_string_pretty(&CommandEnvelope::success("view", item))
             .map_err(|error| format!("failed to serialize registry item: {error}"));
@@ -264,8 +430,343 @@ fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<Strin
     ))
 }
 
+fn registry_item_source_output(
+    item: &ResolvedRegistryItem,
+) -> Result<RegistryItemSourceOutput, String> {
+    let mut sources = Vec::new();
+    for file in &item.targets.ui_files {
+        sources.push(RegistrySourceContent {
+            path: file.source.clone(),
+            kind: "rust".to_owned(),
+            content: read_built_in_registry_source(&file.source)
+                .map_err(|error| format!("failed to read {}: {error}", file.source))?,
+        });
+    }
+    for style in &item.targets.style_blocks {
+        sources.push(RegistrySourceContent {
+            path: style.source.clone(),
+            kind: "css".to_owned(),
+            content: read_built_in_registry_source(&style.source)
+                .map_err(|error| format!("failed to read {}: {error}", style.source))?,
+        });
+    }
+
+    Ok(RegistryItemSourceOutput {
+        resolved: item.clone(),
+        sources,
+    })
+}
+
+fn build_doctor_output(cwd: &Path, strict: bool) -> DoctorOutput {
+    let mut checks = Vec::new();
+
+    match build_info_output(cwd) {
+        Ok(info) => {
+            checks.push(DoctorCheck::pass(
+                "project",
+                "supported single-crate Trunk CSR project detected",
+            ));
+            if info.components_config.is_some() {
+                checks.push(DoctorCheck::pass("config", "components.json is valid"));
+            } else {
+                checks.push(strict_check(
+                    strict,
+                    "config",
+                    "components.json is missing; run leptos-ui init",
+                ));
+            }
+
+            dependency_check(
+                &mut checks,
+                strict,
+                "dependency.leptos",
+                "leptos",
+                info.detected.dependency_plan.leptos.status,
+            );
+            dependency_check(
+                &mut checks,
+                strict,
+                "dependency.leptos_router",
+                "leptos_router",
+                info.detected.dependency_plan.leptos_router.status,
+            );
+
+            checks.extend(state_checks(cwd, strict));
+        }
+        Err(error) => {
+            checks.push(DoctorCheck::fail("project", error.to_string()));
+        }
+    }
+
+    match load_built_in_registry_item("button") {
+        Ok(item) => {
+            let mut registry_ok = true;
+            for file in &item.targets.ui_files {
+                registry_ok &= read_built_in_registry_source(&file.source).is_ok();
+            }
+            for style in &item.targets.style_blocks {
+                registry_ok &= read_built_in_registry_source(&style.source).is_ok();
+            }
+            if registry_ok {
+                checks.push(DoctorCheck::pass(
+                    "registry",
+                    "built-in registry button assets are available",
+                ));
+            } else {
+                checks.push(DoctorCheck::fail(
+                    "registry",
+                    "built-in registry button assets are incomplete",
+                ));
+            }
+        }
+        Err(error) => {
+            checks.push(DoctorCheck::fail("registry", error.to_string()));
+        }
+    }
+
+    DoctorOutput {
+        project_root: cwd.to_path_buf(),
+        strict,
+        checks,
+    }
+}
+
+fn dependency_check(
+    checks: &mut Vec<DoctorCheck>,
+    strict: bool,
+    name: &str,
+    crate_name: &str,
+    status: DependencyStatus,
+) {
+    match status {
+        DependencyStatus::Satisfied => {
+            checks.push(DoctorCheck::pass(
+                name,
+                format!("{crate_name} dependency is satisfied"),
+            ));
+        }
+        DependencyStatus::Missing => checks.push(strict_check(
+            strict,
+            name,
+            format!("{crate_name} dependency is missing"),
+        )),
+        DependencyStatus::Incompatible => checks.push(strict_check(
+            strict,
+            name,
+            format!("{crate_name} dependency is incompatible"),
+        )),
+    }
+}
+
+fn strict_check(strict: bool, name: impl Into<String>, message: impl Into<String>) -> DoctorCheck {
+    if strict {
+        DoctorCheck::fail(name, message)
+    } else {
+        DoctorCheck::warning(name, message)
+    }
+}
+
+fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let state_path = cwd.join(".leptos-ui/state.json");
+    if !state_path.is_file() {
+        checks.push(strict_check(
+            strict,
+            "state",
+            ".leptos-ui/state.json is missing",
+        ));
+        return checks;
+    }
+
+    let state_input = match fs::read_to_string(&state_path) {
+        Ok(input) => input,
+        Err(error) => {
+            checks.push(
+                DoctorCheck::fail("state", format!("failed to read state: {error}"))
+                    .with_path(state_path.display().to_string()),
+            );
+            return checks;
+        }
+    };
+    let state = match parse_install_state_str(&state_input) {
+        Ok(state) => state,
+        Err(error) => {
+            checks.push(
+                DoctorCheck::fail("state", error.to_string())
+                    .with_path(state_path.display().to_string()),
+            );
+            return checks;
+        }
+    };
+
+    checks.push(DoctorCheck::pass("state", "install state is valid"));
+    for item in state.items.values() {
+        for file in &item.files {
+            let source_path = cwd.join(&file.path);
+            let baseline_path = cwd.join(&file.baseline_path);
+            checks.push(compare_file_to_baseline(
+                "installed_file",
+                &source_path,
+                &baseline_path,
+                strict,
+            ));
+        }
+        for block in &item.style_blocks {
+            let css_path = cwd.join(&block.css_path);
+            let baseline_path = cwd.join(&block.baseline_path);
+            checks.push(compare_css_block_to_baseline(
+                &css_path,
+                &block.block_id,
+                &baseline_path,
+                strict,
+            ));
+        }
+    }
+
+    checks
+}
+
+fn compare_file_to_baseline(
+    name: &str,
+    source_path: &Path,
+    baseline_path: &Path,
+    strict: bool,
+) -> DoctorCheck {
+    let source = match fs::read_to_string(source_path) {
+        Ok(source) => source,
+        Err(error) => {
+            return DoctorCheck::fail(name, format!("failed to read installed file: {error}"))
+                .with_path(source_path.display().to_string());
+        }
+    };
+    let baseline = match fs::read_to_string(baseline_path) {
+        Ok(baseline) => baseline,
+        Err(error) => {
+            return DoctorCheck::fail(name, format!("failed to read baseline: {error}"))
+                .with_path(baseline_path.display().to_string());
+        }
+    };
+    if source == baseline {
+        DoctorCheck::pass(name, "installed file matches baseline")
+            .with_path(source_path.display().to_string())
+    } else {
+        strict_check(strict, name, "installed file differs from baseline")
+            .with_path(source_path.display().to_string())
+    }
+}
+
+fn compare_css_block_to_baseline(
+    css_path: &Path,
+    block_id: &str,
+    baseline_path: &Path,
+    strict: bool,
+) -> DoctorCheck {
+    let css = match fs::read_to_string(css_path) {
+        Ok(css) => css,
+        Err(error) => {
+            return DoctorCheck::fail("style_block", format!("failed to read CSS: {error}"))
+                .with_path(css_path.display().to_string());
+        }
+    };
+    let baseline = match fs::read_to_string(baseline_path) {
+        Ok(baseline) => baseline,
+        Err(error) => {
+            return DoctorCheck::fail(
+                "style_block",
+                format!("failed to read CSS baseline: {error}"),
+            )
+            .with_path(baseline_path.display().to_string());
+        }
+    };
+    if css.contains(&baseline) {
+        DoctorCheck::pass(
+            "style_block",
+            format!("managed CSS block {block_id} matches baseline"),
+        )
+        .with_path(css_path.display().to_string())
+    } else {
+        strict_check(
+            strict,
+            "style_block",
+            format!("managed CSS block {block_id} differs from baseline"),
+        )
+        .with_path(css_path.display().to_string())
+    }
+}
+
+fn doctor_status(output: &DoctorOutput) -> CommandStatus {
+    if output.has_failures() {
+        CommandStatus::Error
+    } else if output.has_warnings() {
+        CommandStatus::Warning
+    } else {
+        CommandStatus::Success
+    }
+}
+
+fn render_doctor_output(
+    output: &DoctorOutput,
+    json: bool,
+    status: CommandStatus,
+) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(
+            &CommandEnvelope::new("doctor", status, output)
+                .with_diagnostics(doctor_diagnostics(output)),
+        )
+        .map_err(|error| format!("failed to serialize doctor output: {error}"));
+    }
+
+    let mut rendered = String::from("doctor checks:");
+    for check in &output.checks {
+        rendered.push_str(&format!(
+            "\n- {:?} {}: {}",
+            check.status, check.name, check.message
+        ));
+    }
+    Ok(rendered)
+}
+
+fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
+    output
+        .checks
+        .iter()
+        .filter_map(|check| match check.status {
+            DoctorCheckStatus::Pass => None,
+            DoctorCheckStatus::Warning => Some(Diagnostic::new(
+                DiagnosticLevel::Warning,
+                format!("doctor.{}", check.name),
+                check.message.clone(),
+            )),
+            DoctorCheckStatus::Fail => Some(Diagnostic::new(
+                DiagnosticLevel::Error,
+                format!("doctor.{}", check.name),
+                check.message.clone(),
+            )),
+        })
+        .map(|diagnostic| {
+            if let Some(path) = output
+                .checks
+                .iter()
+                .find(|check| format!("doctor.{}", check.name) == diagnostic.code)
+                .and_then(|check| check.path.clone())
+            {
+                diagnostic.with_path(path)
+            } else {
+                diagnostic
+            }
+        })
+        .collect()
+}
+
+fn read_installed_state(project_root: &Path) -> Option<InstallState> {
+    let path = project_root.join(".leptos-ui/state.json");
+    let input = fs::read_to_string(path).ok()?;
+    parse_install_state_str(&input).ok()
+}
+
 fn usage() -> String {
-    "usage: leptos-ui <add|info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
+    "usage: leptos-ui <add|doctor|info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
 }
 
 fn current_dir() -> PathBuf {
@@ -326,13 +827,23 @@ leptos_router = "0.9.0-alpha"
     #[test]
     fn view_envelope_json_outputs_built_in_registry_item() {
         let item = load_registry_item("button", Path::new(".")).expect("load built-in item");
-        let output = render_registry_item(&item, true).expect("render json");
+        let output = render_registry_item(&item, true, false).expect("render json");
 
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"view\""));
         assert!(output.contains("\"name\": \"button\""));
         assert!(output.contains("\"source_kind\": \"built-in\""));
         assert!(output.contains("\"kind\": \"ui\""));
+    }
+
+    #[test]
+    fn view_source_outputs_registry_source_contents() {
+        let item = load_registry_item("button", Path::new(".")).expect("load built-in item");
+        let output = render_registry_item(&item, true, true).expect("render json");
+
+        assert!(output.contains("\"sources\""));
+        assert!(output.contains("pub fn Button"));
+        assert!(output.contains(".luk-button"));
     }
 
     #[test]
@@ -449,5 +960,65 @@ leptos_router = "0.9.0-alpha"
         )
         .expect("render add");
         assert!(output.contains("\"status\": \"no_change\""));
+    }
+
+    #[test]
+    fn doctor_strict_json_passes_after_init_and_add() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        run(
+            vec![
+                OsString::from("doctor"),
+                OsString::from("--strict"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect("run doctor");
+        let doctor = build_doctor_output(root, true);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert!(output.contains("\"command\": \"doctor\""));
+        assert!(output.contains("\"status\": \"success\""));
+        assert!(output.contains("\"name\": \"registry\""));
+        assert!(output.contains("\"status\": \"pass\""));
+    }
+
+    #[test]
+    fn unsupported_flags_return_usage_errors() {
+        let error = run(
+            vec![
+                OsString::from("view"),
+                OsString::from("button"),
+                OsString::from("--tailwind"),
+            ],
+            Path::new("."),
+        )
+        .expect_err("tailwind flag should be unsupported");
+
+        assert!(error.contains("unsupported flag for view"));
     }
 }
