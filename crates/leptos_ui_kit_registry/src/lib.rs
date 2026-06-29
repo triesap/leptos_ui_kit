@@ -14,7 +14,8 @@ pub use config::{
     canonical_components_json, normalize_single_crate_project, parse_components_json_str,
 };
 pub use detect::{
-    DetectedProject, DetectionError, InfoOutput, build_info_output, detect_single_crate_project,
+    DependencyPlan, DependencyRequirement, DependencyStatus, DetectedProject, DetectionError,
+    InfoOutput, build_info_output, detect_single_crate_project,
 };
 pub use item::{
     RegistryError, RegistryItem, RegistryItemFile, RegistryItemType, RegistrySourceKind,
