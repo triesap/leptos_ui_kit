@@ -244,6 +244,44 @@ pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
     })
 }
 
+pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
+    let plan = plan_init(project_root)?;
+    let paths = plan
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths)?;
+
+    if plan.is_empty() {
+        return Ok(plan);
+    }
+
+    let _lock = WriteLock::acquire(project_root)?;
+
+    for file in plan
+        .files
+        .iter()
+        .filter(|file| file.path != ".leptos-ui/state.json")
+    {
+        write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
+    }
+
+    if let Some(state_file) = plan
+        .files
+        .iter()
+        .find(|file| file.path == ".leptos-ui/state.json")
+    {
+        write_file_atomic(
+            project_root,
+            &state_file.path,
+            state_file.content.as_bytes(),
+        )?;
+    }
+
+    Ok(plan)
+}
+
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
     let mut seen = std::collections::BTreeSet::new();
     for path in paths {
@@ -691,6 +729,50 @@ mod tests {
         let error = plan_init(root).expect_err("invalid config should fail");
 
         assert!(matches!(error, CodegenError::Config(_)));
+    }
+
+    #[test]
+    fn init_write_creates_expected_files_and_releases_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        let plan = apply_init(root).expect("apply init");
+
+        assert!(!plan.is_empty());
+        assert!(root.join("components.json").is_file());
+        assert!(root.join("styles/app.css").is_file());
+        assert!(root.join("src/components/mod.rs").is_file());
+        assert!(root.join("src/components/ui/mod.rs").is_file());
+        assert!(root.join(".leptos-ui/state.json").is_file());
+        assert!(!root.join(".leptos-ui/lock").exists());
+        assert!(
+            fs::read_to_string(root.join("index.html"))
+                .expect("read index")
+                .contains("styles/app.css")
+        );
+    }
+
+    #[test]
+    fn init_write_is_idempotent_when_files_are_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        apply_init(root).expect("first init");
+        let second = apply_init(root).expect("second init");
+
+        assert!(second.is_empty());
     }
 
     #[test]

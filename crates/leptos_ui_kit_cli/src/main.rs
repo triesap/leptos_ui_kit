@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use leptos_ui_kit_codegen::{CommandEnvelope, CommandStatus, InitPlan, plan_init};
+use leptos_ui_kit_codegen::{CommandEnvelope, CommandStatus, InitPlan, apply_init, plan_init};
 use leptos_ui_kit_registry::{
     InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
 };
@@ -84,14 +84,23 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    if !dry_run {
-        return Err("init write mode is not implemented yet; use --dry-run".to_owned());
-    }
+    let plan = if dry_run {
+        plan_init(cwd)
+            .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?
+    } else {
+        apply_init(cwd)
+            .map_err(|error| format!("failed to initialize {}: {error}", cwd.display()))?
+    };
 
-    let plan = plan_init(cwd)
-        .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?;
+    let status = if dry_run {
+        CommandStatus::Planned
+    } else if plan.is_empty() {
+        CommandStatus::NoChange
+    } else {
+        CommandStatus::Success
+    };
 
-    println!("{}", render_init_plan(&plan, json)?);
+    println!("{}", render_init_plan(&plan, json, status)?);
 
     Ok(())
 }
@@ -129,11 +138,10 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn render_init_plan(plan: &InitPlan, json: bool) -> Result<String, String> {
+fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("init", CommandStatus::Planned, plan)
-                .with_changes(plan.changes.clone()),
+            &CommandEnvelope::new("init", status, plan).with_changes(plan.changes.clone()),
         )
         .map_err(|error| format!("failed to serialize init plan: {error}"));
     }
@@ -277,10 +285,32 @@ leptos_router = "0.9.0-alpha"
         )
         .expect("run init dry-run");
 
-        let output = render_init_plan(&plan_init(root).expect("plan init"), true).expect("render");
+        let output = render_init_plan(
+            &plan_init(root).expect("plan init"),
+            true,
+            CommandStatus::Planned,
+        )
+        .expect("render");
         assert!(output.contains("\"command\": \"init\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"path\": \"components.json\""));
         assert!(!root.join("components.json").exists());
+    }
+
+    #[test]
+    fn init_write_creates_files() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        run(vec![OsString::from("init")], root).expect("run init");
+
+        assert!(root.join("components.json").is_file());
+        assert!(root.join(".leptos-ui/state.json").is_file());
     }
 }
