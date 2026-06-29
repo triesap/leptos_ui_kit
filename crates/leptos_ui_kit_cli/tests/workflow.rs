@@ -36,11 +36,11 @@ fn assert_success(project: &Path, args: &[&str]) {
         .current_dir(project)
         .args(args)
         .output()
-        .expect("run leptos-ui");
+        .expect("run leptos_ui_kit");
 
     assert!(
         output.status.success(),
-        "leptos-ui {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        "leptos_ui_kit {:?} failed\nstdout:\n{}\nstderr:\n{}",
         args,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -48,9 +48,9 @@ fn assert_success(project: &Path, args: &[&str]) {
 }
 
 fn cli_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_leptos-ui")
+    std::env::var_os("CARGO_BIN_EXE_leptos_ui_kit")
         .map(PathBuf::from)
-        .expect("CARGO_BIN_EXE_leptos-ui should be set by Cargo")
+        .expect("CARGO_BIN_EXE_leptos_ui_kit should be set by Cargo")
 }
 
 fn fixture_root() -> PathBuf {

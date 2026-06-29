@@ -6,7 +6,7 @@ This repository is the standalone public `triesap/leptos_ui_kit` Rust
 workspace.
 
 `leptos_ui_kit` is a source-first, pure-CSS UI kit for Leptos
-`0.9.0-alpha`. Its primary product is the `leptos-ui` CLI, which installs
+`0.9.0-alpha`. Its primary product is the `leptos_ui_kit` CLI, which installs
 editable, app-owned Leptos component source into supported apps. Treat it as a
 shadcn-style source installer for Leptos, not as a runtime component framework.
 
@@ -34,7 +34,7 @@ with pure CSS in `styles/app.css`.
 - `crates/leptos_ui_kit_codegen` owns dry-run planning, write transactions,
   path safety, CSS/module patching, install state, baselines, and command
   envelope types.
-- `crates/leptos_ui_kit_cli` owns the `leptos-ui` binary and command output.
+- `crates/leptos_ui_kit_cli` owns the `leptos_ui_kit` binary and command output.
 - `crates/leptos_ui_kit_registry/registry` contains packaged built-in registry
   items and source assets.
 - `schema/0.9.0-alpha` contains the public JSON schemas referenced by
@@ -64,16 +64,16 @@ change:
 
 ## CLI Contract
 
-The canonical binary name is `leptos-ui`.
+The canonical binary name is `leptos_ui_kit`.
 
 Supported MVP commands:
 
 ```bash
-leptos-ui info
-leptos-ui init
-leptos-ui view button
-leptos-ui add button
-leptos-ui doctor
+leptos_ui_kit info
+leptos_ui_kit init
+leptos_ui_kit view button
+leptos_ui_kit add button
+leptos_ui_kit doctor
 ```
 
 Write commands support `--dry-run`. Commands with structured output support
@@ -92,9 +92,8 @@ https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.jso
 ```
 
 Keep schema URL constants, packaged registry JSON, tests, and files under
-`schema/0.9.0-alpha` aligned. Do not reintroduce
-`https://leptos-ui-kit.dev/...` unless that domain exists and the user has
-approved the migration.
+`schema/0.9.0-alpha` aligned. Do not introduce non-GitHub Pages schema domains
+unless the domain exists and the user has approved the migration.
 
 The config model is strict. Unknown fields should fail. Legacy shadcn/Tailwind
 fields should fail.

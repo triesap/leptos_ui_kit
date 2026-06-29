@@ -1584,7 +1584,7 @@ mod tests {
                 .with_diagnostics(vec![
                     Diagnostic::new(DiagnosticLevel::Warning, "demo.warning", "heads up")
                         .with_path("components.json")
-                        .with_suggestion("Run leptos-ui init."),
+                        .with_suggestion("Run leptos_ui_kit init."),
                 ])
                 .with_changes(vec![
                     ChangeRecord::new(ChangeKind::CreateFile, "src/components/ui/button.rs", true)

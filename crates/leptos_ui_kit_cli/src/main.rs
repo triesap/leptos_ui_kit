@@ -545,7 +545,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 checks.push(strict_check(
                     strict,
                     "config",
-                    "components.json is missing; run leptos-ui init",
+                    "components.json is missing; run leptos_ui_kit init",
                 ));
             }
 
@@ -886,7 +886,8 @@ fn read_installed_state(project_root: &Path) -> Option<InstallState> {
 }
 
 fn usage() -> String {
-    "usage: leptos-ui <add|doctor|info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
+    "usage: leptos_ui_kit <add|doctor|info|init|view> [--json] [--dry-run] [path-or-source]"
+        .to_owned()
 }
 
 fn current_dir() -> PathBuf {
@@ -1238,7 +1239,7 @@ leptos_router = "0.9.0-alpha"
         let check = run_command_check(
             "build.fake",
             dir.path(),
-            "leptos-ui-kit-definitely-missing-tool",
+            "leptos_ui_kit_definitely_missing_tool",
             &["build"],
         );
 

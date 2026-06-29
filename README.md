@@ -1,7 +1,7 @@
 # leptos_ui_kit
 
 `leptos_ui_kit` is a source-first UI kit for Leptos `0.9.0-alpha`.
-It provides a `leptos-ui` CLI and a packaged registry for installing
+It provides a `leptos_ui_kit` CLI and a packaged registry for installing
 editable, app-owned component source into single-crate Trunk CSR apps.
 
 The MVP target is intentionally narrow:
@@ -29,11 +29,11 @@ pure CSS in `styles/app.css`.
 ## MVP Commands
 
 ```bash
-leptos-ui info
-leptos-ui init
-leptos-ui view button
-leptos-ui add button
-leptos-ui doctor
+leptos_ui_kit info
+leptos_ui_kit init
+leptos_ui_kit view button
+leptos_ui_kit add button
+leptos_ui_kit doctor
 ```
 
 Write commands support `--dry-run`. Commands that emit machine-readable output

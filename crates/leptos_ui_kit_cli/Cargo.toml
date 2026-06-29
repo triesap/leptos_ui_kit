@@ -10,7 +10,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "leptos-ui"
+name = "leptos_ui_kit"
 path = "src/main.rs"
 
 [dependencies]
