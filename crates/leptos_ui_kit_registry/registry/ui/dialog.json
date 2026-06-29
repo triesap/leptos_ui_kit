@@ -1,11 +1,11 @@
 {
   "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
   "schemaVersion": "0.9.0-alpha",
-  "name": "tabs",
+  "name": "dialog",
   "kind": "ui",
   "version": "0.9.0-alpha",
-  "title": "Tabs",
-  "description": "A primitive-backed Leptos tabs component family.",
+  "title": "Dialog",
+  "description": "A primitive-backed Leptos dialog component family.",
   "leptos": {
     "version": "0.9.0-alpha",
     "routerVersion": "0.9.0-alpha",
@@ -14,23 +14,23 @@
   "accessibility": {
     "behaviors": [
       {
-        "name": "tablist-role",
+        "name": "required-accessible-name",
         "required": true
       },
       {
-        "name": "tab-trigger-state",
+        "name": "modal-focus-trap",
         "required": true
       },
       {
-        "name": "tabpanel-linkage",
+        "name": "escape-and-outside-dismissal",
         "required": true
       },
       {
-        "name": "roving-tabindex",
+        "name": "return-focus",
         "required": true
       },
       {
-        "name": "keyboard-focus-policy",
+        "name": "presence-exit-state",
         "required": true
       }
     ],
@@ -38,61 +38,76 @@
   },
   "files": [
     {
-      "source": "ui/tabs/mod.rs",
+      "source": "ui/dialog/mod.rs",
       "target": {
         "kind": "ui",
-        "path": "tabs/mod.rs",
+        "path": "dialog/mod.rs",
         "exports": [
-          "TabsActivation",
-          "TabsDirection",
-          "TabsList",
-          "TabsLoop",
-          "TabsOrientation",
-          "TabsPanel",
-          "TabsRoot",
-          "TabsTrigger"
+          "DialogClose",
+          "DialogContent",
+          "DialogContentRole",
+          "DialogDescription",
+          "DialogRoot",
+          "DialogTitle",
+          "DialogTrigger"
         ]
       }
     },
     {
-      "source": "ui/tabs/root.rs",
+      "source": "ui/dialog/root.rs",
       "target": {
         "kind": "ui",
-        "path": "tabs/root.rs",
+        "path": "dialog/root.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/tabs/list.rs",
+      "source": "ui/dialog/trigger.rs",
       "target": {
         "kind": "ui",
-        "path": "tabs/list.rs",
+        "path": "dialog/trigger.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/tabs/trigger.rs",
+      "source": "ui/dialog/content.rs",
       "target": {
         "kind": "ui",
-        "path": "tabs/trigger.rs",
+        "path": "dialog/content.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/tabs/panel.rs",
+      "source": "ui/dialog/title.rs",
       "target": {
         "kind": "ui",
-        "path": "tabs/panel.rs",
+        "path": "dialog/title.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/dialog/description.rs",
+      "target": {
+        "kind": "ui",
+        "path": "dialog/description.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/dialog/close.rs",
+      "target": {
+        "kind": "ui",
+        "path": "dialog/close.rs",
         "exports": []
       }
     }
   ],
   "styles": [
     {
-      "source": "styles/tabs.css",
+      "source": "styles/dialog.css",
       "target": {
         "kind": "managed-css-block",
-        "id": "tabs"
+        "id": "dialog"
       }
     }
   ],

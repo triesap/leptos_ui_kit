@@ -4,7 +4,8 @@ mod components;
 
 use components::ui::{
     Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
-    CollapsibleTrigger, TabsList, TabsPanel, TabsRoot, TabsTrigger,
+    CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
+    DialogTrigger, TabsList, TabsPanel, TabsRoot, TabsTrigger,
 };
 
 fn main() {
@@ -45,6 +46,14 @@ fn App() -> impl IntoView {
                     <p>"Second panel"</p>
                 </TabsPanel>
             </TabsRoot>
+            <DialogRoot>
+                <DialogTrigger>"Open dialog"</DialogTrigger>
+                <DialogContent>
+                    <DialogTitle>"Dialog title"</DialogTitle>
+                    <DialogDescription>"Dialog description"</DialogDescription>
+                    <DialogClose>"Close"</DialogClose>
+                </DialogContent>
+            </DialogRoot>
         </main>
     }
 }

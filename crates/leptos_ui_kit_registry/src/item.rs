@@ -1008,9 +1008,10 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 3);
+        assert_eq!(root.items.len(), 4);
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
+        assert!(root.items.iter().any(|item| item.name == "dialog"));
         assert!(root.items.iter().any(|item| item.name == "tabs"));
     }
 
@@ -1127,7 +1128,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "2db87f18dbcfeadc255faa16165c7bbf332b019c"
+                    "rev": "b0c2c56f669d8ac531a6031f7b8b25f74ed75c60"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -1166,7 +1167,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "2db87f18dbcfeadc255faa16165c7bbf332b019c",
+                    "rev": "b0c2c56f669d8ac531a6031f7b8b25f74ed75c60",
                     "branch": "main"
                   },
                   "features": ["leptos"],
@@ -1278,6 +1279,38 @@ mod tests {
                 .behaviors
                 .iter()
                 .any(|behavior| behavior.name == "keyboard-focus-policy" && behavior.required)
+        );
+    }
+
+    #[test]
+    fn dialog_source_declares_overlay_accessibility_contract() {
+        let root = built_in_registry_root();
+        let content = fs::read_to_string(root.join("ui/dialog/content.rs"))
+            .expect("read dialog content source");
+        let item = load_built_in_registry_item("dialog").expect("load dialog");
+
+        assert!(content.contains("use_dialog_layer_with_node_ref"));
+        assert!(content.contains("aria-labelledby"));
+        assert!(content.contains("aria-describedby"));
+        assert!(content.contains("DialogLayerOptions"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "modal-focus-trap" && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            [
+                "DialogClose",
+                "DialogContent",
+                "DialogContentRole",
+                "DialogDescription",
+                "DialogRoot",
+                "DialogTitle",
+                "DialogTrigger"
+            ]
         );
     }
 
