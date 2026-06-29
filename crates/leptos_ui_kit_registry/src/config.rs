@@ -165,15 +165,11 @@ impl InstallConfig {
 pub struct StylesConfig {
     pub mode: StylesMode,
     pub css: String,
-    pub class_prefix: String,
-    pub css_variable_prefix: String,
 }
 
 impl StylesConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        expect_path("styles.css", "styles/app.css", &self.css)?;
-        expect_string("styles.classPrefix", "luk", &self.class_prefix)?;
-        expect_string("styles.cssVariablePrefix", "luk", &self.css_variable_prefix)
+        expect_path("styles.css", "styles/app.css", &self.css)
     }
 }
 
@@ -271,8 +267,6 @@ pub fn canonical_components_config() -> ComponentsConfig {
         styles: StylesConfig {
             mode: StylesMode::PureCss,
             css: "styles/app.css".to_owned(),
-            class_prefix: "luk".to_owned(),
-            css_variable_prefix: "luk".to_owned(),
         },
         registry: RegistryConfig {
             source: RegistrySource::Builtin,
@@ -421,6 +415,8 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.ends_with('\n'));
         assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(!first.contains("classPrefix"));
+        assert!(!first.contains("cssVariablePrefix"));
     }
 
     #[test]
@@ -444,6 +440,20 @@ mod tests {
             );
 
             let error = parse_components_json_str(&input).expect_err("legacy field should fail");
+
+            assert!(matches!(error, ConfigError::Parse(_)), "{field}");
+        }
+    }
+
+    #[test]
+    fn rejects_stale_style_prefix_fields() {
+        for field in ["classPrefix", "cssVariablePrefix"] {
+            let input = valid_config_json().replace(
+                "\"css\": \"styles/app.css\"",
+                &format!("\"css\": \"styles/app.css\",\n    \"{field}\": \"luk\""),
+            );
+
+            let error = parse_components_json_str(&input).expect_err("prefix field should fail");
 
             assert!(matches!(error, ConfigError::Parse(_)), "{field}");
         }

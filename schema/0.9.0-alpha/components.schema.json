@@ -90,9 +90,7 @@
       "additionalProperties": false,
       "required": [
         "mode",
-        "css",
-        "classPrefix",
-        "cssVariablePrefix"
+        "css"
       ],
       "properties": {
         "mode": {
@@ -100,12 +98,6 @@
         },
         "css": {
           "const": "styles/app.css"
-        },
-        "classPrefix": {
-          "const": "luk"
-        },
-        "cssVariablePrefix": {
-          "const": "luk"
         }
       }
     },
