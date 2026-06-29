@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeSet,
     env,
     ffi::OsString,
     fs,
@@ -15,7 +16,7 @@ use leptos_ui_kit_codegen::{
     plan_sync,
 };
 use leptos_ui_kit_registry::{
-    DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
+    ComponentsConfig, DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
     load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
 };
 use serde::Serialize;
@@ -626,7 +627,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 info.detected.dependency_plan.leptos_router.status,
             );
 
-            checks.extend(state_checks(cwd, strict));
+            checks.extend(state_checks(cwd, strict, info.components_config.as_ref()));
         }
         Err(error) => {
             checks.push(DoctorCheck::fail("project", error.to_string()));
@@ -748,7 +749,11 @@ fn strict_check(strict: bool, name: impl Into<String>, message: impl Into<String
     }
 }
 
-fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
+fn state_checks(
+    cwd: &Path,
+    strict: bool,
+    components_config: Option<&ComponentsConfig>,
+) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let state_path = cwd.join(".leptos-ui/state.json");
     if !state_path.is_file() {
@@ -782,6 +787,10 @@ fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
     };
 
     checks.push(DoctorCheck::pass("state", "install state is valid"));
+    checks.push(compare_config_hash(cwd, strict, &state));
+    if let Some(config) = components_config {
+        checks.extend(compare_desired_items(config, &state, strict));
+    }
     for item in state.items.values() {
         checks.push(compare_item_content_hash(item));
         for file in &item.files {
@@ -807,8 +816,158 @@ fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
             ));
         }
     }
+    checks.extend(git_metadata_checks(cwd, strict, &state));
 
     checks
+}
+
+fn compare_config_hash(cwd: &Path, strict: bool, state: &InstallState) -> DoctorCheck {
+    let path = cwd.join("components.json");
+    match fs::read(&path) {
+        Ok(content) if hash_content_bytes(&content) == state.project.config_hash => {
+            DoctorCheck::pass("config_hash", "components.json hash matches install state")
+                .with_path(path.display().to_string())
+        }
+        Ok(_) => strict_check(
+            strict,
+            "config_hash",
+            "components.json hash differs from install state",
+        )
+        .with_path(path.display().to_string()),
+        Err(error) => DoctorCheck::fail("config_hash", format!("failed to read config: {error}"))
+            .with_path(path.display().to_string()),
+    }
+}
+
+fn compare_desired_items(
+    config: &ComponentsConfig,
+    state: &InstallState,
+    strict: bool,
+) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let desired_ids = config
+        .items
+        .iter()
+        .map(|item| format!("builtin:{}", item.item_name()))
+        .collect::<BTreeSet<_>>();
+
+    for desired_id in &desired_ids {
+        if state.items.contains_key(desired_id) {
+            checks.push(DoctorCheck::pass(
+                "desired_item",
+                format!("desired item {desired_id} is installed"),
+            ));
+        } else {
+            checks.push(
+                strict_check(
+                    strict,
+                    "desired_item",
+                    format!("desired item {desired_id} is not installed"),
+                )
+                .with_path("components.json"),
+            );
+        }
+    }
+
+    for installed_id in state.items.keys() {
+        if !desired_ids.contains(installed_id) {
+            checks.push(
+                strict_check(
+                    strict,
+                    "desired_item",
+                    format!("installed item {installed_id} is not declared in components.json"),
+                )
+                .with_path(".leptos-ui/state.json"),
+            );
+        }
+    }
+
+    checks
+}
+
+fn git_metadata_checks(cwd: &Path, strict: bool, state: &InstallState) -> Vec<DoctorCheck> {
+    if !is_git_worktree(cwd) {
+        return Vec::new();
+    }
+
+    let mut paths = BTreeSet::from([".leptos-ui/state.json".to_owned()]);
+    for item in state.items.values() {
+        for file in &item.files {
+            paths.insert(file.baseline_path.clone());
+        }
+        for block in &item.style_blocks {
+            paths.insert(block.baseline_path.clone());
+        }
+    }
+
+    let mut ignored = Vec::new();
+    for path in paths {
+        match git_check_ignore(cwd, &path) {
+            GitIgnoreStatus::Ignored => ignored.push(path),
+            GitIgnoreStatus::NotIgnored => {}
+            GitIgnoreStatus::Unknown(message) => {
+                return vec![DoctorCheck::warning("git_metadata", message)];
+            }
+        }
+    }
+
+    if ignored.is_empty() {
+        vec![DoctorCheck::pass(
+            "git_metadata",
+            "installer metadata is not ignored by Git",
+        )]
+    } else {
+        ignored
+            .into_iter()
+            .map(|path| {
+                strict_check(
+                    strict,
+                    "git_metadata",
+                    format!("installer metadata {path} is ignored by Git"),
+                )
+                .with_path(path)
+            })
+            .collect()
+    }
+}
+
+fn is_git_worktree(cwd: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitIgnoreStatus {
+    Ignored,
+    NotIgnored,
+    Unknown(String),
+}
+
+fn git_check_ignore(cwd: &Path, path: &str) -> GitIgnoreStatus {
+    match Command::new("git")
+        .args(["check-ignore", "-q", path])
+        .current_dir(cwd)
+        .status()
+    {
+        Ok(status) if status.success() => GitIgnoreStatus::Ignored,
+        Ok(status) if status.code() == Some(1) => GitIgnoreStatus::NotIgnored,
+        Ok(status) => GitIgnoreStatus::Unknown(format!(
+            "failed to check Git ignore status for {path}: exit status {}",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_owned())
+        )),
+        Err(error) => GitIgnoreStatus::Unknown(format!(
+            "failed to run git check-ignore for {path}: {error}"
+        )),
+    }
 }
 
 fn compare_item_content_hash(item: &InstalledItem) -> DoctorCheck {
@@ -1352,6 +1511,62 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn doctor_strict_fails_when_desired_item_is_not_installed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        run(vec![OsString::from("init")], root).expect("run init");
+        write_desired_button_config(root);
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.desired_item\""));
+        assert!(output.contains("desired item builtin:button is not installed"));
+    }
+
+    #[test]
+    fn doctor_strict_fails_when_installed_item_is_not_desired() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+        write_empty_items_config(root);
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.desired_item\""));
+        assert!(
+            output.contains("installed item builtin:button is not declared in components.json")
+        );
+    }
+
+    #[test]
+    fn doctor_strict_fails_when_installer_metadata_is_ignored() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        init_git(root);
+        fs::write(root.join(".gitignore"), "/.leptos-ui/\n").expect("write gitignore");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.git_metadata\""));
+        assert!(output.contains("installer metadata .leptos-ui/state.json is ignored by Git"));
+    }
+
+    #[test]
     fn doctor_reports_state_hash_mismatches() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
@@ -1564,6 +1779,43 @@ leptos_router = "0.9.0-alpha"
         assert!(check.message.contains("failed to run"));
     }
 
+    fn create_doctor_project(root: &Path) {
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+    }
+
+    fn init_git(root: &Path) {
+        let output = Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output()
+            .expect("run git init");
+
+        assert!(
+            output.status.success(),
+            "git init failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn write_desired_button_config(root: &Path) {
         let config = parse_components_json_str(
             &fs::read_to_string(root.join("components.json")).expect("read config"),
@@ -1571,6 +1823,19 @@ leptos_router = "0.9.0-alpha"
         .expect("parse config");
         let config = components_config_with_desired_item(config, desired_builtin_button_item())
             .expect("add desired item");
+        fs::write(
+            root.join("components.json"),
+            components_config_to_json(&config).expect("serialize config"),
+        )
+        .expect("write config");
+    }
+
+    fn write_empty_items_config(root: &Path) {
+        let mut config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        config.items.clear();
         fs::write(
             root.join("components.json"),
             components_config_to_json(&config).expect("serialize config"),
