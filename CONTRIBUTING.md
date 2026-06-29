@@ -6,7 +6,7 @@ Thanks for your interest in contributing to leptos_ui_kit.
 
 - Report bugs and regressions
 - Improve documentation and examples
-- Add new components, primitives, or CLI flows
+- Improve the MVP `button`, registry, codegen, and CLI flows
 - Expand accessibility and keyboard coverage
 
 ## Development setup
@@ -16,6 +16,19 @@ This repository is a Rust workspace. Typical tasks:
 - `cargo fmt`
 - `cargo check`
 - `cargo test`
+
+When working from a parent repository that provides a build wrapper, use that
+parent repository's command routing instructions.
+
+## MVP constraints
+
+- Target Leptos `0.9.0-alpha`.
+- Use pure CSS only.
+- Do not add Tailwind support.
+- Do not add shadcn compatibility shims, alias maps, legacy config fields, or
+  duplicate command names.
+- Do not make the CLI mutate `Cargo.toml` in the MVP.
+- Keep runtime primitives render-feature neutral.
 
 ## Pull request checklist
 
