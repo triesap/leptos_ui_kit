@@ -675,6 +675,8 @@ fn built_in_registry_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -705,6 +707,36 @@ mod tests {
         let source = read_built_in_registry_source("ui/button.rs").expect("read source");
 
         assert!(source.contains("pub fn Button"));
+    }
+
+    #[test]
+    fn built_in_rust_sources_are_rustfmt_clean() {
+        let root = load_built_in_registry_root().expect("load root");
+
+        for entry in root.items {
+            let item =
+                parse_registry_item_file(&built_in_registry_root().join(entry.path)).expect("item");
+            for file in item.files {
+                if !file.source.ends_with(".rs") {
+                    continue;
+                }
+
+                let path = built_in_registry_root().join(file.source);
+                let output = Command::new("rustfmt")
+                    .arg("--check")
+                    .arg(&path)
+                    .output()
+                    .expect("run rustfmt");
+
+                assert!(
+                    output.status.success(),
+                    "registry source {} is not rustfmt-clean\nstdout:\n{}\nstderr:\n{}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 
     #[test]

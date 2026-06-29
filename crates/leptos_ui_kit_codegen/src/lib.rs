@@ -1720,6 +1720,11 @@ mod tests {
         let plan = plan_add(root, "button").expect("plan add");
         let source = read_built_in_registry_source("ui/button.rs").expect("registry source");
         let css = read_built_in_registry_source("styles/button.css").expect("registry css");
+        let rust_target = plan
+            .files
+            .iter()
+            .find(|file| file.path == "src/components/ui/button.rs")
+            .expect("rust target");
         let rust_baseline = plan
             .files
             .iter()
@@ -1731,6 +1736,7 @@ mod tests {
             .find(|file| file.path == ".leptos-ui/baselines/builtin-button/button.css")
             .expect("css baseline");
 
+        assert_eq!(rust_target.content, source);
         assert_eq!(rust_baseline.content, source);
         assert_eq!(css_baseline.content, css);
         assert_eq!(
