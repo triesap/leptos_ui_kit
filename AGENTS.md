@@ -23,6 +23,9 @@ Generated components are installed under `src/components/ui`, exported through
 `src/components/ui/mod.rs`, wired through `src/components/mod.rs`, and styled
 with pure CSS in `styles/app.css`.
 
+The supported app may be a plain single crate or a single-package workspace
+root. Multi-member workspace installs remain out of scope.
+
 ## Repository Map
 
 - `crates/leptos_ui_kit` is the public facade crate.
@@ -56,8 +59,9 @@ change:
   RSC, TSX, and legacy config fields are not supported.
 - The MVP does not mutate `Cargo.toml`; it emits dependency plans only.
 - The MVP supports built-in registry items only.
-- The MVP supports Trunk CSR only; SSR, hydration, islands, workspace installs,
-  and remote registries are future work, not silent compatibility paths.
+- The MVP supports Trunk CSR only; SSR, hydration, islands, multi-member
+  workspace installs, and remote registries are future work, not silent
+  compatibility paths.
 - Generated source should be app-owned, readable, editable Rust and CSS.
 - Generated component CSS classes use the `.luk-*` prefix and CSS custom
   properties use the `--luk-*` prefix.
@@ -107,6 +111,10 @@ Generated components should:
 - use `leptos::prelude::*`
 - render ordinary HTML elements where possible
 - keep props explicit and small
+- make form-capable components explicit about native HTML behavior such as
+  button type
+- accept Leptos-native reactive props for state that naturally changes at
+  runtime
 - avoid hidden runtime dependencies
 - avoid Tailwind classes and framework-specific CSS tooling
 - preserve accessibility semantics for the rendered element

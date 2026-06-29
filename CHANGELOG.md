@@ -13,3 +13,12 @@ Semantic Versioning.
 - Scope the MVP to built-in `button`, strict config, no Tailwind, no shadcn
   compatibility, no Cargo manifest mutation, and no SSR/hydration/islands
   support.
+- Rename the installed CLI binary to `leptos_ui_kit`.
+- Support single-package workspace-root Trunk CSR apps.
+- Add `ButtonType`, reactive `disabled`, and app class passthrough to the
+  generated `Button`.
+- Expand generated button CSS tokens for app-owned theming.
+- Tighten `.leptos-ui` state hash validation and exact managed CSS block
+  doctor checks.
+- Add a Radroots-shaped workflow fixture that compiles the generated `Button`
+  in a wasm Trunk CSR app.

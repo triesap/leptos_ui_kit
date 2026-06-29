@@ -2,7 +2,7 @@
 
 `leptos_ui_kit` is a source-first UI kit for Leptos `0.9.0-alpha`.
 It provides a `leptos_ui_kit` CLI and a packaged registry for installing
-editable, app-owned component source into single-crate Trunk CSR apps.
+editable, app-owned component source into Trunk CSR apps.
 
 The MVP target is intentionally narrow:
 
@@ -12,6 +12,9 @@ index.html
 styles/app.css
 src/
 ```
+
+The project may be a plain single crate or a single-package workspace root.
+Multi-member workspace installs are not supported.
 
 Generated components are installed under `src/components/ui` and styled with
 pure CSS in `styles/app.css`.
@@ -48,12 +51,20 @@ leptos_router = "0.9.0-alpha"
 
 It does not mutate `Cargo.toml` in the MVP.
 
+## Built-In Button
+
+The built-in `button` item installs `Button`, `ButtonVariant`, `ButtonSize`,
+and `ButtonType`. `ButtonType` defaults to `Button`; use `ButtonType::Submit`
+for form submit buttons. The `disabled` prop accepts static booleans or
+reactive closures, and the generated CSS exposes `--luk-*` tokens for app-owned
+theming without editing the managed CSS block.
+
 ## Non-Goals
 
 The MVP does not support Tailwind, shadcn compatibility, alias shims, React,
-Radix runtime compatibility, SSR, hydration, islands, workspace installs,
-remote registries, Cargo manifest mutation, telemetry, or complex interactive
-primitives.
+Radix runtime compatibility, SSR, hydration, islands, multi-member workspace
+installs, remote registries, Cargo manifest mutation, telemetry, or complex
+interactive primitives.
 
 ## Version Policy
 

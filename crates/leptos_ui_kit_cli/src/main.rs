@@ -538,7 +538,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
         Ok(info) => {
             checks.push(DoctorCheck::pass(
                 "project",
-                "supported single-crate Trunk CSR project detected",
+                "supported Trunk CSR project detected",
             ));
             if info.components_config.is_some() {
                 checks.push(DoctorCheck::pass("config", "components.json is valid"));
