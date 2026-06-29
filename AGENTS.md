@@ -26,6 +26,11 @@ with pure CSS in `styles/app.css`.
 The supported app may be a plain single crate or a single-package workspace
 root. Multi-member workspace installs remain out of scope.
 
+Generated components are app-owned source. Consumers should install the CLI
+from a pinned Git revision and commit generated files, `components.json`, and
+`.leptos-ui` state/baselines; they should not add this crate family to an app
+as the way to access generated components.
+
 ## Repository Map
 
 - `crates/leptos_ui_kit` is the public facade crate.
@@ -37,7 +42,8 @@ root. Multi-member workspace installs remain out of scope.
 - `crates/leptos_ui_kit_codegen` owns dry-run planning, write transactions,
   path safety, CSS/module patching, install state, baselines, and command
   envelope types.
-- `crates/leptos_ui_kit_cli` owns the `leptos_ui_kit` binary and command output.
+- `crates/leptos_ui_kit_cli` owns the `leptos_ui_kit` binary, the
+  `cargo leptos_ui_kit` subcommand entrypoint, and command output.
 - `crates/leptos_ui_kit_registry/registry` contains packaged built-in registry
   items and source assets.
 - `schema/0.9.0-alpha` contains the public JSON schemas referenced by
@@ -59,6 +65,8 @@ change:
   RSC, TSX, and legacy config fields are not supported.
 - The MVP does not mutate `Cargo.toml`; it emits dependency plans only.
 - The MVP supports built-in registry items only.
+- `components.json` is desired state. `add` records desired items and installs
+  them; `sync` reconciles the app from desired state.
 - The MVP supports Trunk CSR only; SSR, hydration, islands, multi-member
   workspace installs, and remote registries are future work, not silent
   compatibility paths.
@@ -77,7 +85,9 @@ leptos_ui_kit info
 leptos_ui_kit init
 leptos_ui_kit view button
 leptos_ui_kit add button
-leptos_ui_kit doctor
+leptos_ui_kit sync
+leptos_ui_kit doctor --strict
+cargo leptos_ui_kit doctor --strict
 ```
 
 Write commands support `--dry-run`. Commands with structured output support
@@ -101,6 +111,12 @@ unless the domain exists and the user has approved the migration.
 
 The config model is strict. Unknown fields should fail. Legacy shadcn/Tailwind
 fields should fail.
+
+`components.json` declares desired registry items and the pinned tool source.
+The `.leptos-ui` directory records installer state and baselines. Strict doctor
+checks should fail when desired items are not installed, installed items are not
+declared, config hashes drift, generated baselines drift, or installer metadata
+is ignored by Git.
 
 ## Generated Source Rules
 

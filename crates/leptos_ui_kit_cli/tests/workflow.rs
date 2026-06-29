@@ -21,6 +21,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["view", "button", "--source", "--json"]);
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
     assert_success(&project, &["add", "button"]);
+    assert_success(&project, &["sync", "--dry-run", "--json"]);
+    assert_success(&project, &["sync"]);
     assert_success(&project, &["doctor", "--strict", "--json"]);
     assert_cargo_subcommand_success(&project, &["doctor", "--strict", "--json"]);
     assert_cargo_check(&project);

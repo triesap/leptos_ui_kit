@@ -20,5 +20,7 @@ Semantic Versioning.
 - Expand generated button CSS tokens for app-owned theming.
 - Tighten `.leptos-ui` state hash validation and exact managed CSS block
   doctor checks.
+- Add desired-state `components.json` items, `sync`, strict doctor checks for
+  desired/install drift, and the `cargo leptos_ui_kit` subcommand entrypoint.
 - Add a Radroots-shaped workflow fixture that compiles the generated `Button`
   in a wasm Trunk CSR app.
