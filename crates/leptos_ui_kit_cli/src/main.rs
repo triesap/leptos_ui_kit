@@ -8,7 +8,7 @@ use std::{
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, InitPlan, apply_init, plan_add, plan_init,
+    AddPlan, CommandEnvelope, CommandStatus, InitPlan, apply_add, apply_init, plan_add, plan_init,
 };
 use leptos_ui_kit_registry::{
     InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
@@ -62,13 +62,22 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
     }
 
     let item = item.ok_or_else(|| "add requires an item name".to_owned())?;
-    if !dry_run {
-        return Err("add writes are not implemented yet; use --dry-run".to_owned());
-    }
+    let plan = if dry_run {
+        plan_add(cwd, &item)
+            .map_err(|error| format!("failed to plan add {item} for {}: {error}", cwd.display()))?
+    } else {
+        apply_add(cwd, &item)
+            .map_err(|error| format!("failed to add {item} to {}: {error}", cwd.display()))?
+    };
+    let status = if dry_run {
+        CommandStatus::Planned
+    } else if plan.is_empty() {
+        CommandStatus::NoChange
+    } else {
+        CommandStatus::Success
+    };
 
-    let plan = plan_add(cwd, &item)
-        .map_err(|error| format!("failed to plan add {item} for {}: {error}", cwd.display()))?;
-    println!("{}", render_add_plan(&plan, json, CommandStatus::Planned)?);
+    println!("{}", render_add_plan(&plan, json, status)?);
 
     Ok(())
 }
@@ -411,5 +420,34 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
         assert!(output.contains("\"path\": \".leptos-ui/baselines/builtin-button/button.rs\""));
         assert!(!root.join("src/components/ui/button.rs").exists());
+    }
+
+    #[test]
+    fn add_write_installs_button_and_then_reports_no_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+        assert!(root.join("src/components/ui/button.rs").is_file());
+        assert!(
+            root.join(".leptos-ui/baselines/builtin-button/button.css")
+                .is_file()
+        );
+
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run second add");
+        let output = render_add_plan(
+            &plan_add(root, "button").expect("plan add"),
+            true,
+            CommandStatus::NoChange,
+        )
+        .expect("render add");
+        assert!(output.contains("\"status\": \"no_change\""));
     }
 }

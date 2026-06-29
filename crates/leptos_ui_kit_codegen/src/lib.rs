@@ -629,6 +629,44 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     })
 }
 
+pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
+    let plan = plan_add(project_root, item_name)?;
+    let paths = plan
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths)?;
+
+    if plan.is_empty() {
+        return Ok(plan);
+    }
+
+    let _lock = WriteLock::acquire(project_root)?;
+
+    for file in plan
+        .files
+        .iter()
+        .filter(|file| file.path != ".leptos-ui/state.json")
+    {
+        write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
+    }
+
+    if let Some(state_file) = plan
+        .files
+        .iter()
+        .find(|file| file.path == ".leptos-ui/state.json")
+    {
+        write_file_atomic(
+            project_root,
+            &state_file.path,
+            state_file.content.as_bytes(),
+        )?;
+    }
+
+    Ok(plan)
+}
+
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
     let mut seen = std::collections::BTreeSet::new();
     for path in paths {
@@ -1735,6 +1773,103 @@ mod tests {
                 .join(".leptos-ui/baselines/builtin-button/button.rs")
                 .exists()
         );
+    }
+
+    #[test]
+    fn add_write_installs_button_state_and_baselines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        let plan = apply_add(root, "button").expect("apply add");
+
+        assert!(!plan.is_empty());
+        assert!(root.join("src/components/ui/button.rs").is_file());
+        assert!(
+            fs::read_to_string(root.join("src/components/ui/mod.rs"))
+                .expect("read ui mod")
+                .contains("pub use button::{Button, ButtonSize, ButtonVariant};")
+        );
+        assert!(
+            fs::read_to_string(root.join("styles/app.css"))
+                .expect("read css")
+                .contains("/* leptos-ui-kit:start button */")
+        );
+        assert!(
+            root.join(".leptos-ui/baselines/builtin-button/button.rs")
+                .is_file()
+        );
+        assert!(
+            root.join(".leptos-ui/baselines/builtin-button/button.css")
+                .is_file()
+        );
+        let state = parse_install_state_str(
+            &fs::read_to_string(root.join(".leptos-ui/state.json")).expect("read state"),
+        )
+        .expect("parse state");
+        assert!(state.items.contains_key("builtin:button"));
+        assert!(!root.join(".leptos-ui/lock").exists());
+    }
+
+    #[test]
+    fn add_write_is_idempotent_when_tracked_files_are_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        apply_add(root, "button").expect("first add");
+        let second = apply_add(root, "button").expect("second add");
+
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn add_plan_rejects_untracked_existing_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        fs::write(root.join("src/components/ui/button.rs"), "// local\n").expect("write local");
+
+        let error = plan_add(root, "button").expect_err("untracked target should conflict");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }));
+    }
+
+    #[test]
+    fn add_plan_rejects_tracked_local_edits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        apply_add(root, "button").expect("add");
+        fs::write(root.join("src/components/ui/button.rs"), "// edited\n").expect("edit source");
+
+        let error = plan_add(root, "button").expect_err("tracked edit should conflict");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }));
     }
 
     #[test]
