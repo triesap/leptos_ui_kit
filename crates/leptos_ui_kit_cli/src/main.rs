@@ -10,7 +10,8 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
-    apply_add, apply_init, parse_install_state_str, plan_add, plan_init,
+    InstalledFile, InstalledItem, InstalledStyleBlock, apply_add, apply_init, hash_content_bytes,
+    parse_install_state_str, plan_add, plan_init,
 };
 use leptos_ui_kit_registry::{
     DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
@@ -721,11 +722,13 @@ fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
 
     checks.push(DoctorCheck::pass("state", "install state is valid"));
     for item in state.items.values() {
+        checks.push(compare_item_content_hash(item));
         for file in &item.files {
             let source_path = cwd.join(&file.path);
             let baseline_path = cwd.join(&file.baseline_path);
-            checks.push(compare_file_to_baseline(
+            checks.extend(compare_file_to_baseline(
                 "installed_file",
+                file,
                 &source_path,
                 &baseline_path,
                 strict,
@@ -734,7 +737,8 @@ fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
         for block in &item.style_blocks {
             let css_path = cwd.join(&block.css_path);
             let baseline_path = cwd.join(&block.baseline_path);
-            checks.push(compare_css_block_to_baseline(
+            checks.extend(compare_css_block_to_baseline(
+                block,
                 &css_path,
                 &block.block_id,
                 &baseline_path,
@@ -746,59 +750,134 @@ fn state_checks(cwd: &Path, strict: bool) -> Vec<DoctorCheck> {
     checks
 }
 
+fn compare_item_content_hash(item: &InstalledItem) -> DoctorCheck {
+    match load_built_in_registry_item(&item.name) {
+        Ok(registry_item) if item.content_hash == registry_item.content_hash => {
+            DoctorCheck::pass("item_content_hash", "item content hash matches registry")
+        }
+        Ok(_) => DoctorCheck::fail(
+            "item_content_hash",
+            format!("item {} content hash differs from registry", item.id),
+        ),
+        Err(error) => DoctorCheck::fail("item_content_hash", error.to_string()),
+    }
+}
+
 fn compare_file_to_baseline(
     name: &str,
+    file: &InstalledFile,
     source_path: &Path,
     baseline_path: &Path,
     strict: bool,
-) -> DoctorCheck {
+) -> Vec<DoctorCheck> {
     let source = match fs::read_to_string(source_path) {
         Ok(source) => source,
         Err(error) => {
-            return DoctorCheck::fail(name, format!("failed to read installed file: {error}"))
-                .with_path(source_path.display().to_string());
+            return vec![
+                DoctorCheck::fail(name, format!("failed to read installed file: {error}"))
+                    .with_path(source_path.display().to_string()),
+            ];
         }
     };
     let baseline = match fs::read_to_string(baseline_path) {
         Ok(baseline) => baseline,
         Err(error) => {
-            return DoctorCheck::fail(name, format!("failed to read baseline: {error}"))
-                .with_path(baseline_path.display().to_string());
+            return vec![
+                DoctorCheck::fail(name, format!("failed to read baseline: {error}"))
+                    .with_path(baseline_path.display().to_string()),
+            ];
         }
     };
-    if source == baseline {
+    let source_hash = hash_content_bytes(source.as_bytes());
+    let baseline_hash = hash_content_bytes(baseline.as_bytes());
+    let mut checks = Vec::new();
+
+    if baseline_hash == file.baseline_hash {
+        checks.push(
+            DoctorCheck::pass("baseline_hash", "file baseline hash matches state")
+                .with_path(baseline_path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            DoctorCheck::fail("baseline_hash", "file baseline hash differs from state")
+                .with_path(baseline_path.display().to_string()),
+        );
+    }
+
+    if source_hash == file.local_hash_at_install {
+        checks.push(
+            DoctorCheck::pass(
+                "installed_file_hash",
+                "installed file hash matches install state",
+            )
+            .with_path(source_path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            strict_check(
+                strict,
+                "installed_file_hash",
+                "installed file hash differs from install state",
+            )
+            .with_path(source_path.display().to_string()),
+        );
+    }
+
+    checks.push(if source == baseline {
         DoctorCheck::pass(name, "installed file matches baseline")
             .with_path(source_path.display().to_string())
     } else {
         strict_check(strict, name, "installed file differs from baseline")
             .with_path(source_path.display().to_string())
-    }
+    });
+
+    checks
 }
 
 fn compare_css_block_to_baseline(
+    block: &InstalledStyleBlock,
     css_path: &Path,
     block_id: &str,
     baseline_path: &Path,
     strict: bool,
-) -> DoctorCheck {
+) -> Vec<DoctorCheck> {
     let css = match fs::read_to_string(css_path) {
         Ok(css) => css,
         Err(error) => {
-            return DoctorCheck::fail("style_block", format!("failed to read CSS: {error}"))
-                .with_path(css_path.display().to_string());
+            return vec![
+                DoctorCheck::fail("style_block", format!("failed to read CSS: {error}"))
+                    .with_path(css_path.display().to_string()),
+            ];
         }
     };
     let baseline = match fs::read_to_string(baseline_path) {
         Ok(baseline) => baseline,
         Err(error) => {
-            return DoctorCheck::fail(
-                "style_block",
-                format!("failed to read CSS baseline: {error}"),
-            )
-            .with_path(baseline_path.display().to_string());
+            return vec![
+                DoctorCheck::fail(
+                    "style_block",
+                    format!("failed to read CSS baseline: {error}"),
+                )
+                .with_path(baseline_path.display().to_string()),
+            ];
         }
     };
-    if css.contains(&baseline) {
+    let baseline_hash = hash_content_bytes(baseline.as_bytes());
+    let mut checks = Vec::new();
+
+    if baseline_hash == block.baseline_hash {
+        checks.push(
+            DoctorCheck::pass("style_block_hash", "CSS baseline hash matches state")
+                .with_path(baseline_path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            DoctorCheck::fail("style_block_hash", "CSS baseline hash differs from state")
+                .with_path(baseline_path.display().to_string()),
+        );
+    }
+
+    checks.push(if css.contains(&baseline) {
         DoctorCheck::pass(
             "style_block",
             format!("managed CSS block {block_id} matches baseline"),
@@ -811,7 +890,9 @@ fn compare_css_block_to_baseline(
             format!("managed CSS block {block_id} differs from baseline"),
         )
         .with_path(css_path.display().to_string())
-    }
+    });
+
+    checks
 }
 
 fn doctor_status(output: &DoctorOutput) -> CommandStatus {
@@ -1126,6 +1207,56 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"success\""));
         assert!(output.contains("\"name\": \"registry\""));
         assert!(output.contains("\"status\": \"pass\""));
+    }
+
+    #[test]
+    fn doctor_reports_state_hash_mismatches() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        let state_path = root.join(".leptos-ui/state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+                .expect("parse state");
+        state["items"]["builtin:button"]["files"][0]["baselineHash"] =
+            serde_json::Value::String(format!("sha256:{}", "0".repeat(64)));
+        fs::write(
+            &state_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&state).expect("serialize state")
+            ),
+        )
+        .expect("write state");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.baseline_hash\""));
+        assert!(output.contains("file baseline hash differs from state"));
     }
 
     #[test]

@@ -311,9 +311,7 @@ impl InstallState {
         if self.project.kind != "single-crate-trunk-csr" {
             return invalid_state(&path, "project.kind must be single-crate-trunk-csr");
         }
-        if !self.project.config_hash.starts_with("sha256:") {
-            return invalid_state(&path, "project.configHash must be a sha256 hash");
-        }
+        validate_state_hash(&path, "project.configHash", &self.project.config_hash)?;
 
         for (key, item) in &self.items {
             if key != &item.id {
@@ -325,8 +323,21 @@ impl InstallState {
             if item.version != SCHEMA_VERSION {
                 return invalid_state(&path, format!("item version must be {SCHEMA_VERSION}"));
             }
-            if item.content_hash.is_empty() {
-                return invalid_state(&path, "item contentHash must not be empty");
+            validate_state_hash(&path, "items[].contentHash", &item.content_hash)?;
+            for file in &item.files {
+                validate_state_hash(&path, "items[].files[].baselineHash", &file.baseline_hash)?;
+                validate_state_hash(
+                    &path,
+                    "items[].files[].localHashAtInstall",
+                    &file.local_hash_at_install,
+                )?;
+            }
+            for block in &item.style_blocks {
+                validate_state_hash(
+                    &path,
+                    "items[].styleBlocks[].baselineHash",
+                    &block.baseline_hash,
+                )?;
             }
         }
 
@@ -1195,6 +1206,21 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+pub fn hash_content_bytes(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+}
+
+fn validate_state_hash(path: &Path, field: &'static str, value: &str) -> Result<(), CodegenError> {
+    if value
+        .strip_prefix("sha256:")
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        Ok(())
+    } else {
+        invalid_state(path, format!("{field} must be a sha256 hash"))
+    }
+}
+
 fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
     Err(CodegenError::UnsafePath {
         path: path.to_owned(),
@@ -1703,6 +1729,37 @@ mod tests {
         assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(first.contains("\"configHash\": \"sha256:"));
         assert!(!first.contains("null"));
+    }
+
+    #[test]
+    fn state_rejects_malformed_hash_fields() {
+        let mut state = InstallState::empty("sha256:not-a-real-hash".to_owned());
+
+        let error = state.validate().expect_err("config hash should fail");
+
+        assert!(
+            matches!(error, CodegenError::InvalidState { reason, .. } if reason.contains("project.configHash"))
+        );
+
+        state.project.config_hash = hash_bytes(b"components");
+        state.items.insert(
+            "builtin:button".to_owned(),
+            InstalledItem {
+                id: "builtin:button".to_owned(),
+                name: "button".to_owned(),
+                source: "builtin".to_owned(),
+                version: SCHEMA_VERSION.to_owned(),
+                content_hash: "missing-prefix".to_owned(),
+                files: Vec::new(),
+                style_blocks: Vec::new(),
+            },
+        );
+
+        let error = state.validate().expect_err("content hash should fail");
+
+        assert!(
+            matches!(error, CodegenError::InvalidState { reason, .. } if reason.contains("items[].contentHash"))
+        );
     }
 
     #[test]
