@@ -1,0 +1,114 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "collapsible",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Collapsible",
+  "description": "A primitive-backed Leptos collapsible component family.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "accessibility": {
+    "behaviors": [
+      {
+        "name": "aria-expanded-trigger",
+        "required": true
+      },
+      {
+        "name": "aria-controls-content",
+        "required": true
+      },
+      {
+        "name": "hidden-closed-content",
+        "required": true
+      }
+    ],
+    "notes": []
+  },
+  "files": [
+    {
+      "source": "ui/collapsible/mod.rs",
+      "target": {
+        "kind": "ui",
+        "path": "collapsible/mod.rs",
+        "exports": [
+          "CollapsibleContent",
+          "CollapsibleRoot",
+          "CollapsibleTrigger"
+        ]
+      }
+    },
+    {
+      "source": "ui/collapsible/root.rs",
+      "target": {
+        "kind": "ui",
+        "path": "collapsible/root.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/collapsible/trigger.rs",
+      "target": {
+        "kind": "ui",
+        "path": "collapsible/trigger.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/collapsible/content.rs",
+      "target": {
+        "kind": "ui",
+        "path": "collapsible/content.rs",
+        "exports": []
+      }
+    }
+  ],
+  "styles": [
+    {
+      "source": "styles/collapsible.css",
+      "target": {
+        "kind": "managed-css-block",
+        "id": "collapsible"
+      }
+    }
+  ],
+  "registryDependencies": [],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [
+        "csr"
+      ],
+      "required": true
+    },
+    {
+      "crate": "leptos_router",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [],
+      "required": true
+    },
+    {
+      "crate": "web_ui_primitives",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/triesap/web_ui_primitives",
+        "rev": "2db87f18dbcfeadc255faa16165c7bbf332b019c"
+      },
+      "features": [
+        "leptos"
+      ],
+      "required": true
+    }
+  ],
+  "extra": {}
+}

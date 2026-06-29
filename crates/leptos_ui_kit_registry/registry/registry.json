@@ -6,6 +6,10 @@
     {
       "name": "button",
       "path": "ui/button.json"
+    },
+    {
+      "name": "collapsible",
+      "path": "ui/collapsible.json"
     }
   ]
 }

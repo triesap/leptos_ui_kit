@@ -1008,8 +1008,9 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 1);
-        assert_eq!(root.items[0].name, "button");
+        assert_eq!(root.items.len(), 2);
+        assert!(root.items.iter().any(|item| item.name == "button"));
+        assert!(root.items.iter().any(|item| item.name == "collapsible"));
     }
 
     #[test]

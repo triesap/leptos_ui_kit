@@ -14,7 +14,7 @@ pub use config::{
     TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig, WorkspaceMode,
     canonical_components_config, canonical_components_json, canonical_tool_config,
     components_config_to_json, components_config_with_desired_item, desired_builtin_button_item,
-    normalize_single_crate_project, parse_components_json_str,
+    desired_builtin_collapsible_item, normalize_single_crate_project, parse_components_json_str,
 };
 pub use detect::{
     DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,

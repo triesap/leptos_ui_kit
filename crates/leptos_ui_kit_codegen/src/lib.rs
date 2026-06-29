@@ -13,8 +13,8 @@ use std::{
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, RegistryItem, SCHEMA_VERSION,
     canonical_components_json, components_config_to_json, components_config_with_desired_item,
-    desired_builtin_button_item, load_built_in_registry_item, parse_components_json_str,
-    read_built_in_registry_source,
+    desired_builtin_button_item, desired_builtin_collapsible_item, load_built_in_registry_item,
+    parse_components_json_str, read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -512,6 +512,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     let item = load_built_in_registry_item(item_name)?;
     let desired_item = match item.item.name.as_str() {
         "button" => desired_builtin_button_item(),
+        "collapsible" => desired_builtin_collapsible_item(),
         _ => return Err(RegistryError::BuiltInNotFound(item_name.to_owned()).into()),
     };
     let item_id = built_in_item_id(&item.item.name);

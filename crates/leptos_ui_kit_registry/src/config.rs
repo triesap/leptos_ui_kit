@@ -261,6 +261,7 @@ impl DesiredItemConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         match (self.name, self.source) {
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
         }
     }
 
@@ -273,12 +274,14 @@ impl DesiredItemConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum DesiredItemName {
     Button,
+    Collapsible,
 }
 
 impl DesiredItemName {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Button => "button",
+            Self::Collapsible => "collapsible",
         }
     }
 }
@@ -405,6 +408,13 @@ pub fn components_config_with_desired_item(
 pub fn desired_builtin_button_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Button,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_collapsible_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Collapsible,
         source: RegistrySource::Builtin,
     }
 }

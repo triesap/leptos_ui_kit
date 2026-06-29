@@ -2,7 +2,10 @@ use leptos::prelude::*;
 
 mod components;
 
-use components::ui::{Button, ButtonSize, ButtonType, ButtonVariant};
+use components::ui::{
+    Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
+    CollapsibleTrigger,
+};
 
 fn main() {
     leptos::mount::mount_to_body(App);
@@ -24,6 +27,12 @@ fn App() -> impl IntoView {
                     {move || if sending.get() { "Sending" } else { "Send message" }}
                 </Button>
             </form>
+            <CollapsibleRoot>
+                <CollapsibleTrigger>"Details"</CollapsibleTrigger>
+                <CollapsibleContent>
+                    <p>"Primitive-backed content"</p>
+                </CollapsibleContent>
+            </CollapsibleRoot>
         </main>
     }
 }
