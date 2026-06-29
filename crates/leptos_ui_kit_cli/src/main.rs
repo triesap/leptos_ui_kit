@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
 };
 
 use leptos_ui_kit_codegen::{
@@ -47,6 +47,8 @@ struct RegistrySourceContent {
 struct DoctorOutput {
     project_root: PathBuf,
     strict: bool,
+    check: bool,
+    trunk_build: bool,
     checks: Vec<DoctorCheck>,
 }
 
@@ -119,8 +121,42 @@ enum DoctorCheckStatus {
 fn main() {
     if let Err(error) = run(env::args_os().skip(1).collect(), &current_dir()) {
         eprintln!("{error}");
-        process::exit(1);
+        process::exit(exit_code_for_error(&error));
     }
+}
+
+fn exit_code_for_error(error: &str) -> i32 {
+    if error == "doctor checks failed" {
+        return 3;
+    }
+    if error.starts_with("usage:")
+        || error.contains("unsupported flag")
+        || error.contains("does not accept")
+        || error.contains("requires")
+        || error.contains("accepts exactly")
+        || error.contains("accepts at most")
+        || error.contains("non-utf8")
+    {
+        return 2;
+    }
+    if error.contains("local edits")
+        || error.contains("not tracked")
+        || error.contains("already tracked")
+        || error.contains("already exists")
+    {
+        return 10;
+    }
+    if error.contains("unsafe write path") || error.contains("path escapes") {
+        return 11;
+    }
+    if error.contains("built-in registry")
+        || error.contains("registry")
+        || error.contains("package")
+        || error.contains("not found")
+    {
+        return 12;
+    }
+    1
 }
 
 fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
@@ -188,6 +224,8 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
 fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
     let mut strict = false;
+    let mut check = false;
+    let mut trunk_build = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
@@ -197,9 +235,8 @@ fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
         match value {
             "--json" => json = true,
             "--strict" => strict = true,
-            "--check" | "--trunk-build" => {
-                return Err(format!("{value} will be implemented with build checks"));
-            }
+            "--check" => check = true,
+            "--trunk-build" => trunk_build = true,
             value if value.starts_with('-') => {
                 return Err(format!("unsupported flag for doctor: {value}"));
             }
@@ -207,9 +244,12 @@ fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let output = build_doctor_output(cwd, strict);
+    let output = build_doctor_output(cwd, strict, check, trunk_build);
     let status = doctor_status(&output);
     println!("{}", render_doctor_output(&output, json, status)?);
+    if output.has_failures() {
+        return Err("doctor checks failed".to_owned());
+    }
 
     Ok(())
 }
@@ -457,7 +497,7 @@ fn registry_item_source_output(
     })
 }
 
-fn build_doctor_output(cwd: &Path, strict: bool) -> DoctorOutput {
+fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
     let mut checks = Vec::new();
 
     match build_info_output(cwd) {
@@ -524,10 +564,57 @@ fn build_doctor_output(cwd: &Path, strict: bool) -> DoctorOutput {
         }
     }
 
+    if check {
+        checks.push(run_command_check(
+            "build.cargo_check",
+            cwd,
+            "cargo",
+            &["check", "--target", "wasm32-unknown-unknown"],
+        ));
+    }
+
+    if trunk_build {
+        checks.push(run_command_check("build.trunk", cwd, "trunk", &["build"]));
+    }
+
     DoctorOutput {
         project_root: cwd.to_path_buf(),
         strict,
+        check,
+        trunk_build,
         checks,
+    }
+}
+
+fn run_command_check(name: &str, cwd: &Path, program: &str, args: &[&str]) -> DoctorCheck {
+    match Command::new(program).args(args).current_dir(cwd).output() {
+        Ok(output) if output.status.success() => {
+            DoctorCheck::pass(name, format!("{} {} passed", program, args.join(" ")))
+        }
+        Ok(output) => DoctorCheck::fail(
+            name,
+            format!(
+                "{} {} failed: {}",
+                program,
+                args.join(" "),
+                command_output_summary(&output.stdout, &output.stderr)
+            ),
+        ),
+        Err(error) => DoctorCheck::fail(
+            name,
+            format!("failed to run {} {}: {error}", program, args.join(" ")),
+        ),
+    }
+}
+
+fn command_output_summary(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(stdout).trim().to_owned();
+    let summary = if !stderr.is_empty() { stderr } else { stdout };
+    if summary.is_empty() {
+        "process exited with a non-zero status".to_owned()
+    } else {
+        summary.chars().take(600).collect()
     }
 }
 
@@ -997,7 +1084,7 @@ leptos_router = "0.9.0-alpha"
             root,
         )
         .expect("run doctor");
-        let doctor = build_doctor_output(root, true);
+        let doctor = build_doctor_output(root, true, false, false);
         let output =
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
@@ -1020,5 +1107,62 @@ leptos_router = "0.9.0-alpha"
         .expect_err("tailwind flag should be unsupported");
 
         assert!(error.contains("unsupported flag for view"));
+    }
+
+    #[test]
+    fn exit_code_mapping_matches_contract() {
+        assert_eq!(
+            exit_code_for_error("unsupported flag for view: --tailwind"),
+            2
+        );
+        assert_eq!(exit_code_for_error("doctor checks failed"), 3);
+        assert_eq!(
+            exit_code_for_error(
+                "cannot safely patch src/components/ui/button.rs: target exists but is not tracked in state"
+            ),
+            10
+        );
+        assert_eq!(
+            exit_code_for_error("unsafe write path ../evil.rs: parent traversal"),
+            11
+        );
+        assert_eq!(
+            exit_code_for_error("built-in registry item not found: nope"),
+            12
+        );
+        assert_eq!(exit_code_for_error("failed to inspect project"), 1);
+    }
+
+    #[test]
+    fn doctor_strict_failure_returns_doctor_error() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        let error = run(
+            vec![
+                OsString::from("doctor"),
+                OsString::from("--strict"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect_err("doctor should fail");
+
+        assert_eq!(error, "doctor checks failed");
+        assert_eq!(exit_code_for_error(&error), 3);
+    }
+
+    #[test]
+    fn doctor_command_check_reports_missing_tools() {
+        let dir = tempdir().expect("tempdir");
+        let check = run_command_check(
+            "build.fake",
+            dir.path(),
+            "leptos-ui-kit-definitely-missing-tool",
+            &["build"],
+        );
+
+        assert_eq!(check.status, DoctorCheckStatus::Fail);
+        assert!(check.message.contains("failed to run"));
     }
 }
