@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: &str = "0.9.0-alpha";
 pub const COMPONENTS_SCHEMA_URL: &str =
-    "https://leptos-ui-kit.dev/schema/0.9.0-alpha/components.schema.json";
+    "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.json";
 pub const LEPTOS_VERSION: &str = "0.9.0-alpha";
 pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
 

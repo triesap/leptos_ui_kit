@@ -10,9 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::{LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION};
 
 pub const REGISTRY_SCHEMA_URL: &str =
-    "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry.schema.json";
+    "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
 pub const REGISTRY_ITEM_SCHEMA_URL: &str =
-    "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry-item.schema.json";
+    "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json";
 
 #[derive(Debug)]
 pub enum RegistryError {
@@ -719,7 +719,7 @@ mod tests {
     fn rejects_unknown_built_in_item_field() {
         let error = parse_registry_item_str(
             r#"{
-              "$schema": "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry-item.schema.json",
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
               "schemaVersion": "0.9.0-alpha",
               "name": "button",
               "kind": "ui",
@@ -748,7 +748,7 @@ mod tests {
     fn rejects_unsafe_target_path() {
         let item = parse_registry_item_str(
             r#"{
-              "$schema": "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry-item.schema.json",
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
               "schemaVersion": "0.9.0-alpha",
               "name": "button",
               "kind": "ui",

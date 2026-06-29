@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.json",
+  "title": "leptos_ui_kit components.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "project",
+    "leptos",
+    "install",
+    "styles",
+    "registry",
+    "state"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.json"
+    },
+    "schemaVersion": {
+      "const": "0.9.0-alpha"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "crateRoot",
+        "srcDir",
+        "indexHtml"
+      ],
+      "properties": {
+        "kind": {
+          "const": "single-crate-trunk-csr"
+        },
+        "crateRoot": {
+          "const": "."
+        },
+        "srcDir": {
+          "const": "src"
+        },
+        "indexHtml": {
+          "const": "index.html"
+        }
+      }
+    },
+    "leptos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "routerVersion",
+        "renderMode"
+      ],
+      "properties": {
+        "version": {
+          "const": "0.9.0-alpha"
+        },
+        "routerVersion": {
+          "const": "0.9.0-alpha"
+        },
+        "renderMode": {
+          "const": "csr"
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uiDir",
+        "uiMod",
+        "componentsMod"
+      ],
+      "properties": {
+        "uiDir": {
+          "const": "src/components/ui"
+        },
+        "uiMod": {
+          "const": "src/components/ui/mod.rs"
+        },
+        "componentsMod": {
+          "const": "src/components/mod.rs"
+        }
+      }
+    },
+    "styles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "css",
+        "classPrefix",
+        "cssVariablePrefix"
+      ],
+      "properties": {
+        "mode": {
+          "const": "pure-css"
+        },
+        "css": {
+          "const": "styles/app.css"
+        },
+        "classPrefix": {
+          "const": "luk"
+        },
+        "cssVariablePrefix": {
+          "const": "luk"
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "const": "builtin"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dir"
+      ],
+      "properties": {
+        "dir": {
+          "const": ".leptos-ui"
+        }
+      }
+    }
+  }
+}

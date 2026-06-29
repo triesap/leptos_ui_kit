@@ -1,5 +1,5 @@
 {
-  "$schema": "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry-item.schema.json",
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
   "schemaVersion": "0.9.0-alpha",
   "name": "button",
   "kind": "ui",

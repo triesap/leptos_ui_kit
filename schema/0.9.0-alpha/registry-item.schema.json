@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "title": "leptos_ui_kit registry item",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "name",
+    "kind",
+    "version",
+    "title",
+    "description",
+    "leptos",
+    "files",
+    "styles",
+    "cargoPlan"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json"
+    },
+    "schemaVersion": {
+      "const": "0.9.0-alpha"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "kind": {
+      "const": "ui"
+    },
+    "version": {
+      "const": "0.9.0-alpha"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "leptos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "routerVersion",
+        "renderMode"
+      ],
+      "properties": {
+        "version": {
+          "const": "0.9.0-alpha"
+        },
+        "routerVersion": {
+          "const": "0.9.0-alpha"
+        },
+        "renderMode": {
+          "const": "csr"
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/-]+\\.rs$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "path"
+            ],
+            "properties": {
+              "kind": {
+                "const": "ui"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]+\\.rs$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "styles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/-]+\\.css$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id"
+            ],
+            "properties": {
+              "kind": {
+                "const": "managed-css-block"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "registryDependencies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$"
+      }
+    },
+    "cargoPlan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "crate",
+          "version",
+          "required"
+        ],
+        "properties": {
+          "crate": {
+            "enum": [
+              "leptos",
+              "leptos_router"
+            ]
+          },
+          "version": {
+            "const": "0.9.0-alpha"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "extra": {
+      "type": "object"
+    }
+  }
+}
