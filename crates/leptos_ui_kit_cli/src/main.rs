@@ -138,7 +138,7 @@ fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<Strin
 }
 
 fn usage() -> String {
-    "usage: leptos_ui_kit_cli <info|view> [--json] [path-or-source]".to_owned()
+    "usage: leptos-ui <info|view> [--json] [path-or-source]".to_owned()
 }
 
 fn current_dir() -> PathBuf {
