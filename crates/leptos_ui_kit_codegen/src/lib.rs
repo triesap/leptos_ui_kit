@@ -227,6 +227,21 @@ pub enum PlannedFileAction {
     Update,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiModuleExport {
+    pub module: String,
+    pub symbols: Vec<String>,
+}
+
+impl UiModuleExport {
+    pub fn new(module: impl Into<String>, symbols: Vec<String>) -> Self {
+        Self {
+            module: module.into(),
+            symbols,
+        }
+    }
+}
+
 pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
     let mut files = Vec::new();
     let mut changes = Vec::new();
@@ -443,10 +458,114 @@ pub fn write_file_atomic(
     Ok(())
 }
 
+pub fn patch_css_block(
+    existing: &str,
+    block_id: &str,
+    block: &str,
+    tracked_baseline: Option<&str>,
+) -> Result<String, CodegenError> {
+    validate_css_block_id(block_id)?;
+    let replacement = normalize_managed_css_block(block_id, block)?;
+    let existing_block = find_managed_css_block(existing, block_id)?;
+
+    match existing_block {
+        Some(range) => {
+            let current = &existing[range.clone()];
+            if current == replacement {
+                return Ok(existing.to_owned());
+            }
+
+            match tracked_baseline {
+                Some(baseline) if current == normalize_managed_css_block(block_id, baseline)? => {
+                    let mut output = String::with_capacity(
+                        existing.len() + replacement.len().saturating_sub(current.len()),
+                    );
+                    output.push_str(&existing[..range.start]);
+                    output.push_str(&replacement);
+                    output.push_str(&existing[range.end..]);
+                    Ok(output)
+                }
+                Some(_) => unsafe_patch(
+                    "styles/app.css",
+                    format!("managed CSS block {block_id} differs from its tracked baseline"),
+                ),
+                None => unsafe_patch(
+                    "styles/app.css",
+                    format!("managed CSS block {block_id} already exists but is not tracked"),
+                ),
+            }
+        }
+        None => {
+            let mut output = existing.to_owned();
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            if !output.trim().is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&replacement);
+            Ok(output)
+        }
+    }
+}
+
+pub fn patch_components_mod(existing: Option<&str>) -> Result<String, CodegenError> {
+    patch_module_lines(
+        existing.unwrap_or_default(),
+        "src/components/mod.rs",
+        &["pub mod ui;"],
+    )
+}
+
+pub fn patch_ui_mod(
+    existing: Option<&str>,
+    exports: &[UiModuleExport],
+) -> Result<String, CodegenError> {
+    let mut lines = Vec::new();
+
+    for export in exports {
+        validate_patch_identifier(
+            &export.module,
+            "UI module name",
+            Path::new("src/components/ui/mod.rs"),
+        )?;
+        for symbol in &export.symbols {
+            validate_patch_identifier(
+                symbol,
+                "UI export symbol",
+                Path::new("src/components/ui/mod.rs"),
+            )?;
+        }
+
+        lines.push(format!("pub mod {};", export.module));
+        if !export.symbols.is_empty() {
+            lines.push(format!(
+                "pub use {}::{{{}}};",
+                export.module,
+                export.symbols.join(", ")
+            ));
+        }
+    }
+
+    let borrowed = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    patch_module_lines(
+        existing.unwrap_or_default(),
+        "src/components/ui/mod.rs",
+        &borrowed,
+    )
+}
+
 fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
     Err(CodegenError::UnsafePath {
         path: path.to_owned(),
         reason: reason.to_owned(),
+    })
+}
+
+fn unsafe_patch<T>(path: impl Into<PathBuf>, reason: impl Into<String>) -> Result<T, CodegenError> {
+    Err(CodegenError::UnsafePatch {
+        path: path.into(),
+        reason: reason.into(),
     })
 }
 
@@ -568,9 +687,22 @@ fn plan_component_modules(
             changes,
             "src/components/mod.rs",
             PlannedFileAction::Create,
-            "pub mod ui;\n".to_owned(),
+            patch_components_mod(None)?,
             ChangeKind::CreateFile,
         );
+    } else {
+        let existing = read_to_string(&components_mod)?;
+        let patched = patch_components_mod(Some(&existing))?;
+        if patched != existing {
+            push_file_plan(
+                files,
+                changes,
+                "src/components/mod.rs",
+                PlannedFileAction::Update,
+                patched,
+                ChangeKind::UpdateFile,
+            );
+        }
     }
 
     let ui_mod = project_root.join("src/components/ui/mod.rs");
@@ -585,6 +717,157 @@ fn plan_component_modules(
         );
     }
 
+    Ok(())
+}
+
+fn normalize_managed_css_block(block_id: &str, block: &str) -> Result<String, CodegenError> {
+    let start_marker = css_start_marker(block_id);
+    let end_marker = css_end_marker(block_id);
+
+    if block.matches(&start_marker).count() != 1 || block.matches(&end_marker).count() != 1 {
+        return unsafe_patch(
+            "styles/app.css",
+            format!("managed CSS block {block_id} must contain exactly one start and end marker"),
+        );
+    }
+
+    let Some(start) = block.find(&start_marker) else {
+        return unsafe_patch(
+            "styles/app.css",
+            format!("managed CSS block {block_id} is missing its start marker"),
+        );
+    };
+    let Some(end) = block.find(&end_marker) else {
+        return unsafe_patch(
+            "styles/app.css",
+            format!("managed CSS block {block_id} is missing its end marker"),
+        );
+    };
+    if start > end {
+        return unsafe_patch(
+            "styles/app.css",
+            format!("managed CSS block {block_id} markers are reversed"),
+        );
+    }
+
+    let mut normalized = block.trim_matches('\n').to_owned();
+    normalized.push('\n');
+    Ok(normalized)
+}
+
+fn find_managed_css_block(
+    existing: &str,
+    block_id: &str,
+) -> Result<Option<std::ops::Range<usize>>, CodegenError> {
+    let start_marker = css_start_marker(block_id);
+    let end_marker = css_end_marker(block_id);
+    let start_count = existing.matches(&start_marker).count();
+    let end_count = existing.matches(&end_marker).count();
+
+    match (start_count, end_count) {
+        (0, 0) => Ok(None),
+        (1, 1) => {
+            let start = existing.find(&start_marker).expect("count confirmed start");
+            let end_start = existing.find(&end_marker).expect("count confirmed end");
+            if start > end_start {
+                return unsafe_patch(
+                    "styles/app.css",
+                    format!("managed CSS block {block_id} markers are reversed"),
+                );
+            }
+            let mut end = end_start + end_marker.len();
+            if existing[end..].starts_with('\n') {
+                end += 1;
+            }
+            Ok(Some(start..end))
+        }
+        _ => unsafe_patch(
+            "styles/app.css",
+            format!("managed CSS block {block_id} markers are ambiguous"),
+        ),
+    }
+}
+
+fn css_start_marker(block_id: &str) -> String {
+    format!("/* leptos-ui-kit:start {block_id} */")
+}
+
+fn css_end_marker(block_id: &str) -> String {
+    format!("/* leptos-ui-kit:end {block_id} */")
+}
+
+fn patch_module_lines(
+    existing: &str,
+    logical_path: &str,
+    required_lines: &[&str],
+) -> Result<String, CodegenError> {
+    let mut output = existing.to_owned();
+
+    for line in required_lines {
+        if line.trim() != *line || line.is_empty() {
+            return unsafe_patch(logical_path, "module patch line must be normalized");
+        }
+        if output
+            .lines()
+            .any(|existing_line| existing_line.trim() == *line)
+        {
+            continue;
+        }
+        if detects_private_module_conflict(&output, line) {
+            return unsafe_patch(
+                logical_path,
+                format!("private module declaration conflicts with required line `{line}`"),
+            );
+        }
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+fn detects_private_module_conflict(existing: &str, required_line: &str) -> bool {
+    let Some(module_name) = required_line
+        .strip_prefix("pub mod ")
+        .and_then(|line| line.strip_suffix(';'))
+    else {
+        return false;
+    };
+    let private_line = format!("mod {module_name};");
+    existing
+        .lines()
+        .any(|existing_line| existing_line.trim() == private_line)
+}
+
+fn validate_patch_identifier(value: &str, label: &str, path: &Path) -> Result<(), CodegenError> {
+    if value.is_empty()
+        || value.as_bytes()[0].is_ascii_digit()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return unsafe_patch(
+            path,
+            format!("{label} must be a Rust-style ASCII identifier"),
+        );
+    }
+    Ok(())
+}
+
+fn validate_css_block_id(block_id: &str) -> Result<(), CodegenError> {
+    if block_id.is_empty()
+        || !block_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return unsafe_patch(
+            "styles/app.css",
+            "CSS block id must be lowercase ASCII, digits, or hyphens",
+        );
+    }
     Ok(())
 }
 
@@ -773,6 +1056,101 @@ mod tests {
         let second = apply_init(root).expect("second init");
 
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn css_patcher_appends_managed_block() {
+        let existing = ":root {\n  color-scheme: light;\n}\n";
+        let block =
+            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+
+        let patched = patch_css_block(existing, "button", block, None).expect("patch css");
+
+        assert!(patched.starts_with(existing));
+        assert!(patched.contains("/* leptos-ui-kit:start button */"));
+        assert!(patched.contains(".luk-button {}"));
+        assert!(patched.ends_with("/* leptos-ui-kit:end button */\n"));
+    }
+
+    #[test]
+    fn css_patcher_is_idempotent_for_existing_matching_block() {
+        let block =
+            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+
+        let patched = patch_css_block(block, "button", block, None).expect("patch css");
+
+        assert_eq!(patched, block);
+    }
+
+    #[test]
+    fn css_patcher_replaces_tracked_baseline() {
+        let baseline = "/* leptos-ui-kit:start button */\n.luk-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+        let next = "/* leptos-ui-kit:start button */\n.luk-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
+        let existing = format!("/* app */\n{baseline}.other {{}}\n");
+
+        let patched =
+            patch_css_block(&existing, "button", next, Some(baseline)).expect("patch css");
+
+        assert!(patched.contains("color: blue"));
+        assert!(!patched.contains("color: red"));
+        assert!(patched.contains(".other {}"));
+    }
+
+    #[test]
+    fn css_patcher_rejects_edited_tracked_block() {
+        let baseline = "/* leptos-ui-kit:start button */\n.luk-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+        let edited = "/* leptos-ui-kit:start button */\n.luk-button { color: green; }\n/* leptos-ui-kit:end button */\n";
+        let next = "/* leptos-ui-kit:start button */\n.luk-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
+
+        let error =
+            patch_css_block(edited, "button", next, Some(baseline)).expect_err("should conflict");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }));
+    }
+
+    #[test]
+    fn module_patchers_insert_required_exports() {
+        let components = patch_components_mod(Some("// existing\n")).expect("patch components");
+        let ui = patch_ui_mod(
+            Some("// generated exports\n"),
+            &[UiModuleExport::new(
+                "button",
+                vec![
+                    "Button".to_owned(),
+                    "ButtonSize".to_owned(),
+                    "ButtonVariant".to_owned(),
+                ],
+            )],
+        )
+        .expect("patch ui mod");
+
+        assert_eq!(components, "// existing\npub mod ui;\n");
+        assert_eq!(
+            ui,
+            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonVariant};\n"
+        );
+        assert_eq!(
+            patch_ui_mod(
+                Some(&ui),
+                &[UiModuleExport::new(
+                    "button",
+                    vec![
+                        "Button".to_owned(),
+                        "ButtonSize".to_owned(),
+                        "ButtonVariant".to_owned(),
+                    ],
+                )],
+            )
+            .expect("idempotent enough"),
+            ui
+        );
+    }
+
+    #[test]
+    fn component_module_patcher_rejects_private_conflict() {
+        let error = patch_components_mod(Some("mod ui;\n")).expect_err("private conflict");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }));
     }
 
     #[test]
