@@ -11,7 +11,7 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, SCHEMA_VERSION,
+    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, RegistryItem, SCHEMA_VERSION,
     canonical_components_json, components_config_to_json, components_config_with_desired_item,
     desired_builtin_button_item, load_built_in_registry_item, parse_components_json_str,
     read_built_in_registry_source,
@@ -426,13 +426,28 @@ pub struct InstalledStyleBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiModuleExport {
     pub module: String,
+    pub path: String,
     pub symbols: Vec<String>,
 }
 
 impl UiModuleExport {
     pub fn new(module: impl Into<String>, symbols: Vec<String>) -> Self {
+        let module = module.into();
+        Self {
+            path: module.clone(),
+            module,
+            symbols,
+        }
+    }
+
+    pub fn with_path(
+        module: impl Into<String>,
+        path: impl Into<String>,
+        symbols: Vec<String>,
+    ) -> Self {
         Self {
             module: module.into(),
+            path: path.into(),
             symbols,
         }
     }
@@ -701,7 +716,7 @@ fn plan_built_in_item(
     )?;
 
     let ui_mod = planned_or_existing_content(files, project_root, "src/components/ui/mod.rs")?;
-    let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item.name)?)?;
+    let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item)?)?;
     upsert_planned_file(
         project_root,
         files,
@@ -1058,6 +1073,11 @@ pub fn patch_ui_mod(
             "UI module name",
             Path::new("src/components/ui/mod.rs"),
         )?;
+        validate_module_path(
+            &export.path,
+            "UI export path",
+            Path::new("src/components/ui/mod.rs"),
+        )?;
         for symbol in &export.symbols {
             validate_patch_identifier(
                 symbol,
@@ -1070,7 +1090,7 @@ pub fn patch_ui_mod(
         if !export.symbols.is_empty() {
             lines.push(format!(
                 "pub use {}::{{{}}};",
-                export.module,
+                export.path,
                 export.symbols.join(", ")
             ));
         }
@@ -1305,22 +1325,53 @@ fn read_required_baseline(project_root: &Path, logical_path: &str) -> Result<Str
     })
 }
 
-fn ui_exports_for_item(item_name: &str) -> Result<Vec<UiModuleExport>, CodegenError> {
-    match item_name {
-        "button" => Ok(vec![UiModuleExport::new(
-            "button",
-            vec![
-                "Button".to_owned(),
-                "ButtonSize".to_owned(),
-                "ButtonType".to_owned(),
-                "ButtonVariant".to_owned(),
-            ],
-        )]),
-        _ => unsafe_patch(
-            "src/components/ui/mod.rs",
-            format!("no MVP export strategy is defined for {item_name}"),
-        ),
+fn ui_exports_for_item(item: &RegistryItem) -> Result<Vec<UiModuleExport>, CodegenError> {
+    let mut exports = BTreeMap::<(String, String), Vec<String>>::new();
+    for file in &item.files {
+        if file.target.exports.is_empty() {
+            continue;
+        }
+        let (module, path) = ui_export_paths_for_target(&file.target.path)?;
+        exports
+            .entry((module, path))
+            .or_default()
+            .extend(file.target.exports.clone());
     }
+
+    let mut output = Vec::new();
+    for ((module, path), mut symbols) in exports {
+        symbols.sort();
+        symbols.dedup();
+        output.push(UiModuleExport::with_path(module, path, symbols));
+    }
+    Ok(output)
+}
+
+fn ui_export_paths_for_target(target_path: &str) -> Result<(String, String), CodegenError> {
+    let parts = target_path.split('/').collect::<Vec<_>>();
+    let Some(first) = parts.first() else {
+        return unsafe_patch("src/components/ui/mod.rs", "missing UI target path");
+    };
+    let module = if parts.len() == 1 {
+        first.trim_end_matches(".rs").to_owned()
+    } else {
+        (*first).to_owned()
+    };
+
+    let mut path_parts = Vec::new();
+    if parts.len() == 1 {
+        path_parts.push(module.clone());
+    } else {
+        for part in &parts[..parts.len() - 1] {
+            path_parts.push((*part).to_owned());
+        }
+        let file_stem = parts[parts.len() - 1].trim_end_matches(".rs");
+        if file_stem != "mod" {
+            path_parts.push(file_stem.to_owned());
+        }
+    }
+
+    Ok((module, path_parts.join("::")))
 }
 
 fn built_in_item_id(item_name: &str) -> String {
@@ -1661,6 +1712,18 @@ fn validate_patch_identifier(value: &str, label: &str, path: &Path) -> Result<()
     Ok(())
 }
 
+fn validate_module_path(value: &str, label: &str, path: &Path) -> Result<(), CodegenError> {
+    if value.is_empty() || value.contains(":::") {
+        return unsafe_patch(path, format!("{label} must be a Rust module path"));
+    }
+
+    for segment in value.split("::") {
+        validate_patch_identifier(segment, label, path)?;
+    }
+
+    Ok(())
+}
+
 fn validate_css_block_id(block_id: &str) -> Result<(), CodegenError> {
     if block_id.is_empty()
         || !block_id
@@ -1978,6 +2041,47 @@ mod tests {
     }
 
     #[test]
+    fn item_planner_supports_nested_ui_targets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        let mut files = Vec::new();
+        let mut changes = Vec::new();
+        let mut state = InstallState::empty(hash_bytes(b"components"));
+        let item = nested_registry_item();
+
+        let item_id = plan_built_in_item(root, &mut files, &mut changes, &mut state, &item)
+            .expect("plan item");
+        let paths = files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        let ui_mod = files
+            .iter()
+            .find(|file| file.path == "src/components/ui/mod.rs")
+            .expect("ui mod");
+
+        assert_eq!(item_id, "builtin:nested");
+        assert!(paths.contains(&"src/components/ui/nested/root.rs"));
+        assert!(paths.contains(&".leptos-ui/baselines/builtin-nested/nested/root.rs"));
+        assert!(
+            ui_mod
+                .content
+                .contains("pub use nested::root::{NestedButton};")
+        );
+        assert_eq!(
+            state.files_by_path.get("src/components/ui/nested/root.rs"),
+            Some(&"builtin:nested".to_owned())
+        );
+    }
+
+    #[test]
     fn add_write_installs_button_state_and_baselines() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -2216,27 +2320,8 @@ mod tests {
         let components = patch_components_mod(Some("// existing\n")).expect("patch components");
         let ui = patch_ui_mod(
             Some("// generated exports\n"),
-            &[UiModuleExport::new(
-                "button",
-                vec![
-                    "Button".to_owned(),
-                    "ButtonSize".to_owned(),
-                    "ButtonType".to_owned(),
-                    "ButtonVariant".to_owned(),
-                ],
-            )],
-        )
-        .expect("patch ui mod");
-
-        assert_eq!(components, "// existing\npub mod ui;\n");
-        assert_eq!(
-            ui,
-            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonType, ButtonVariant};\n"
-        );
-        assert_eq!(
-            patch_ui_mod(
-                Some(&ui),
-                &[UiModuleExport::new(
+            &[
+                UiModuleExport::new(
                     "button",
                     vec![
                         "Button".to_owned(),
@@ -2244,7 +2329,40 @@ mod tests {
                         "ButtonType".to_owned(),
                         "ButtonVariant".to_owned(),
                     ],
-                )],
+                ),
+                UiModuleExport::with_path(
+                    "collapsible",
+                    "collapsible::root",
+                    vec!["CollapsibleRoot".to_owned()],
+                ),
+            ],
+        )
+        .expect("patch ui mod");
+
+        assert_eq!(components, "// existing\npub mod ui;\n");
+        assert_eq!(
+            ui,
+            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonType, ButtonVariant};\npub mod collapsible;\npub use collapsible::root::{CollapsibleRoot};\n"
+        );
+        assert_eq!(
+            patch_ui_mod(
+                Some(&ui),
+                &[
+                    UiModuleExport::new(
+                        "button",
+                        vec![
+                            "Button".to_owned(),
+                            "ButtonSize".to_owned(),
+                            "ButtonType".to_owned(),
+                            "ButtonVariant".to_owned(),
+                        ],
+                    ),
+                    UiModuleExport::with_path(
+                        "collapsible",
+                        "collapsible::root",
+                        vec!["CollapsibleRoot".to_owned()],
+                    ),
+                ],
             )
             .expect("idempotent enough"),
             ui
@@ -2266,6 +2384,7 @@ mod tests {
             "styles/app.css".to_owned(),
             "src/components/mod.rs".to_owned(),
             "src/components/ui/button.rs".to_owned(),
+            "src/components/ui/nested/root.rs".to_owned(),
             ".leptos-ui/state.json".to_owned(),
         ];
 
@@ -2343,5 +2462,47 @@ mod tests {
             ":root {}\n"
         );
         assert!(!root.join(".leptos-ui/lock").exists());
+    }
+
+    fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {
+        leptos_ui_kit_registry::ResolvedRegistryItem {
+            source_kind: leptos_ui_kit_registry::RegistrySourceKind::BuiltIn,
+            source_path: PathBuf::from("registry/ui/nested.json"),
+            content_hash: hash_bytes(b"nested"),
+            targets: leptos_ui_kit_registry::ResolvedRegistryTargets {
+                ui_files: vec![leptos_ui_kit_registry::ResolvedUiTarget {
+                    source: "ui/button.rs".to_owned(),
+                    path: "nested/root.rs".to_owned(),
+                }],
+                style_blocks: Vec::new(),
+            },
+            item: leptos_ui_kit_registry::RegistryItem {
+                schema: leptos_ui_kit_registry::REGISTRY_ITEM_SCHEMA_URL.to_owned(),
+                schema_version: leptos_ui_kit_registry::SCHEMA_VERSION.to_owned(),
+                name: "nested".to_owned(),
+                kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
+                version: leptos_ui_kit_registry::SCHEMA_VERSION.to_owned(),
+                title: "Nested".to_owned(),
+                description: "Nested".to_owned(),
+                leptos: leptos_ui_kit_registry::RegistryLeptos {
+                    version: leptos_ui_kit_registry::LEPTOS_VERSION.to_owned(),
+                    router_version: leptos_ui_kit_registry::LEPTOS_ROUTER_VERSION.to_owned(),
+                    render_mode: leptos_ui_kit_registry::RenderMode::Csr,
+                },
+                accessibility: leptos_ui_kit_registry::RegistryAccessibility::default(),
+                files: vec![leptos_ui_kit_registry::RegistryItemFile {
+                    source: "ui/button.rs".to_owned(),
+                    target: leptos_ui_kit_registry::RegistryFileTarget {
+                        kind: leptos_ui_kit_registry::RegistryFileTargetKind::Ui,
+                        path: "nested/root.rs".to_owned(),
+                        exports: vec!["NestedButton".to_owned()],
+                    },
+                }],
+                styles: Vec::new(),
+                registry_dependencies: Vec::new(),
+                cargo_plan: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+        }
     }
 }

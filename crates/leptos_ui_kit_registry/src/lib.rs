@@ -24,12 +24,13 @@ pub use detect::{
 };
 pub use item::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, REGISTRY_ITEM_SCHEMA_URL,
-    REGISTRY_SCHEMA_URL, RegistryError, RegistryFileTarget, RegistryFileTargetKind, RegistryItem,
-    RegistryItemFile, RegistryItemKind, RegistryItemStyle, RegistryLeptos, RegistryRoot,
-    RegistryRootItem, RegistrySourceKind, RegistryStyleTarget, RegistryStyleTargetKind,
-    ResolvedRegistryItem, ResolvedRegistryTargets, ResolvedStyleBlockTarget, ResolvedUiTarget,
-    WEB_UI_PRIMITIVES_GIT_URL, load_built_in_registry_item, load_built_in_registry_root,
-    load_registry_item, parse_registry_item_str, parse_registry_root_str,
-    read_built_in_registry_source, registry_item_content_hash, resolve_built_in_registry_items,
-    resolve_registry_targets, validate_registry_graph,
+    REGISTRY_SCHEMA_URL, RegistryAccessibility, RegistryAccessibilityBehavior, RegistryError,
+    RegistryFileTarget, RegistryFileTargetKind, RegistryItem, RegistryItemFile, RegistryItemKind,
+    RegistryItemStyle, RegistryLeptos, RegistryRoot, RegistryRootItem, RegistrySourceKind,
+    RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
+    ResolvedStyleBlockTarget, ResolvedUiTarget, WEB_UI_PRIMITIVES_GIT_URL,
+    load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
+    parse_registry_item_str, parse_registry_root_str, read_built_in_registry_source,
+    registry_item_content_hash, resolve_built_in_registry_items, resolve_registry_targets,
+    validate_registry_graph,
 };

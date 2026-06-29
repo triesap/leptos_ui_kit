@@ -62,6 +62,40 @@
         }
       }
     },
+    "accessibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "behaviors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "required"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "required": {
+                "type": "boolean"
+              }
+            }
+          },
+          "uniqueItems": true
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "files": {
       "type": "array",
       "items": {
@@ -89,7 +123,15 @@
               },
               "path": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9._-]+\\.rs$"
+                "pattern": "^([a-z_][a-z0-9_]*\\.rs|[a-z_][a-z0-9_]*(/[a-z_][a-z0-9_]*)*/([a-z_][a-z0-9_]*|mod)\\.rs)$"
+              },
+              "exports": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "uniqueItems": true
               }
             }
           }

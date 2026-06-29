@@ -11,12 +11,31 @@
     "routerVersion": "0.9.0-alpha",
     "renderMode": "csr"
   },
+  "accessibility": {
+    "behaviors": [
+      {
+        "name": "native-button-semantics",
+        "required": true
+      },
+      {
+        "name": "focus-visible-state",
+        "required": true
+      }
+    ],
+    "notes": []
+  },
   "files": [
     {
       "source": "ui/button.rs",
       "target": {
         "kind": "ui",
-        "path": "button.rs"
+        "path": "button.rs",
+        "exports": [
+          "Button",
+          "ButtonSize",
+          "ButtonType",
+          "ButtonVariant"
+        ]
       }
     }
   ],

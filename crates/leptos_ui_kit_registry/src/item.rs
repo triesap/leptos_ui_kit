@@ -147,6 +147,8 @@ pub struct RegistryItem {
     pub title: String,
     pub description: String,
     pub leptos: RegistryLeptos,
+    #[serde(default)]
+    pub accessibility: RegistryAccessibility,
     pub files: Vec<RegistryItemFile>,
     pub styles: Vec<RegistryItemStyle>,
     #[serde(default)]
@@ -163,6 +165,7 @@ impl RegistryItem {
         validate_item_name(&self.name)?;
         expect_string("version", SCHEMA_VERSION, &self.version)?;
         self.leptos.validate()?;
+        self.accessibility.validate()?;
 
         let mut targets = BTreeSet::new();
         for file in &self.files {
@@ -224,6 +227,48 @@ impl RegistryLeptos {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryAccessibility {
+    #[serde(default)]
+    pub behaviors: Vec<RegistryAccessibilityBehavior>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl RegistryAccessibility {
+    fn validate(&self) -> Result<(), RegistryError> {
+        let mut behaviors = BTreeSet::new();
+        for behavior in &self.behaviors {
+            behavior.validate()?;
+            if !behaviors.insert(&behavior.name) {
+                return Err(RegistryError::InvalidValue {
+                    field: "accessibility.behaviors[].name",
+                    expected: "deduplicated behavior names".to_owned(),
+                    actual: behavior.name.clone(),
+                });
+            }
+        }
+        for note in &self.notes {
+            validate_non_empty_string("accessibility.notes[]", note)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryAccessibilityBehavior {
+    pub name: String,
+    pub required: bool,
+}
+
+impl RegistryAccessibilityBehavior {
+    fn validate(&self) -> Result<(), RegistryError> {
+        validate_kebab_name("accessibility.behaviors[].name", &self.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegistryItemFile {
@@ -243,11 +288,14 @@ impl RegistryItemFile {
 pub struct RegistryFileTarget {
     pub kind: RegistryFileTargetKind,
     pub path: String,
+    #[serde(default)]
+    pub exports: Vec<String>,
 }
 
 impl RegistryFileTarget {
     fn validate(&self) -> Result<(), RegistryError> {
-        validate_safe_file_name("files[].target.path", &self.path)
+        validate_ui_target_path("files[].target.path", &self.path)?;
+        validate_export_symbols("files[].target.exports", &self.exports)
     }
 }
 
@@ -733,6 +781,10 @@ fn expect_string(field: &'static str, expected: &str, actual: &str) -> Result<()
 }
 
 fn validate_item_name(value: &str) -> Result<(), RegistryError> {
+    validate_kebab_name("name", value)
+}
+
+fn validate_kebab_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
     if !value.is_empty()
         && value
             .bytes()
@@ -741,8 +793,8 @@ fn validate_item_name(value: &str) -> Result<(), RegistryError> {
         Ok(())
     } else {
         Err(RegistryError::InvalidValue {
-            field: "name",
-            expected: "ASCII lowercase kebab-case item name".to_owned(),
+            field,
+            expected: "ASCII lowercase kebab-case name".to_owned(),
             actual: value.to_owned(),
         })
     }
@@ -765,14 +817,16 @@ fn validate_registry_source_path(field: &'static str, value: &str) -> Result<(),
     Ok(())
 }
 
-fn validate_safe_file_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    if value.is_empty()
-        || value.starts_with('.')
-        || value.contains('/')
+fn validate_ui_target_path(field: &'static str, value: &str) -> Result<(), RegistryError> {
+    let path = Path::new(value);
+    if value == "mod.rs"
+        || value.is_empty()
         || value.contains('\\')
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'.'
-        })
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || !value.ends_with(".rs")
     {
         return Err(RegistryError::UnsafePath {
             field,
@@ -780,6 +834,96 @@ fn validate_safe_file_name(field: &'static str, value: &str) -> Result<(), Regis
         });
     }
 
+    let mut segments = value.split('/').collect::<Vec<_>>();
+    let Some(file_name) = segments.pop() else {
+        return Err(RegistryError::UnsafePath {
+            field,
+            path: value.to_owned(),
+        });
+    };
+    let Some(module_name) = file_name.strip_suffix(".rs") else {
+        return Err(RegistryError::UnsafePath {
+            field,
+            path: value.to_owned(),
+        });
+    };
+
+    for segment in segments {
+        validate_rust_module_segment(field, segment).map_err(|_| RegistryError::UnsafePath {
+            field,
+            path: value.to_owned(),
+        })?;
+    }
+
+    if module_name != "mod" {
+        validate_rust_module_segment(field, module_name).map_err(|_| {
+            RegistryError::UnsafePath {
+                field,
+                path: value.to_owned(),
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+fn validate_export_symbols(field: &'static str, symbols: &[String]) -> Result<(), RegistryError> {
+    let mut seen = BTreeSet::new();
+    for symbol in symbols {
+        validate_rust_identifier(field, symbol)?;
+        if !seen.insert(symbol) {
+            return Err(RegistryError::InvalidValue {
+                field,
+                expected: "deduplicated Rust export symbols".to_owned(),
+                actual: symbol.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_rust_identifier(field: &'static str, value: &str) -> Result<(), RegistryError> {
+    if value.is_empty()
+        || value.as_bytes()[0].is_ascii_digit()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII Rust identifier".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_rust_module_segment(field: &'static str, value: &str) -> Result<(), RegistryError> {
+    if value.is_empty()
+        || value.as_bytes()[0].is_ascii_digit()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII lowercase Rust module segment".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_non_empty_string(field: &'static str, value: &str) -> Result<(), RegistryError> {
+    if value.trim().is_empty() {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "non-empty string".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -1086,6 +1230,7 @@ mod tests {
         let root = built_in_registry_root();
         let source = fs::read_to_string(root.join("ui/button.rs")).expect("read button source");
         let css = fs::read_to_string(root.join("styles/button.css")).expect("read button css");
+        let item = load_built_in_registry_item("button").expect("load button");
 
         assert!(source.contains("use leptos::prelude::*;"));
         assert!(source.contains("#[component]"));
@@ -1101,6 +1246,41 @@ mod tests {
         assert!(css.contains("--luk-button-lg-min-height"));
         assert!(css.contains(":focus-visible"));
         assert!(!css.contains("@import"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "native-button-semantics" && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
+        );
+    }
+
+    #[test]
+    fn accepts_nested_ui_target_paths() {
+        let mut item = item_with_name_and_target("nested", "nested/mod.rs", "nested", &[]);
+        item.files[0].target.exports = vec!["Nested".to_owned()];
+
+        item.validate().expect("nested target should validate");
+    }
+
+    #[test]
+    fn rejects_unsafe_or_noncanonical_ui_target_paths() {
+        for path in [
+            "mod.rs",
+            "nested/../root.rs",
+            "nested/Root.rs",
+            ".hidden/root.rs",
+            "nested/root.txt",
+        ] {
+            let item = item_with_name_and_target("nested", path, "nested", &[]);
+            let error = item.validate().expect_err("target path should fail");
+
+            assert!(matches!(error, RegistryError::UnsafePath { .. }), "{path}");
+        }
     }
 
     #[test]
@@ -1161,11 +1341,13 @@ mod tests {
                 router_version: LEPTOS_ROUTER_VERSION.to_owned(),
                 render_mode: RenderMode::Csr,
             },
+            accessibility: RegistryAccessibility::default(),
             files: vec![RegistryItemFile {
                 source: format!("ui/{file_target}"),
                 target: RegistryFileTarget {
                     kind: RegistryFileTargetKind::Ui,
                     path: file_target.to_owned(),
+                    exports: Vec::new(),
                 },
             }],
             styles: vec![RegistryItemStyle {
