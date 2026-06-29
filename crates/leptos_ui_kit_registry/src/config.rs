@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt,
     path::{Path, PathBuf},
 };
@@ -10,6 +11,9 @@ pub const COMPONENTS_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.json";
 pub const LEPTOS_VERSION: &str = "0.9.0-alpha";
 pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
+pub const TOOL_PACKAGE: &str = "leptos_ui_kit_cli";
+pub const TOOL_BINARY: &str = "leptos_ui_kit";
+pub const TOOL_GIT_URL: &str = "https://github.com/triesap/leptos_ui_kit";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -27,6 +31,10 @@ pub enum ConfigError {
     PathTraversal {
         field: &'static str,
         value: String,
+    },
+    MissingToolProvenance {
+        package: &'static str,
+        binary: &'static str,
     },
 }
 
@@ -52,6 +60,12 @@ impl fmt::Display for ConfigError {
                     "components.json path {field} must not traverse parent segments: {value}"
                 )
             }
+            Self::MissingToolProvenance { package, binary } => {
+                write!(
+                    f,
+                    "missing tool provenance for {package}/{binary}; pass an explicit git rev"
+                )
+            }
         }
     }
 }
@@ -70,11 +84,13 @@ pub struct ComponentsConfig {
     #[serde(rename = "$schema")]
     pub schema: String,
     pub schema_version: String,
+    pub tool: ToolConfig,
     pub project: ProjectConfig,
     pub leptos: LeptosConfig,
     pub install: InstallConfig,
     pub styles: StylesConfig,
     pub registry: RegistryConfig,
+    pub items: Vec<DesiredItemConfig>,
     pub state: StateConfig,
 }
 
@@ -82,13 +98,48 @@ impl ComponentsConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         expect_string("$schema", COMPONENTS_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
+        self.tool.validate()?;
         self.project.validate()?;
         self.leptos.validate()?;
         self.install.validate()?;
         self.styles.validate()?;
         self.registry.validate()?;
+        validate_desired_items(&self.items)?;
         self.state.validate()?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToolConfig {
+    pub package: String,
+    pub binary: String,
+    pub source: ToolSourceConfig,
+}
+
+impl ToolConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_string("tool.package", TOOL_PACKAGE, &self.package)?;
+        expect_string("tool.binary", TOOL_BINARY, &self.binary)?;
+        self.source.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ToolSourceConfig {
+    Git { url: String, rev: String },
+}
+
+impl ToolSourceConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        match self {
+            Self::Git { url, rev } => {
+                expect_string("tool.source.url", TOOL_GIT_URL, url)?;
+                validate_git_rev("tool.source.rev", rev)
+            }
+        }
     }
 }
 
@@ -201,6 +252,27 @@ pub enum RegistrySource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesiredItemConfig {
+    pub name: DesiredItemName,
+    pub source: RegistrySource,
+}
+
+impl DesiredItemConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        match (self.name, self.source) {
+            (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DesiredItemName {
+    Button,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StateConfig {
     pub dir: String,
 }
@@ -231,6 +303,7 @@ pub struct InstallRoots {
 pub struct NormalizedProjectConfig {
     pub schema_version: String,
     pub render_mode: RenderMode,
+    pub desired_items: Vec<DesiredItemConfig>,
     pub workspace_mode: WorkspaceMode,
     pub project_root: PathBuf,
     pub crate_root: PathBuf,
@@ -244,10 +317,32 @@ pub struct NormalizeOptions {
     pub project_root: PathBuf,
 }
 
-pub fn canonical_components_config() -> ComponentsConfig {
-    ComponentsConfig {
+pub fn canonical_tool_config() -> Result<ToolConfig, ConfigError> {
+    let Some(rev) = option_env!("LEPTOS_UI_KIT_GIT_REV") else {
+        return Err(ConfigError::MissingToolProvenance {
+            package: TOOL_PACKAGE,
+            binary: TOOL_BINARY,
+        });
+    };
+
+    let tool = ToolConfig {
+        package: TOOL_PACKAGE.to_owned(),
+        binary: TOOL_BINARY.to_owned(),
+        source: ToolSourceConfig::Git {
+            url: TOOL_GIT_URL.to_owned(),
+            rev: rev.to_owned(),
+        },
+    };
+    tool.validate()?;
+    Ok(tool)
+}
+
+pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
+    let tool = canonical_tool_config()?;
+    let config = ComponentsConfig {
         schema: COMPONENTS_SCHEMA_URL.to_owned(),
         schema_version: SCHEMA_VERSION.to_owned(),
+        tool,
         project: ProjectConfig {
             kind: ProjectKind::SingleCrateTrunkCsr,
             crate_root: ".".to_owned(),
@@ -271,14 +366,66 @@ pub fn canonical_components_config() -> ComponentsConfig {
         registry: RegistryConfig {
             source: RegistrySource::Builtin,
         },
+        items: Vec::new(),
         state: StateConfig {
             dir: ".leptos-ui".to_owned(),
         },
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+pub fn components_config_with_desired_item(
+    mut config: ComponentsConfig,
+    item: DesiredItemConfig,
+) -> Result<ComponentsConfig, ConfigError> {
+    if !config
+        .items
+        .iter()
+        .any(|existing| existing.name == item.name)
+    {
+        config.items.push(item);
+    }
+    config.validate()?;
+    Ok(config)
+}
+
+pub fn desired_builtin_button_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Button,
+        source: RegistrySource::Builtin,
+    }
+}
+
+fn validate_desired_items(items: &[DesiredItemConfig]) -> Result<(), ConfigError> {
+    let mut names = BTreeSet::new();
+    for item in items {
+        item.validate()?;
+        if !names.insert(item.name) {
+            return Err(ConfigError::InvalidValue {
+                field: "items",
+                expected: "unique desired item names",
+                actual: format!("{:?}", item.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), ConfigError> {
+    if rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidValue {
+            field,
+            expected: "40-character git commit hash",
+            actual: rev.to_owned(),
+        })
     }
 }
 
 pub fn canonical_components_json() -> Result<String, ConfigError> {
-    let mut output = serde_json::to_string_pretty(&canonical_components_config())
+    let mut output = serde_json::to_string_pretty(&canonical_components_config()?)
         .map_err(ConfigError::Serialize)?;
     output.push('\n');
     Ok(output)
@@ -312,6 +459,7 @@ pub fn normalize_single_crate_project(
     Ok(NormalizedProjectConfig {
         schema_version: config.schema_version.clone(),
         render_mode: config.leptos.render_mode,
+        desired_items: config.items.clone(),
         workspace_mode: WorkspaceMode::SingleCrate,
         project_root: project_root.clone(),
         crate_root,
@@ -400,11 +548,15 @@ mod tests {
         let config = parse_components_json_str(&valid_config_json()).expect("parse config");
 
         assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert_eq!(config.tool.package, TOOL_PACKAGE);
+        assert_eq!(config.tool.binary, TOOL_BINARY);
+        assert!(matches!(config.tool.source, ToolSourceConfig::Git { .. }));
         assert_eq!(config.leptos.version, LEPTOS_VERSION);
         assert_eq!(config.leptos.router_version, LEPTOS_ROUTER_VERSION);
         assert_eq!(config.leptos.render_mode, RenderMode::Csr);
         assert_eq!(config.styles.mode, StylesMode::PureCss);
         assert_eq!(config.registry.source, RegistrySource::Builtin);
+        assert!(config.items.is_empty());
     }
 
     #[test]
@@ -415,8 +567,82 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.ends_with('\n'));
         assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(first.contains("\"package\": \"leptos_ui_kit_cli\""));
+        assert!(first.contains("\"binary\": \"leptos_ui_kit\""));
+        assert!(first.contains("\"items\": []"));
         assert!(!first.contains("classPrefix"));
         assert!(!first.contains("cssVariablePrefix"));
+    }
+
+    #[test]
+    fn records_desired_builtin_button_item() {
+        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("add item");
+
+        assert_eq!(config.items.len(), 1);
+        assert_eq!(config.items[0].name, DesiredItemName::Button);
+        assert_eq!(config.items[0].source, RegistrySource::Builtin);
+    }
+
+    #[test]
+    fn desired_item_add_is_idempotent() {
+        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("add item");
+        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("add item");
+
+        assert_eq!(config.items.len(), 1);
+    }
+
+    #[test]
+    fn rejects_invalid_tool_rev() {
+        let input = valid_config_json().replace("\"rev\": \"", "\"rev\": \"not-a-rev");
+
+        let error = parse_components_json_str(&input).expect_err("rev should fail");
+
+        assert!(
+            matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.rev")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_tool_url() {
+        let input = valid_config_json().replace(
+            "\"url\": \"https://github.com/triesap/leptos_ui_kit\"",
+            "\"url\": \"https://example.com/leptos_ui_kit\"",
+        );
+
+        let error = parse_components_json_str(&input).expect_err("url should fail");
+
+        assert!(
+            matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.url")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_desired_item() {
+        let input = valid_config_json().replace(
+            "\"items\": []",
+            r#""items": [{"name":"card","source":"builtin"}]"#,
+        );
+
+        let error = parse_components_json_str(&input).expect_err("item should fail");
+
+        assert!(matches!(error, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_desired_items() {
+        let input = valid_config_json().replace(
+            "\"items\": []",
+            r#""items": [{"name":"button","source":"builtin"},{"name":"button","source":"builtin"}]"#,
+        );
+
+        let error = parse_components_json_str(&input).expect_err("duplicate should fail");
+
+        assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "items"));
     }
 
     #[test]
