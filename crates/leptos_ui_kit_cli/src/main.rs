@@ -125,7 +125,7 @@ fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<Strin
     }
 
     Ok(format!(
-        "name: {}\ntype: {}\nsource_kind: {:?}\nsource_path: {}",
+        "name: {}\nkind: {}\nsource_kind: {:?}\nsource_path: {}",
         item.item.name,
         item.item.kind,
         item.source_kind,
@@ -201,6 +201,6 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"view\""));
         assert!(output.contains("\"name\": \"button\""));
         assert!(output.contains("\"source_kind\": \"built-in\""));
-        assert!(output.contains("\"type\": \"registry:ui\""));
+        assert!(output.contains("\"kind\": \"ui\""));
     }
 }

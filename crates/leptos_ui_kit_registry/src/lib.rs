@@ -18,7 +18,10 @@ pub use detect::{
     InfoOutput, build_info_output, detect_single_crate_project,
 };
 pub use item::{
-    RegistryError, RegistryItem, RegistryItemFile, RegistryItemType, RegistrySourceKind,
-    ResolvedRegistryItem, load_built_in_registry_item, load_local_registry_item,
-    load_registry_item, parse_registry_item_str,
+    CargoPlanEntry, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError,
+    RegistryFileTarget, RegistryFileTargetKind, RegistryItem, RegistryItemFile, RegistryItemKind,
+    RegistryItemStyle, RegistryLeptos, RegistryRoot, RegistryRootItem, RegistrySourceKind,
+    RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem,
+    load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
+    parse_registry_item_str, parse_registry_root_str,
 };

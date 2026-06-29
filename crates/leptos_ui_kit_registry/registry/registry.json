@@ -1,0 +1,11 @@
+{
+  "$schema": "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "leptos-ui-kit",
+  "items": [
+    {
+      "name": "button",
+      "path": "ui/button.json"
+    }
+  ]
+}

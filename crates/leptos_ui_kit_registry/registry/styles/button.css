@@ -1,0 +1,7 @@
+/* leptos-ui-kit:start button */
+.luk-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* leptos-ui-kit:end button */

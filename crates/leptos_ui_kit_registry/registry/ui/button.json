@@ -1,0 +1,46 @@
+{
+  "$schema": "https://leptos-ui-kit.dev/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "button",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Button",
+  "description": "A pure-CSS Leptos button component.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "files": [
+    {
+      "source": "ui/button.rs",
+      "target": {
+        "kind": "ui",
+        "path": "button.rs"
+      }
+    }
+  ],
+  "styles": [
+    {
+      "source": "styles/button.css",
+      "target": {
+        "kind": "managed-css-block",
+        "id": "button"
+      }
+    }
+  ],
+  "registryDependencies": [],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "version": "0.9.0-alpha",
+      "required": true
+    },
+    {
+      "crate": "leptos_router",
+      "version": "0.9.0-alpha",
+      "required": true
+    }
+  ],
+  "extra": {}
+}
