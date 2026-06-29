@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use leptos_ui_kit_codegen::CommandEnvelope;
+use leptos_ui_kit_codegen::{CommandEnvelope, CommandStatus, InitPlan, plan_init};
 use leptos_ui_kit_registry::{
     InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
 };
@@ -26,6 +26,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
 
     match command {
         "info" => run_info(&args[1..], cwd),
+        "init" => run_init(&args[1..], cwd),
         "view" => run_view(&args[1..], cwd),
         _ => Err(usage()),
     }
@@ -64,6 +65,37 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut dry_run = false;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            "--dry-run" => dry_run = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for init: {value}"));
+            }
+            _ => return Err("init does not accept positional arguments".to_owned()),
+        }
+    }
+
+    if !dry_run {
+        return Err("init write mode is not implemented yet; use --dry-run".to_owned());
+    }
+
+    let plan = plan_init(cwd)
+        .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?;
+
+    println!("{}", render_init_plan(&plan, json)?);
+
+    Ok(())
+}
+
 fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
     let mut source: Option<String> = None;
@@ -95,6 +127,26 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     println!("{}", render_registry_item(&item, json)?);
 
     Ok(())
+}
+
+fn render_init_plan(plan: &InitPlan, json: bool) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(
+            &CommandEnvelope::new("init", CommandStatus::Planned, plan)
+                .with_changes(plan.changes.clone()),
+        )
+        .map_err(|error| format!("failed to serialize init plan: {error}"));
+    }
+
+    if plan.is_empty() {
+        return Ok("init: no changes planned".to_owned());
+    }
+
+    let mut output = String::from("init planned changes:");
+    for change in &plan.changes {
+        output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
+    }
+    Ok(output)
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
@@ -134,7 +186,7 @@ fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<Strin
 }
 
 fn usage() -> String {
-    "usage: leptos-ui <info|view> [--json] [path-or-source]".to_owned()
+    "usage: leptos-ui <info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
 }
 
 fn current_dir() -> PathBuf {
@@ -202,5 +254,33 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"name\": \"button\""));
         assert!(output.contains("\"source_kind\": \"built-in\""));
         assert!(output.contains("\"kind\": \"ui\""));
+    }
+
+    #[test]
+    fn init_dry_run_envelope_json_outputs_planned_changes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        run(
+            vec![
+                OsString::from("init"),
+                OsString::from("--dry-run"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect("run init dry-run");
+
+        let output = render_init_plan(&plan_init(root).expect("plan init"), true).expect("render");
+        assert!(output.contains("\"command\": \"init\""));
+        assert!(output.contains("\"status\": \"planned\""));
+        assert!(output.contains("\"path\": \"components.json\""));
+        assert!(!root.join("components.json").exists());
     }
 }

@@ -2,9 +2,15 @@
 
 //! Code generation and install-planning layer.
 
-use serde::Serialize;
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
-pub use leptos_ui_kit_registry::SCHEMA_VERSION;
+use leptos_ui_kit_registry::{
+    ConfigError, SCHEMA_VERSION, canonical_components_json, parse_components_json_str,
+};
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +152,269 @@ pub enum ChangeKind {
     WriteBaseline,
 }
 
+#[derive(Debug)]
+pub enum CodegenError {
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Config(ConfigError),
+    UnsafePatch {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
+            Self::Config(error) => write!(f, "{error}"),
+            Self::UnsafePatch { path, reason } => {
+                write!(f, "cannot safely patch {}: {reason}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {}
+
+impl From<ConfigError> for CodegenError {
+    fn from(value: ConfigError) -> Self {
+        Self::Config(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitPlan {
+    pub project_root: PathBuf,
+    pub files: Vec<PlannedFile>,
+    pub changes: Vec<ChangeRecord>,
+}
+
+impl InitPlan {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedFile {
+    pub path: String,
+    pub action: PlannedFileAction,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannedFileAction {
+    Create,
+    Update,
+}
+
+pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
+    let mut files = Vec::new();
+    let mut changes = Vec::new();
+
+    plan_components_json(project_root, &mut files, &mut changes)?;
+    plan_stylesheet(project_root, &mut files, &mut changes)?;
+    plan_index_html(project_root, &mut files, &mut changes)?;
+    plan_component_modules(project_root, &mut files, &mut changes)?;
+    plan_empty_state(project_root, &mut files, &mut changes)?;
+
+    Ok(InitPlan {
+        project_root: project_root.to_path_buf(),
+        files,
+        changes,
+    })
+}
+
+fn plan_components_json(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let path = project_root.join("components.json");
+    if path.is_file() {
+        parse_components_json_str(&read_to_string(&path)?)?;
+        return Ok(());
+    }
+
+    push_file_plan(
+        files,
+        changes,
+        "components.json",
+        PlannedFileAction::Create,
+        canonical_components_json()?,
+        ChangeKind::CreateFile,
+    );
+    Ok(())
+}
+
+fn plan_stylesheet(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let path = project_root.join("styles/app.css");
+    if path.is_file() {
+        return Ok(());
+    }
+
+    push_file_plan(
+        files,
+        changes,
+        "styles/app.css",
+        PlannedFileAction::Create,
+        ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned(),
+        ChangeKind::CreateFile,
+    );
+    Ok(())
+}
+
+fn plan_index_html(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let path = project_root.join("index.html");
+    let html = read_to_string(&path)?;
+    if html.contains("data-trunk")
+        && html.contains("rel=\"css\"")
+        && html.contains("styles/app.css")
+    {
+        return Ok(());
+    }
+
+    let Some(head_end) = html.find("</head>") else {
+        return Err(CodegenError::UnsafePatch {
+            path,
+            reason: "missing </head> marker".to_owned(),
+        });
+    };
+
+    if html.matches("<head").count() != 1 || html.matches("</head>").count() != 1 {
+        return Err(CodegenError::UnsafePatch {
+            path,
+            reason: "ambiguous head element".to_owned(),
+        });
+    }
+
+    let mut patched = html;
+    patched.insert_str(
+        head_end,
+        "    <link data-trunk rel=\"css\" href=\"styles/app.css\" />\n",
+    );
+
+    push_file_plan(
+        files,
+        changes,
+        "index.html",
+        PlannedFileAction::Update,
+        patched,
+        ChangeKind::UpdateFile,
+    );
+    Ok(())
+}
+
+fn plan_component_modules(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let components_mod = project_root.join("src/components/mod.rs");
+    if !components_mod.is_file() {
+        push_file_plan(
+            files,
+            changes,
+            "src/components/mod.rs",
+            PlannedFileAction::Create,
+            "pub mod ui;\n".to_owned(),
+            ChangeKind::CreateFile,
+        );
+    }
+
+    let ui_mod = project_root.join("src/components/ui/mod.rs");
+    if !ui_mod.is_file() {
+        push_file_plan(
+            files,
+            changes,
+            "src/components/ui/mod.rs",
+            PlannedFileAction::Create,
+            String::new(),
+            ChangeKind::CreateFile,
+        );
+    }
+
+    Ok(())
+}
+
+fn plan_empty_state(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let path = project_root.join(".leptos-ui/state.json");
+    if path.is_file() {
+        return Ok(());
+    }
+
+    push_file_plan(
+        files,
+        changes,
+        ".leptos-ui/state.json",
+        PlannedFileAction::Create,
+        empty_state_json(),
+        ChangeKind::WriteState,
+    );
+    Ok(())
+}
+
+fn push_file_plan(
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    path: &str,
+    action: PlannedFileAction,
+    content: String,
+    change_kind: ChangeKind,
+) {
+    files.push(PlannedFile {
+        path: path.to_owned(),
+        action,
+        content,
+    });
+    changes.push(ChangeRecord::new(change_kind, path, true));
+}
+
+fn empty_state_json() -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schemaVersion\": \"{}\",\n",
+            "  \"kitVersion\": \"{}\",\n",
+            "  \"project\": {{\n",
+            "    \"configHash\": null,\n",
+            "    \"crateRoot\": \".\",\n",
+            "    \"kind\": \"single-crate-trunk-csr\"\n",
+            "  }},\n",
+            "  \"items\": {{}},\n",
+            "  \"filesByPath\": {{}},\n",
+            "  \"styleBlocksById\": {{}}\n",
+            "}}\n"
+        ),
+        SCHEMA_VERSION, SCHEMA_VERSION
+    )
+}
+
+fn read_to_string(path: &Path) -> Result<String, CodegenError> {
+    fs::read_to_string(path).map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +446,51 @@ mod tests {
         assert!(json.contains(r#""level":"warning""#));
         assert!(json.contains(r#""kind":"create_file""#));
         assert!(json.contains(r#""data":{"value":"ok"}"#));
+    }
+
+    #[test]
+    fn init_plan_creates_missing_project_files_without_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        let plan = plan_init(root).expect("plan init");
+
+        assert_eq!(plan.files.len(), 6);
+        assert!(plan.files.iter().any(|file| file.path == "components.json"));
+        assert!(plan.files.iter().any(|file| file.path == "styles/app.css"));
+        assert!(plan.files.iter().any(|file| file.path == "index.html"));
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == "src/components/mod.rs")
+        );
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == ".leptos-ui/state.json")
+        );
+        assert!(!root.join("components.json").exists());
+    }
+
+    #[test]
+    fn init_plan_rejects_invalid_existing_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("components.json"), "{\"tailwind\":true}\n").expect("write config");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        let error = plan_init(root).expect_err("invalid config should fail");
+
+        assert!(matches!(error, CodegenError::Config(_)));
     }
 }
