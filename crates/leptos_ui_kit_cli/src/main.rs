@@ -160,18 +160,51 @@ fn exit_code_for_error(error: &str) -> i32 {
 }
 
 fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
+    let (args, cwd, _quiet, _verbose) = parse_common_args(args, cwd)?;
     let Some(command) = args.first().and_then(|value| value.to_str()) else {
         return Err(usage());
     };
 
     match command {
-        "add" => run_add(&args[1..], cwd),
-        "doctor" => run_doctor(&args[1..], cwd),
-        "info" => run_info(&args[1..], cwd),
-        "init" => run_init(&args[1..], cwd),
-        "view" => run_view(&args[1..], cwd),
+        "add" => run_add(&args[1..], &cwd),
+        "doctor" => run_doctor(&args[1..], &cwd),
+        "info" => run_info(&args[1..], &cwd),
+        "init" => run_init(&args[1..], &cwd),
+        "view" => run_view(&args[1..], &cwd),
         _ => Err(usage()),
     }
+}
+
+fn parse_common_args(
+    args: Vec<OsString>,
+    cwd: &Path,
+) -> Result<(Vec<OsString>, PathBuf, bool, bool), String> {
+    let mut filtered = Vec::new();
+    let mut target_cwd = cwd.to_path_buf();
+    let mut quiet = false;
+    let mut verbose = false;
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--cwd") => {
+                let Some(path) = iter.next() else {
+                    return Err("--cwd requires a path".to_owned());
+                };
+                let path = PathBuf::from(path);
+                target_cwd = if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                };
+            }
+            Some("--quiet") => quiet = true,
+            Some("--verbose") => verbose = true,
+            _ => filtered.push(arg),
+        }
+    }
+
+    Ok((filtered, target_cwd, quiet, verbose))
 }
 
 fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
@@ -1107,6 +1140,53 @@ leptos_router = "0.9.0-alpha"
         .expect_err("tailwind flag should be unsupported");
 
         assert!(error.contains("unsupported flag for view"));
+    }
+
+    #[test]
+    fn common_flags_are_accepted_before_dispatch() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::create_dir(root.join("styles")).expect("create styles");
+        fs::write(root.join("styles/app.css"), ":root {}\n").expect("write css");
+        fs::write(
+            root.join("index.html"),
+            r#"<!DOCTYPE html>
+<html>
+  <head>
+    <link data-trunk rel="css" href="styles/app.css" />
+  </head>
+  <body></body>
+</html>
+"#,
+        )
+        .expect("write index");
+
+        run(
+            vec![
+                OsString::from("--cwd"),
+                root.as_os_str().to_owned(),
+                OsString::from("--quiet"),
+                OsString::from("--verbose"),
+                OsString::from("info"),
+                OsString::from("--json"),
+            ],
+            Path::new("."),
+        )
+        .expect("run info with common flags");
     }
 
     #[test]
