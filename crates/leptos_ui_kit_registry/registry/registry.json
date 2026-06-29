@@ -10,6 +10,10 @@
     {
       "name": "collapsible",
       "path": "ui/collapsible.json"
+    },
+    {
+      "name": "tabs",
+      "path": "ui/tabs.json"
     }
   ]
 }

@@ -262,6 +262,7 @@ impl DesiredItemConfig {
         match (self.name, self.source) {
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
         }
     }
 
@@ -275,6 +276,7 @@ impl DesiredItemConfig {
 pub enum DesiredItemName {
     Button,
     Collapsible,
+    Tabs,
 }
 
 impl DesiredItemName {
@@ -282,6 +284,7 @@ impl DesiredItemName {
         match self {
             Self::Button => "button",
             Self::Collapsible => "collapsible",
+            Self::Tabs => "tabs",
         }
     }
 }
@@ -415,6 +418,13 @@ pub fn desired_builtin_button_item() -> DesiredItemConfig {
 pub fn desired_builtin_collapsible_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Collapsible,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_tabs_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Tabs,
         source: RegistrySource::Builtin,
     }
 }

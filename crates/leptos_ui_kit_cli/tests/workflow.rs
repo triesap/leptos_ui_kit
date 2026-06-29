@@ -21,10 +21,14 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["view", "button", "--source", "--json"]);
     assert_success(&project, &["view", "collapsible", "--json"]);
     assert_success(&project, &["view", "collapsible", "--source", "--json"]);
+    assert_success(&project, &["view", "tabs", "--json"]);
+    assert_success(&project, &["view", "tabs", "--source", "--json"]);
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
     assert_success(&project, &["add", "button"]);
     assert_success(&project, &["add", "collapsible", "--dry-run", "--json"]);
     assert_success(&project, &["add", "collapsible"]);
+    assert_success(&project, &["add", "tabs", "--dry-run", "--json"]);
+    assert_success(&project, &["add", "tabs"]);
     assert_success(&project, &["sync", "--dry-run", "--json"]);
     assert_success(&project, &["sync"]);
     assert_success(&project, &["doctor", "--strict", "--json"]);
@@ -45,6 +49,12 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert!(
         project
             .join(".leptos-ui/baselines/builtin-collapsible/collapsible/root.rs")
+            .is_file()
+    );
+    assert!(project.join("src/components/ui/tabs/mod.rs").is_file());
+    assert!(
+        project
+            .join(".leptos-ui/baselines/builtin-tabs/tabs/root.rs")
             .is_file()
     );
 }

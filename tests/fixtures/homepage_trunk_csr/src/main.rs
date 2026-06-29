@@ -4,7 +4,7 @@ mod components;
 
 use components::ui::{
     Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
-    CollapsibleTrigger,
+    CollapsibleTrigger, TabsList, TabsPanel, TabsRoot, TabsTrigger,
 };
 
 fn main() {
@@ -33,6 +33,18 @@ fn App() -> impl IntoView {
                     <p>"Primitive-backed content"</p>
                 </CollapsibleContent>
             </CollapsibleRoot>
+            <TabsRoot>
+                <TabsList>
+                    <TabsTrigger index=0>"First"</TabsTrigger>
+                    <TabsTrigger index=1>"Second"</TabsTrigger>
+                </TabsList>
+                <TabsPanel index=0>
+                    <p>"First panel"</p>
+                </TabsPanel>
+                <TabsPanel index=1>
+                    <p>"Second panel"</p>
+                </TabsPanel>
+            </TabsRoot>
         </main>
     }
 }

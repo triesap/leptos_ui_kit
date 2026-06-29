@@ -1008,9 +1008,10 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 2);
+        assert_eq!(root.items.len(), 3);
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
+        assert!(root.items.iter().any(|item| item.name == "tabs"));
     }
 
     #[test]
@@ -1257,6 +1258,26 @@ mod tests {
         assert_eq!(
             item.item.files[0].target.exports,
             ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
+        );
+    }
+
+    #[test]
+    fn tabs_source_declares_keyboard_accessibility_contract() {
+        let root = built_in_registry_root();
+        let trigger =
+            fs::read_to_string(root.join("ui/tabs/trigger.rs")).expect("read tabs trigger source");
+        let item = load_built_in_registry_item("tabs").expect("load tabs");
+
+        assert!(trigger.contains("on:keydown"));
+        assert!(trigger.contains("focus_by_key"));
+        assert!(trigger.contains("activate_focused"));
+        assert!(trigger.contains("focus_trigger"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "keyboard-focus-policy" && behavior.required)
         );
     }
 
