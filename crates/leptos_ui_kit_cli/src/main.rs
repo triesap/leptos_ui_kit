@@ -7,6 +7,7 @@ use std::{
     process,
 };
 
+use leptos_ui_kit_codegen::CommandEnvelope;
 use leptos_ui_kit_registry::{
     InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
 };
@@ -98,7 +99,7 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
     if json {
-        return serde_json::to_string_pretty(output)
+        return serde_json::to_string_pretty(&CommandEnvelope::success("info", output))
             .map_err(|error| format!("failed to serialize info output: {error}"));
     }
 
@@ -119,7 +120,7 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
 
 fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<String, String> {
     if json {
-        return serde_json::to_string_pretty(item)
+        return serde_json::to_string_pretty(&CommandEnvelope::success("view", item))
             .map_err(|error| format!("failed to serialize registry item: {error}"));
     }
 
@@ -148,7 +149,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn info_json_outputs_detected_project_shape() {
+    fn info_envelope_json_outputs_detected_project_shape() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -184,16 +185,20 @@ leptos_router = "0.9.0-alpha"
         let info = build_info_output(root).expect("build info output");
         let output = render_info_output(&info, true).expect("render json");
 
+        assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(output.contains("\"command\": \"info\""));
         assert!(output.contains("\"project_root\""));
         assert!(output.contains("\"render_mode\": \"csr\""));
         assert!(output.contains("\"css_file_path\""));
     }
 
     #[test]
-    fn view_json_outputs_built_in_registry_item() {
+    fn view_envelope_json_outputs_built_in_registry_item() {
         let item = load_registry_item("button", Path::new(".")).expect("load built-in item");
         let output = render_registry_item(&item, true).expect("render json");
 
+        assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(output.contains("\"command\": \"view\""));
         assert!(output.contains("\"name\": \"button\""));
         assert!(output.contains("\"source_kind\": \"built-in\""));
         assert!(output.contains("\"type\": \"registry:ui\""));
