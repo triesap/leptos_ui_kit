@@ -837,6 +837,9 @@ mod tests {
         assert!(!source.contains("tailwind"));
         assert!(css.contains(".luk-button"));
         assert!(css.contains("--luk-focus-ring"));
+        assert!(css.contains("--luk-color-primary-hover"));
+        assert!(css.contains("--luk-button-disabled-opacity"));
+        assert!(css.contains("--luk-button-lg-min-height"));
         assert!(css.contains(":focus-visible"));
         assert!(!css.contains("@import"));
     }
