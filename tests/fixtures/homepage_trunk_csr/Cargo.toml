@@ -1,0 +1,8 @@
+[package]
+name = "luk_homepage_fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
