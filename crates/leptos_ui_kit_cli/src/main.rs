@@ -7,7 +7,9 @@ use std::{
     process,
 };
 
-use leptos_ui_kit_codegen::{CommandEnvelope, CommandStatus, InitPlan, apply_init, plan_init};
+use leptos_ui_kit_codegen::{
+    AddPlan, CommandEnvelope, CommandStatus, InitPlan, apply_init, plan_add, plan_init,
+};
 use leptos_ui_kit_registry::{
     InfoOutput, ResolvedRegistryItem, build_info_output, load_registry_item,
 };
@@ -25,11 +27,50 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
     };
 
     match command {
+        "add" => run_add(&args[1..], cwd),
         "info" => run_info(&args[1..], cwd),
         "init" => run_init(&args[1..], cwd),
         "view" => run_view(&args[1..], cwd),
         _ => Err(usage()),
     }
+}
+
+fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut dry_run = false;
+    let mut item: Option<String> = None;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            "--dry-run" => dry_run = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for add: {value}"));
+            }
+            value => {
+                if item.is_some() {
+                    return Err("add accepts exactly one item name".to_owned());
+                }
+
+                item = Some(value.to_owned());
+            }
+        }
+    }
+
+    let item = item.ok_or_else(|| "add requires an item name".to_owned())?;
+    if !dry_run {
+        return Err("add writes are not implemented yet; use --dry-run".to_owned());
+    }
+
+    let plan = plan_add(cwd, &item)
+        .map_err(|error| format!("failed to plan add {item} for {}: {error}", cwd.display()))?;
+    println!("{}", render_add_plan(&plan, json, CommandStatus::Planned)?);
+
+    Ok(())
 }
 
 fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
@@ -138,6 +179,27 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(
+            &CommandEnvelope::new("add", status, plan)
+                .with_changes(plan.changes.clone())
+                .with_diagnostics(plan.diagnostics.clone()),
+        )
+        .map_err(|error| format!("failed to serialize add plan: {error}"));
+    }
+
+    if plan.is_empty() {
+        return Ok(format!("add {}: no changes planned", plan.item_name));
+    }
+
+    let mut output = format!("add {} planned changes:", plan.item_name);
+    for change in &plan.changes {
+        output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
+    }
+    Ok(output)
+}
+
 fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(
@@ -194,7 +256,7 @@ fn render_registry_item(item: &ResolvedRegistryItem, json: bool) -> Result<Strin
 }
 
 fn usage() -> String {
-    "usage: leptos-ui <info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
+    "usage: leptos-ui <add|info|init|view> [--json] [--dry-run] [path-or-source]".to_owned()
 }
 
 fn current_dir() -> PathBuf {
@@ -312,5 +374,42 @@ leptos_router = "0.9.0-alpha"
 
         assert!(root.join("components.json").is_file());
         assert!(root.join(".leptos-ui/state.json").is_file());
+    }
+
+    #[test]
+    fn add_dry_run_envelope_json_outputs_planned_changes_without_writes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+
+        run(
+            vec![
+                OsString::from("add"),
+                OsString::from("button"),
+                OsString::from("--dry-run"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect("run add dry-run");
+
+        let output = render_add_plan(
+            &plan_add(root, "button").expect("plan add"),
+            true,
+            CommandStatus::Planned,
+        )
+        .expect("render add");
+        assert!(output.contains("\"command\": \"add\""));
+        assert!(output.contains("\"status\": \"planned\""));
+        assert!(output.contains("\"itemName\": \"button\""));
+        assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
+        assert!(output.contains("\"path\": \".leptos-ui/baselines/builtin-button/button.rs\""));
+        assert!(!root.join("src/components/ui/button.rs").exists());
     }
 }

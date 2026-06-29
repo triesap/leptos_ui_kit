@@ -399,6 +399,11 @@ pub fn load_built_in_registry_item(name: &str) -> Result<ResolvedRegistryItem, R
     })
 }
 
+pub fn read_built_in_registry_source(source: &str) -> Result<String, RegistryError> {
+    validate_registry_source_path("source", source)?;
+    read_to_string(&built_in_registry_root().join(source))
+}
+
 pub fn resolve_built_in_registry_items(
     names: &[String],
 ) -> Result<Vec<ResolvedRegistryItem>, RegistryError> {
@@ -693,6 +698,13 @@ mod tests {
         assert!(resolved.content_hash.starts_with("sha256:"));
         assert_eq!(resolved.targets.ui_files[0].path, "button.rs");
         assert_eq!(resolved.targets.style_blocks[0].id, "button");
+    }
+
+    #[test]
+    fn reads_built_in_registry_source() {
+        let source = read_built_in_registry_source("ui/button.rs").expect("read source");
+
+        assert!(source.contains("pub fn Button"));
     }
 
     #[test]

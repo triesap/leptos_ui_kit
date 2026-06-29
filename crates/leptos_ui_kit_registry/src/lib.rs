@@ -24,6 +24,6 @@ pub use item::{
     RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
     ResolvedStyleBlockTarget, ResolvedUiTarget, load_built_in_registry_item,
     load_built_in_registry_root, load_registry_item, parse_registry_item_str,
-    parse_registry_root_str, registry_item_content_hash, resolve_built_in_registry_items,
-    resolve_registry_targets, validate_registry_graph,
+    parse_registry_root_str, read_built_in_registry_source, registry_item_content_hash,
+    resolve_built_in_registry_items, resolve_registry_targets, validate_registry_graph,
 };

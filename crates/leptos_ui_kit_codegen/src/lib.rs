@@ -3,6 +3,7 @@
 //! Code generation and install-planning layer.
 
 use std::{
+    collections::BTreeMap,
     fmt, fs,
     fs::OpenOptions,
     io::Write,
@@ -10,9 +11,11 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    ConfigError, SCHEMA_VERSION, canonical_components_json, parse_components_json_str,
+    ConfigError, RegistryError, SCHEMA_VERSION, canonical_components_json,
+    load_built_in_registry_item, parse_components_json_str, read_built_in_registry_source,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +164,16 @@ pub enum CodegenError {
         source: std::io::Error,
     },
     Config(ConfigError),
+    Registry(RegistryError),
+    StateParse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    StateSerialize(serde_json::Error),
+    InvalidState {
+        path: PathBuf,
+        reason: String,
+    },
     UnsafePatch {
         path: PathBuf,
         reason: String,
@@ -178,6 +191,14 @@ impl fmt::Display for CodegenError {
         match self {
             Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
             Self::Config(error) => write!(f, "{error}"),
+            Self::Registry(error) => write!(f, "{error}"),
+            Self::StateParse { path, source } => {
+                write!(f, "failed to parse {}: {source}", path.display())
+            }
+            Self::StateSerialize(error) => write!(f, "failed to serialize state: {error}"),
+            Self::InvalidState { path, reason } => {
+                write!(f, "invalid {}: {reason}", path.display())
+            }
             Self::UnsafePatch { path, reason } => {
                 write!(f, "cannot safely patch {}: {reason}", path.display())
             }
@@ -198,6 +219,12 @@ impl From<ConfigError> for CodegenError {
     }
 }
 
+impl From<RegistryError> for CodegenError {
+    fn from(value: RegistryError) -> Self {
+        Self::Registry(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitPlan {
@@ -207,6 +234,25 @@ pub struct InitPlan {
 }
 
 impl InitPlan {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddPlan {
+    pub project_root: PathBuf,
+    pub item_id: String,
+    pub item_name: String,
+    pub content_hash: String,
+    pub files: Vec<PlannedFile>,
+    pub changes: Vec<ChangeRecord>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub state: InstallState,
+}
+
+impl AddPlan {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
@@ -225,6 +271,124 @@ pub struct PlannedFile {
 pub enum PlannedFileAction {
     Create,
     Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallState {
+    pub schema_version: String,
+    pub kit_version: String,
+    pub project: InstallStateProject,
+    pub items: BTreeMap<String, InstalledItem>,
+    pub files_by_path: BTreeMap<String, String>,
+    pub style_blocks_by_id: BTreeMap<String, String>,
+}
+
+impl InstallState {
+    pub fn empty(config_hash: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            kit_version: SCHEMA_VERSION.to_owned(),
+            project: InstallStateProject {
+                config_hash,
+                crate_root: ".".to_owned(),
+                kind: "single-crate-trunk-csr".to_owned(),
+            },
+            items: BTreeMap::new(),
+            files_by_path: BTreeMap::new(),
+            style_blocks_by_id: BTreeMap::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), CodegenError> {
+        let path = PathBuf::from(".leptos-ui/state.json");
+        if self.schema_version != SCHEMA_VERSION {
+            return invalid_state(&path, format!("schemaVersion must be {SCHEMA_VERSION}"));
+        }
+        if self.project.crate_root != "." {
+            return invalid_state(&path, "project.crateRoot must be .");
+        }
+        if self.project.kind != "single-crate-trunk-csr" {
+            return invalid_state(&path, "project.kind must be single-crate-trunk-csr");
+        }
+        if !self.project.config_hash.starts_with("sha256:") {
+            return invalid_state(&path, "project.configHash must be a sha256 hash");
+        }
+
+        for (key, item) in &self.items {
+            if key != &item.id {
+                return invalid_state(&path, format!("item key {key} does not match item id"));
+            }
+            if item.source != "builtin" {
+                return invalid_state(&path, "only builtin item state is supported");
+            }
+            if item.version != SCHEMA_VERSION {
+                return invalid_state(&path, format!("item version must be {SCHEMA_VERSION}"));
+            }
+            if item.content_hash.is_empty() {
+                return invalid_state(&path, "item contentHash must not be empty");
+            }
+        }
+
+        for (file_path, item_id) in &self.files_by_path {
+            if !self.items.contains_key(item_id) {
+                return invalid_state(
+                    &path,
+                    format!("filesByPath entry {file_path} references missing item {item_id}"),
+                );
+            }
+        }
+
+        for (block_id, item_id) in &self.style_blocks_by_id {
+            if !self.items.contains_key(item_id) {
+                return invalid_state(
+                    &path,
+                    format!("styleBlocksById entry {block_id} references missing item {item_id}"),
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallStateProject {
+    pub config_hash: String,
+    pub crate_root: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledItem {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub version: String,
+    pub content_hash: String,
+    pub files: Vec<InstalledFile>,
+    pub style_blocks: Vec<InstalledStyleBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledFile {
+    pub path: String,
+    pub kind: String,
+    pub baseline_path: String,
+    pub baseline_hash: String,
+    pub local_hash_at_install: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledStyleBlock {
+    pub css_path: String,
+    pub block_id: String,
+    pub baseline_path: String,
+    pub baseline_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +459,174 @@ pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
     }
 
     Ok(plan)
+}
+
+pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
+    let init_plan = plan_init(project_root)?;
+    let mut files = init_plan
+        .files
+        .into_iter()
+        .filter(|file| file.path != ".leptos-ui/state.json")
+        .collect::<Vec<_>>();
+    let mut changes = init_plan
+        .changes
+        .into_iter()
+        .filter(|change| change.path != ".leptos-ui/state.json")
+        .collect::<Vec<_>>();
+    let diagnostics = Vec::new();
+
+    let config_content = planned_or_existing_content(&files, project_root, "components.json")?
+        .unwrap_or(canonical_components_json()?);
+    let config_hash = hash_bytes(config_content.as_bytes());
+    let mut state = load_or_empty_state(project_root, config_hash.clone())?;
+    state.project.config_hash = config_hash;
+
+    let item = load_built_in_registry_item(item_name)?;
+    let item_id = built_in_item_id(&item.item.name);
+    let safe_item_id = safe_item_id(&item_id);
+    let mut installed_files = Vec::new();
+    let mut installed_style_blocks = Vec::new();
+
+    for ui_file in &item.targets.ui_files {
+        let generated = read_built_in_registry_source(&ui_file.source)?;
+        let logical_path = format!("src/components/ui/{}", ui_file.path);
+        let baseline_path = format!(".leptos-ui/baselines/{safe_item_id}/{}", ui_file.path);
+        let generated_hash = hash_bytes(generated.as_bytes());
+
+        plan_generated_source_file(
+            project_root,
+            &mut files,
+            &mut changes,
+            &state,
+            &item_id,
+            &logical_path,
+            &generated,
+        )?;
+        upsert_planned_file(
+            project_root,
+            &mut files,
+            &mut changes,
+            &baseline_path,
+            generated.clone(),
+            ChangeKind::WriteBaseline,
+            Some(&item_id),
+        )?;
+
+        installed_files.push(InstalledFile {
+            path: logical_path.clone(),
+            kind: "rust".to_owned(),
+            baseline_path,
+            baseline_hash: generated_hash.clone(),
+            local_hash_at_install: generated_hash,
+        });
+        state.files_by_path.insert(logical_path, item_id.clone());
+    }
+
+    let components_mod =
+        planned_or_existing_content(&files, project_root, "src/components/mod.rs")?;
+    let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        "src/components/mod.rs",
+        patched_components_mod,
+        ChangeKind::UpdateFile,
+        Some(&item_id),
+    )?;
+
+    let ui_mod = planned_or_existing_content(&files, project_root, "src/components/ui/mod.rs")?;
+    let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item.name)?)?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        "src/components/ui/mod.rs",
+        patched_ui_mod,
+        ChangeKind::UpdateFile,
+        Some(&item_id),
+    )?;
+
+    for style in &item.targets.style_blocks {
+        let generated = read_built_in_registry_source(&style.source)?;
+        let css_path = "styles/app.css";
+        let baseline_path = format!(".leptos-ui/baselines/{safe_item_id}/{}.css", style.id);
+        let baseline = tracked_style_baseline(project_root, &state, &item_id, &style.id)?;
+        let existing_css = planned_or_existing_content(&files, project_root, css_path)?
+            .unwrap_or_else(|| ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned());
+        let patched_css =
+            patch_css_block(&existing_css, &style.id, &generated, baseline.as_deref())?;
+
+        upsert_planned_file(
+            project_root,
+            &mut files,
+            &mut changes,
+            css_path,
+            patched_css,
+            ChangeKind::UpdateCssBlock,
+            Some(&item_id),
+        )?;
+        upsert_planned_file(
+            project_root,
+            &mut files,
+            &mut changes,
+            &baseline_path,
+            generated.clone(),
+            ChangeKind::WriteBaseline,
+            Some(&item_id),
+        )?;
+
+        installed_style_blocks.push(InstalledStyleBlock {
+            css_path: css_path.to_owned(),
+            block_id: style.id.clone(),
+            baseline_path,
+            baseline_hash: hash_bytes(generated.as_bytes()),
+        });
+        state
+            .style_blocks_by_id
+            .insert(style.id.clone(), item_id.clone());
+    }
+
+    state.items.insert(
+        item_id.clone(),
+        InstalledItem {
+            id: item_id.clone(),
+            name: item.item.name.clone(),
+            source: "builtin".to_owned(),
+            version: item.item.version.clone(),
+            content_hash: item.content_hash.clone(),
+            files: installed_files,
+            style_blocks: installed_style_blocks,
+        },
+    );
+    state.validate()?;
+    let state_json = state_to_json(&state)?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        ".leptos-ui/state.json",
+        state_json,
+        ChangeKind::WriteState,
+        Some(&item_id),
+    )?;
+
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths)?;
+
+    Ok(AddPlan {
+        project_root: project_root.to_path_buf(),
+        item_id,
+        item_name: item.item.name,
+        content_hash: item.content_hash,
+        files,
+        changes,
+        diagnostics,
+        state,
+    })
 }
 
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
@@ -458,6 +790,23 @@ pub fn write_file_atomic(
     Ok(())
 }
 
+pub fn parse_install_state_str(input: &str) -> Result<InstallState, CodegenError> {
+    let state: InstallState =
+        serde_json::from_str(input).map_err(|source| CodegenError::StateParse {
+            path: PathBuf::from(".leptos-ui/state.json"),
+            source,
+        })?;
+    state.validate()?;
+    Ok(state)
+}
+
+pub fn state_to_json(state: &InstallState) -> Result<String, CodegenError> {
+    state.validate()?;
+    let mut output = serde_json::to_string_pretty(state).map_err(CodegenError::StateSerialize)?;
+    output.push('\n');
+    Ok(output)
+}
+
 pub fn patch_css_block(
     existing: &str,
     block_id: &str,
@@ -555,6 +904,258 @@ pub fn patch_ui_mod(
     )
 }
 
+fn load_or_empty_state(
+    project_root: &Path,
+    config_hash: String,
+) -> Result<InstallState, CodegenError> {
+    let path = project_root.join(".leptos-ui/state.json");
+    if path.is_file() {
+        let input = read_to_string(&path)?;
+        let mut state = serde_json::from_str::<InstallState>(&input).map_err(|source| {
+            CodegenError::StateParse {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        state.validate()?;
+        state.project.config_hash = config_hash;
+        return Ok(state);
+    }
+
+    Ok(InstallState::empty(config_hash))
+}
+
+fn plan_generated_source_file(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    state: &InstallState,
+    item_id: &str,
+    logical_path: &str,
+    generated: &str,
+) -> Result<(), CodegenError> {
+    if let Some(owner) = state.files_by_path.get(logical_path) {
+        if owner != item_id {
+            return unsafe_patch(
+                logical_path,
+                format!("target is already tracked by {owner}"),
+            );
+        }
+
+        let current = read_optional_to_string(&project_root.join(logical_path))?;
+        let Some(current) = current else {
+            return upsert_planned_file(
+                project_root,
+                files,
+                changes,
+                logical_path,
+                generated.to_owned(),
+                ChangeKind::CreateFile,
+                Some(item_id),
+            );
+        };
+        if current == generated {
+            return Ok(());
+        }
+        let baseline = tracked_file_baseline(project_root, state, item_id, logical_path)?;
+        if current != baseline {
+            return unsafe_patch(
+                logical_path,
+                "tracked target has local edits that differ from its baseline",
+            );
+        }
+        return upsert_planned_file(
+            project_root,
+            files,
+            changes,
+            logical_path,
+            generated.to_owned(),
+            ChangeKind::UpdateFile,
+            Some(item_id),
+        );
+    }
+
+    if project_root.join(logical_path).is_file() {
+        return unsafe_patch(logical_path, "target exists but is not tracked in state");
+    }
+
+    upsert_planned_file(
+        project_root,
+        files,
+        changes,
+        logical_path,
+        generated.to_owned(),
+        ChangeKind::CreateFile,
+        Some(item_id),
+    )
+}
+
+fn upsert_planned_file(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    logical_path: &str,
+    content: String,
+    change_kind: ChangeKind,
+    item_id: Option<&str>,
+) -> Result<(), CodegenError> {
+    if let Some(file) = files.iter_mut().find(|file| file.path == logical_path) {
+        if file.content != content {
+            file.content = content;
+        }
+        return Ok(());
+    }
+
+    let existing = read_optional_to_string(&project_root.join(logical_path))?;
+    if existing.as_deref() == Some(content.as_str()) {
+        return Ok(());
+    }
+
+    let action = if existing.is_some() {
+        PlannedFileAction::Update
+    } else {
+        PlannedFileAction::Create
+    };
+    files.push(PlannedFile {
+        path: logical_path.to_owned(),
+        action,
+        content,
+    });
+
+    let mut change = ChangeRecord::new(change_kind, logical_path, true);
+    if let Some(item_id) = item_id {
+        change = change.with_item(item_id);
+    }
+    changes.push(change);
+    Ok(())
+}
+
+fn planned_or_existing_content(
+    files: &[PlannedFile],
+    project_root: &Path,
+    logical_path: &str,
+) -> Result<Option<String>, CodegenError> {
+    if let Some(file) = files.iter().find(|file| file.path == logical_path) {
+        return Ok(Some(file.content.clone()));
+    }
+    read_optional_to_string(&project_root.join(logical_path))
+}
+
+fn read_optional_to_string(path: &Path) -> Result<Option<String>, CodegenError> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn tracked_file_baseline(
+    project_root: &Path,
+    state: &InstallState,
+    item_id: &str,
+    logical_path: &str,
+) -> Result<String, CodegenError> {
+    let path = PathBuf::from(".leptos-ui/state.json");
+    let item = state
+        .items
+        .get(item_id)
+        .ok_or_else(|| CodegenError::InvalidState {
+            path: path.clone(),
+            reason: format!("missing item {item_id}"),
+        })?;
+    let file = item
+        .files
+        .iter()
+        .find(|file| file.path == logical_path)
+        .ok_or_else(|| CodegenError::InvalidState {
+            path: path.clone(),
+            reason: format!("missing file state for {logical_path}"),
+        })?;
+
+    read_required_baseline(project_root, &file.baseline_path)
+}
+
+fn tracked_style_baseline(
+    project_root: &Path,
+    state: &InstallState,
+    item_id: &str,
+    block_id: &str,
+) -> Result<Option<String>, CodegenError> {
+    let Some(owner) = state.style_blocks_by_id.get(block_id) else {
+        return Ok(None);
+    };
+    if owner != item_id {
+        return unsafe_patch(
+            "styles/app.css",
+            format!("CSS block is already tracked by {owner}"),
+        );
+    }
+
+    let path = PathBuf::from(".leptos-ui/state.json");
+    let item = state
+        .items
+        .get(item_id)
+        .ok_or_else(|| CodegenError::InvalidState {
+            path: path.clone(),
+            reason: format!("missing item {item_id}"),
+        })?;
+    let block = item
+        .style_blocks
+        .iter()
+        .find(|block| block.block_id == block_id)
+        .ok_or_else(|| CodegenError::InvalidState {
+            path: path.clone(),
+            reason: format!("missing style block state for {block_id}"),
+        })?;
+
+    Ok(Some(read_required_baseline(
+        project_root,
+        &block.baseline_path,
+    )?))
+}
+
+fn read_required_baseline(project_root: &Path, logical_path: &str) -> Result<String, CodegenError> {
+    let path = project_root.join(logical_path);
+    read_optional_to_string(&path)?.ok_or_else(|| CodegenError::InvalidState {
+        path,
+        reason: "tracked baseline is missing".to_owned(),
+    })
+}
+
+fn ui_exports_for_item(item_name: &str) -> Result<Vec<UiModuleExport>, CodegenError> {
+    match item_name {
+        "button" => Ok(vec![UiModuleExport::new(
+            "button",
+            vec![
+                "Button".to_owned(),
+                "ButtonSize".to_owned(),
+                "ButtonVariant".to_owned(),
+            ],
+        )]),
+        _ => unsafe_patch(
+            "src/components/ui/mod.rs",
+            format!("no MVP export strategy is defined for {item_name}"),
+        ),
+    }
+}
+
+fn built_in_item_id(item_name: &str) -> String {
+    format!("builtin:{item_name}")
+}
+
+fn safe_item_id(item_id: &str) -> String {
+    item_id.replace(':', "-")
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
     Err(CodegenError::UnsafePath {
         path: path.to_owned(),
@@ -565,6 +1166,13 @@ fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
 fn unsafe_patch<T>(path: impl Into<PathBuf>, reason: impl Into<String>) -> Result<T, CodegenError> {
     Err(CodegenError::UnsafePatch {
         path: path.into(),
+        reason: reason.into(),
+    })
+}
+
+fn invalid_state<T>(path: &Path, reason: impl Into<String>) -> Result<T, CodegenError> {
+    Err(CodegenError::InvalidState {
+        path: path.to_path_buf(),
         reason: reason.into(),
     })
 }
@@ -881,12 +1489,13 @@ fn plan_empty_state(
         return Ok(());
     }
 
+    let content = empty_state_json(project_root, files)?;
     push_file_plan(
         files,
         changes,
         ".leptos-ui/state.json",
         PlannedFileAction::Create,
-        empty_state_json(),
+        content,
         ChangeKind::WriteState,
     );
     Ok(())
@@ -908,24 +1517,10 @@ fn push_file_plan(
     changes.push(ChangeRecord::new(change_kind, path, true));
 }
 
-fn empty_state_json() -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"schemaVersion\": \"{}\",\n",
-            "  \"kitVersion\": \"{}\",\n",
-            "  \"project\": {{\n",
-            "    \"configHash\": null,\n",
-            "    \"crateRoot\": \".\",\n",
-            "    \"kind\": \"single-crate-trunk-csr\"\n",
-            "  }},\n",
-            "  \"items\": {{}},\n",
-            "  \"filesByPath\": {{}},\n",
-            "  \"styleBlocksById\": {{}}\n",
-            "}}\n"
-        ),
-        SCHEMA_VERSION, SCHEMA_VERSION
-    )
+fn empty_state_json(project_root: &Path, files: &[PlannedFile]) -> Result<String, CodegenError> {
+    let config_content = planned_or_existing_content(files, project_root, "components.json")?
+        .unwrap_or(canonical_components_json()?);
+    state_to_json(&InstallState::empty(hash_bytes(config_content.as_bytes())))
 }
 
 fn read_to_string(path: &Path) -> Result<String, CodegenError> {
@@ -1056,6 +1651,90 @@ mod tests {
         let second = apply_init(root).expect("second init");
 
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn state_round_trips_deterministically() {
+        let state = InstallState::empty(hash_bytes(b"components"));
+        let first = state_to_json(&state).expect("serialize first");
+        let parsed = parse_install_state_str(&first).expect("parse state");
+        let second = state_to_json(&parsed).expect("serialize second");
+
+        assert_eq!(first, second);
+        assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(first.contains("\"configHash\": \"sha256:"));
+        assert!(!first.contains("null"));
+    }
+
+    #[test]
+    fn add_plan_records_exact_baseline_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        let plan = plan_add(root, "button").expect("plan add");
+        let source = read_built_in_registry_source("ui/button.rs").expect("registry source");
+        let css = read_built_in_registry_source("styles/button.css").expect("registry css");
+        let rust_baseline = plan
+            .files
+            .iter()
+            .find(|file| file.path == ".leptos-ui/baselines/builtin-button/button.rs")
+            .expect("rust baseline");
+        let css_baseline = plan
+            .files
+            .iter()
+            .find(|file| file.path == ".leptos-ui/baselines/builtin-button/button.css")
+            .expect("css baseline");
+
+        assert_eq!(rust_baseline.content, source);
+        assert_eq!(css_baseline.content, css);
+        assert_eq!(
+            plan.state.files_by_path.get("src/components/ui/button.rs"),
+            Some(&"builtin:button".to_owned())
+        );
+        assert_eq!(
+            plan.state.style_blocks_by_id.get("button"),
+            Some(&"builtin:button".to_owned())
+        );
+    }
+
+    #[test]
+    fn add_plan_reports_button_changes_without_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        let plan = plan_add(root, "button").expect("plan add");
+        let paths = plan
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"src/components/ui/button.rs"));
+        assert!(paths.contains(&"src/components/ui/mod.rs"));
+        assert!(paths.contains(&"styles/app.css"));
+        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.rs"));
+        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.css"));
+        assert!(paths.contains(&".leptos-ui/state.json"));
+        assert!(!root.join("src/components/ui/button.rs").exists());
+        assert!(
+            !root
+                .join(".leptos-ui/baselines/builtin-button/button.rs")
+                .exists()
+        );
     }
 
     #[test]
