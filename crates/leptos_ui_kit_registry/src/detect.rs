@@ -145,15 +145,7 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         ));
     }
 
-    if manifest
-        .get("workspace")
-        .and_then(TomlValue::as_table)
-        .is_some()
-    {
-        return Err(DetectionError::UnsupportedProject(
-            "workspace roots are not supported by leptos_ui_kit 0.9.0-alpha MVP".to_owned(),
-        ));
-    }
+    let workspace_mode = detect_workspace_mode(&manifest)?;
 
     let source_root = project_root.join("src");
     if !source_root.is_dir() {
@@ -188,7 +180,7 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
     Ok(DetectedProject {
         project_root: project_root.to_path_buf(),
         cargo_manifest_path,
-        workspace_mode: WorkspaceMode::SingleCrate,
+        workspace_mode,
         source_root,
         index_html_path,
         css_file_path,
@@ -196,6 +188,29 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         dependency_plan,
         components_config_path,
     })
+}
+
+fn detect_workspace_mode(manifest: &TomlValue) -> Result<WorkspaceMode, DetectionError> {
+    let Some(workspace) = manifest.get("workspace").and_then(TomlValue::as_table) else {
+        return Ok(WorkspaceMode::SingleCrate);
+    };
+
+    let members = workspace
+        .get("members")
+        .and_then(TomlValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(TomlValue::as_str)
+        .collect::<Vec<_>>();
+
+    if members.iter().any(|member| *member != ".") {
+        return Err(DetectionError::UnsupportedProject(
+            "multi-member workspace roots are not supported by leptos_ui_kit 0.9.0-alpha"
+                .to_owned(),
+        ));
+    }
+
+    Ok(WorkspaceMode::SinglePackageWorkspaceRoot)
 }
 
 pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionError> {
@@ -380,6 +395,41 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn detects_single_package_workspace_root_project_shape() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        write_homepage_fixture(root, "\"csr\"");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+
+        let detected = detect_single_crate_project(root).expect("detect project");
+
+        assert_eq!(
+            detected.workspace_mode,
+            WorkspaceMode::SinglePackageWorkspaceRoot
+        );
+        assert_eq!(detected.render_mode, Some(RenderMode::Csr));
+        assert_eq!(
+            detected.dependency_plan.leptos.status,
+            DependencyStatus::Satisfied
+        );
+    }
+
+    #[test]
     fn rejects_missing_trunk_css_link() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
@@ -441,7 +491,7 @@ edition = "2024"
     }
 
     #[test]
-    fn rejects_workspace_roots() {
+    fn rejects_multi_member_workspace_roots() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write_homepage_fixture(root, "\"csr\"");
@@ -462,7 +512,8 @@ leptos_router = "0.9.0-alpha"
         )
         .expect("write cargo");
 
-        let error = detect_single_crate_project(root).expect_err("workspace should fail");
+        let error =
+            detect_single_crate_project(root).expect_err("multi-member workspace should fail");
 
         assert!(matches!(error, DetectionError::UnsupportedProject(_)));
     }

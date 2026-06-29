@@ -219,6 +219,7 @@ impl StateConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceMode {
     SingleCrate,
+    SinglePackageWorkspaceRoot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
