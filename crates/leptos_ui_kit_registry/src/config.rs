@@ -1,39 +1,56 @@
 use std::{
-    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
+pub const SCHEMA_VERSION: &str = "0.9.0-alpha";
+pub const COMPONENTS_SCHEMA_URL: &str =
+    "https://leptos-ui-kit.dev/schema/0.9.0-alpha/components.schema.json";
+pub const LEPTOS_VERSION: &str = "0.9.0-alpha";
+pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
+
 #[derive(Debug)]
 pub enum ConfigError {
     Parse(serde_json::Error),
-    InvalidStyle(String),
-    InvalidRenderMode(String),
-    InvalidRegistryName(String),
-    InvalidRegistryTemplate(String),
-    MissingRenderMode,
-    PathMustBeRelative(String),
-    PathTraversal(String),
+    Serialize(serde_json::Error),
+    InvalidValue {
+        field: &'static str,
+        expected: &'static str,
+        actual: String,
+    },
+    PathMustBeRelative {
+        field: &'static str,
+        value: String,
+    },
+    PathTraversal {
+        field: &'static str,
+        value: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(error) => write!(f, "failed to parse components.json: {error}"),
-            Self::InvalidStyle(value) => write!(f, "invalid style value: {value}"),
-            Self::InvalidRenderMode(value) => write!(f, "invalid render mode: {value}"),
-            Self::InvalidRegistryName(value) => write!(f, "invalid registry name: {value}"),
-            Self::InvalidRegistryTemplate(value) => {
-                write!(f, "registry template must include {{name}}: {value}")
+            Self::Serialize(error) => write!(f, "failed to serialize components.json: {error}"),
+            Self::InvalidValue {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "invalid components.json value for {field}: expected {expected}, got {actual}"
+            ),
+            Self::PathMustBeRelative { field, value } => {
+                write!(f, "components.json path {field} must be relative: {value}")
             }
-            Self::MissingRenderMode => {
-                write!(f, "render mode is required when detection is absent")
-            }
-            Self::PathMustBeRelative(value) => write!(f, "path must be relative: {value}"),
-            Self::PathTraversal(value) => {
-                write!(f, "path must not traverse parent segments: {value}")
+            Self::PathTraversal { field, value } => {
+                write!(
+                    f,
+                    "components.json path {field} must not traverse parent segments: {value}"
+                )
             }
         }
     }
@@ -48,169 +65,154 @@ impl From<serde_json::Error> for ConfigError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RegistryConfigItem {
-    Template(String),
-    Remote {
-        url: String,
-        #[serde(default)]
-        params: BTreeMap<String, String>,
-        #[serde(default)]
-        headers: BTreeMap<String, String>,
-    },
-}
-
-impl RegistryConfigItem {
-    fn validate(&self) -> Result<(), ConfigError> {
-        match self {
-            Self::Template(template) => validate_registry_template(template),
-            Self::Remote { url, .. } => validate_registry_template(url),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ComponentsConfigTailwind {
-    #[serde(default)]
-    pub config: String,
-    pub css: String,
-    pub base_color: String,
-    #[serde(default = "default_true")]
-    pub css_variables: bool,
-    #[serde(default)]
-    pub prefix: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ComponentsConfigLeptos {
-    pub render_mode: Option<String>,
-    pub portal_selector: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ComponentsConfigAliases {
-    pub components: String,
-    pub utils: String,
-    pub ui: Option<String>,
-    pub lib: Option<String>,
-    pub hooks: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MenuColor {
-    Default,
-    Inverted,
-    DefaultTranslucent,
-    InvertedTranslucent,
-}
-
-impl Default for MenuColor {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MenuAccent {
-    Subtle,
-    Bold,
-}
-
-impl Default for MenuAccent {
-    fn default() -> Self {
-        Self::Subtle
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentsConfig {
     #[serde(rename = "$schema")]
-    pub schema: Option<String>,
-    pub style: String,
-    #[serde(default)]
-    pub rsc: bool,
-    #[serde(default = "default_true")]
-    pub tsx: bool,
-    pub tailwind: ComponentsConfigTailwind,
-    #[serde(default)]
-    pub icon_library: Option<String>,
-    #[serde(default)]
-    pub rtl: bool,
-    #[serde(default)]
-    pub menu_color: MenuColor,
-    #[serde(default)]
-    pub menu_accent: MenuAccent,
-    pub aliases: ComponentsConfigAliases,
-    #[serde(default)]
-    pub registries: BTreeMap<String, RegistryConfigItem>,
-    #[serde(default)]
-    pub leptos: ComponentsConfigLeptos,
+    pub schema: String,
+    pub schema_version: String,
+    pub project: ProjectConfig,
+    pub leptos: LeptosConfig,
+    pub install: InstallConfig,
+    pub styles: StylesConfig,
+    pub registry: RegistryConfig,
+    pub state: StateConfig,
+}
+
+impl ComponentsConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        expect_string("$schema", COMPONENTS_SCHEMA_URL, &self.schema)?;
+        expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
+        self.project.validate()?;
+        self.leptos.validate()?;
+        self.install.validate()?;
+        self.styles.validate()?;
+        self.registry.validate()?;
+        self.state.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectConfig {
+    pub kind: ProjectKind,
+    pub crate_root: String,
+    pub src_dir: String,
+    pub index_html: String,
+}
+
+impl ProjectConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_path("project.crateRoot", ".", &self.crate_root)?;
+        expect_path("project.srcDir", "src", &self.src_dir)?;
+        expect_path("project.indexHtml", "index.html", &self.index_html)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectKind {
+    SingleCrateTrunkCsr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeptosConfig {
+    pub version: String,
+    pub router_version: String,
+    pub render_mode: RenderMode,
+}
+
+impl LeptosConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_string("leptos.version", LEPTOS_VERSION, &self.version)?;
+        expect_string(
+            "leptos.routerVersion",
+            LEPTOS_ROUTER_VERSION,
+            &self.router_version,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RenderMode {
     Csr,
-    Hydrate,
-    Islands,
 }
 
-impl RenderMode {
-    fn parse(value: &str) -> Result<Self, ConfigError> {
-        match value {
-            "csr" => Ok(Self::Csr),
-            "hydrate" => Ok(Self::Hydrate),
-            "islands" => Ok(Self::Islands),
-            _ => Err(ConfigError::InvalidRenderMode(value.to_owned())),
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallConfig {
+    pub ui_dir: String,
+    pub ui_mod: String,
+    pub components_mod: String,
+}
+
+impl InstallConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_path("install.uiDir", "src/components/ui", &self.ui_dir)?;
+        expect_path("install.uiMod", "src/components/ui/mod.rs", &self.ui_mod)?;
+        expect_path(
+            "install.componentsMod",
+            "src/components/mod.rs",
+            &self.components_mod,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StylesConfig {
+    pub mode: StylesMode,
+    pub css: String,
+    pub class_prefix: String,
+    pub css_variable_prefix: String,
+}
+
+impl StylesConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_path("styles.css", "styles/app.css", &self.css)?;
+        expect_string("styles.classPrefix", "luk", &self.class_prefix)?;
+        expect_string("styles.cssVariablePrefix", "luk", &self.css_variable_prefix)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StylesMode {
+    PureCss,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryConfig {
+    pub source: RegistrySource,
+}
+
+impl RegistryConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        match self.source {
+            RegistrySource::Builtin => Ok(()),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum StyleBase {
-    Base,
-    Radix,
+pub enum RegistrySource {
+    Builtin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StyleFamily {
-    Vega,
-    Nova,
-    Maia,
-    Lyra,
-    Mira,
-    Luma,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateConfig {
+    pub dir: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LegacyStyleAlias {
-    Default,
-    NewYork,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ResolvedStyleTarget {
-    BaseStyle {
-        base: StyleBase,
-        family: StyleFamily,
-    },
-    LegacyNewYorkV4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TailwindVersion {
-    V4,
+impl StateConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        expect_path("state.dir", ".leptos-ui", &self.dir)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,66 +222,76 @@ pub enum WorkspaceMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AliasRoots {
-    pub components: PathBuf,
-    pub utils: PathBuf,
-    pub ui: PathBuf,
-    pub lib: PathBuf,
-    pub hooks: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallRoots {
-    pub components: PathBuf,
-    pub ui: PathBuf,
-    pub lib: PathBuf,
-    pub hooks: PathBuf,
-    pub styles: PathBuf,
+    pub ui_dir: PathBuf,
+    pub ui_mod: PathBuf,
+    pub components_mod: PathBuf,
     pub css_file: PathBuf,
+    pub state_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedProjectConfig {
-    pub base: StyleBase,
-    pub style_family: StyleFamily,
-    pub legacy_alias: Option<LegacyStyleAlias>,
-    pub resolved_style_target: ResolvedStyleTarget,
-    pub tailwind_version: TailwindVersion,
+    pub schema_version: String,
     pub render_mode: RenderMode,
-    pub icon_library: String,
-    pub base_color: String,
-    pub menu_color: MenuColor,
-    pub menu_accent: MenuAccent,
-    pub rtl: bool,
-    pub alias_roots: AliasRoots,
-    pub registry_map: BTreeMap<String, RegistryConfigItem>,
     pub workspace_mode: WorkspaceMode,
     pub project_root: PathBuf,
+    pub crate_root: PathBuf,
+    pub source_root: PathBuf,
+    pub index_html: PathBuf,
     pub install_roots: InstallRoots,
-    pub portal_selector: String,
-    pub rsc: bool,
-    pub tsx: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizeOptions {
     pub project_root: PathBuf,
-    pub source_root: PathBuf,
-    pub detected_render_mode: Option<RenderMode>,
-    pub tailwind_version: TailwindVersion,
+}
+
+pub fn canonical_components_config() -> ComponentsConfig {
+    ComponentsConfig {
+        schema: COMPONENTS_SCHEMA_URL.to_owned(),
+        schema_version: SCHEMA_VERSION.to_owned(),
+        project: ProjectConfig {
+            kind: ProjectKind::SingleCrateTrunkCsr,
+            crate_root: ".".to_owned(),
+            src_dir: "src".to_owned(),
+            index_html: "index.html".to_owned(),
+        },
+        leptos: LeptosConfig {
+            version: LEPTOS_VERSION.to_owned(),
+            router_version: LEPTOS_ROUTER_VERSION.to_owned(),
+            render_mode: RenderMode::Csr,
+        },
+        install: InstallConfig {
+            ui_dir: "src/components/ui".to_owned(),
+            ui_mod: "src/components/ui/mod.rs".to_owned(),
+            components_mod: "src/components/mod.rs".to_owned(),
+        },
+        styles: StylesConfig {
+            mode: StylesMode::PureCss,
+            css: "styles/app.css".to_owned(),
+            class_prefix: "luk".to_owned(),
+            css_variable_prefix: "luk".to_owned(),
+        },
+        registry: RegistryConfig {
+            source: RegistrySource::Builtin,
+        },
+        state: StateConfig {
+            dir: ".leptos-ui".to_owned(),
+        },
+    }
+}
+
+pub fn canonical_components_json() -> Result<String, ConfigError> {
+    let mut output = serde_json::to_string_pretty(&canonical_components_config())
+        .map_err(ConfigError::Serialize)?;
+    output.push('\n');
+    Ok(output)
 }
 
 pub fn parse_components_json_str(input: &str) -> Result<ComponentsConfig, ConfigError> {
     let config: ComponentsConfig = serde_json::from_str(input)?;
-
-    for (name, registry) in &config.registries {
-        if !name.starts_with('@') {
-            return Err(ConfigError::InvalidRegistryName(name.clone()));
-        }
-
-        registry.validate()?;
-    }
-
+    config.validate()?;
     Ok(config)
 }
 
@@ -287,440 +299,217 @@ pub fn normalize_single_crate_project(
     config: &ComponentsConfig,
     options: &NormalizeOptions,
 ) -> Result<NormalizedProjectConfig, ConfigError> {
-    let normalized_style = NormalizedStyle::parse(&config.style)?;
-    let render_mode = match config.leptos.render_mode.as_deref() {
-        Some(mode) => RenderMode::parse(mode)?,
-        None => options
-            .detected_render_mode
-            .ok_or(ConfigError::MissingRenderMode)?,
-    };
+    config.validate()?;
 
-    let css_file = resolve_project_path(
-        &options.project_root,
-        &options.source_root,
-        &config.tailwind.css,
+    let project_root = options.project_root.clone();
+    let crate_root = join_checked(
+        &project_root,
+        &config.project.crate_root,
+        "project.crateRoot",
     )?;
-    let components = resolve_alias_root(
-        &options.project_root,
-        &options.source_root,
-        &config.aliases.components,
+    let source_root = join_checked(&project_root, &config.project.src_dir, "project.srcDir")?;
+    let index_html = join_checked(
+        &project_root,
+        &config.project.index_html,
+        "project.indexHtml",
     )?;
-    let utils = resolve_alias_root(
-        &options.project_root,
-        &options.source_root,
-        &config.aliases.utils,
-    )?;
-    let ui = match config.aliases.ui.as_deref() {
-        Some(value) => resolve_alias_root(&options.project_root, &options.source_root, value)?,
-        None => components.join("ui"),
-    };
-    let lib = match config.aliases.lib.as_deref() {
-        Some(value) => resolve_alias_root(&options.project_root, &options.source_root, value)?,
-        None => utils
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| options.source_root.join("lib")),
-    };
-    let hooks = match config.aliases.hooks.as_deref() {
-        Some(value) => resolve_alias_root(&options.project_root, &options.source_root, value)?,
-        None => options.source_root.join("hooks"),
-    };
 
     Ok(NormalizedProjectConfig {
-        base: normalized_style.base,
-        style_family: normalized_style.family,
-        legacy_alias: normalized_style.legacy_alias,
-        resolved_style_target: normalized_style.resolved_target,
-        tailwind_version: options.tailwind_version,
-        render_mode,
-        icon_library: config
-            .icon_library
-            .clone()
-            .unwrap_or_else(|| "lucide".to_owned()),
-        base_color: config.tailwind.base_color.clone(),
-        menu_color: config.menu_color.clone(),
-        menu_accent: config.menu_accent.clone(),
-        rtl: config.rtl,
-        alias_roots: AliasRoots {
-            components: components.clone(),
-            utils: utils.clone(),
-            ui: ui.clone(),
-            lib: lib.clone(),
-            hooks: hooks.clone(),
-        },
-        registry_map: config.registries.clone(),
+        schema_version: config.schema_version.clone(),
+        render_mode: config.leptos.render_mode,
         workspace_mode: WorkspaceMode::SingleCrate,
-        project_root: options.project_root.clone(),
+        project_root: project_root.clone(),
+        crate_root,
+        source_root,
+        index_html,
         install_roots: InstallRoots {
-            components,
-            ui,
-            lib,
-            hooks,
-            styles: css_file
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| options.project_root.clone()),
-            css_file,
+            ui_dir: join_checked(&project_root, &config.install.ui_dir, "install.uiDir")?,
+            ui_mod: join_checked(&project_root, &config.install.ui_mod, "install.uiMod")?,
+            components_mod: join_checked(
+                &project_root,
+                &config.install.components_mod,
+                "install.componentsMod",
+            )?,
+            css_file: join_checked(&project_root, &config.styles.css, "styles.css")?,
+            state_dir: join_checked(&project_root, &config.state.dir, "state.dir")?,
         },
-        portal_selector: config
-            .leptos
-            .portal_selector
-            .clone()
-            .unwrap_or_else(|| "body".to_owned()),
-        rsc: config.rsc,
-        tsx: config.tsx,
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NormalizedStyle {
-    base: StyleBase,
-    family: StyleFamily,
-    legacy_alias: Option<LegacyStyleAlias>,
-    resolved_target: ResolvedStyleTarget,
-}
-
-impl NormalizedStyle {
-    fn parse(value: &str) -> Result<Self, ConfigError> {
-        match value {
-            "default" => Ok(Self {
-                base: StyleBase::Base,
-                family: StyleFamily::Nova,
-                legacy_alias: Some(LegacyStyleAlias::Default),
-                resolved_target: ResolvedStyleTarget::BaseStyle {
-                    base: StyleBase::Base,
-                    family: StyleFamily::Nova,
-                },
-            }),
-            "new-york" => Ok(Self {
-                base: StyleBase::Radix,
-                family: StyleFamily::Nova,
-                legacy_alias: Some(LegacyStyleAlias::NewYork),
-                resolved_target: ResolvedStyleTarget::LegacyNewYorkV4,
-            }),
-            _ => {
-                let (base, family) = value
-                    .split_once('-')
-                    .ok_or_else(|| ConfigError::InvalidStyle(value.to_owned()))?;
-
-                let base = match base {
-                    "base" => StyleBase::Base,
-                    "radix" => StyleBase::Radix,
-                    _ => return Err(ConfigError::InvalidStyle(value.to_owned())),
-                };
-
-                let family = match family {
-                    "vega" => StyleFamily::Vega,
-                    "nova" => StyleFamily::Nova,
-                    "maia" => StyleFamily::Maia,
-                    "lyra" => StyleFamily::Lyra,
-                    "mira" => StyleFamily::Mira,
-                    "luma" => StyleFamily::Luma,
-                    _ => return Err(ConfigError::InvalidStyle(value.to_owned())),
-                };
-
-                Ok(Self {
-                    base,
-                    family,
-                    legacy_alias: None,
-                    resolved_target: ResolvedStyleTarget::BaseStyle { base, family },
-                })
-            }
-        }
+fn expect_string(
+    field: &'static str,
+    expected: &'static str,
+    actual: &str,
+) -> Result<(), ConfigError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidValue {
+            field,
+            expected,
+            actual: actual.to_owned(),
+        })
     }
 }
 
-fn default_true() -> bool {
-    true
+fn expect_path(
+    field: &'static str,
+    expected: &'static str,
+    actual: &str,
+) -> Result<(), ConfigError> {
+    validate_relative_path(field, actual)?;
+    expect_string(field, expected, actual)
 }
 
-fn validate_registry_template(value: &str) -> Result<(), ConfigError> {
-    if value.contains("{name}") {
-        return Ok(());
-    }
-
-    Err(ConfigError::InvalidRegistryTemplate(value.to_owned()))
-}
-
-fn resolve_alias_root(
-    project_root: &Path,
-    source_root: &Path,
-    value: &str,
-) -> Result<PathBuf, ConfigError> {
-    if let Some(stripped) = value.strip_prefix("@/") {
-        return join_checked(source_root, stripped, value);
-    }
-
-    join_checked(project_root, value, value)
-}
-
-fn resolve_project_path(
-    project_root: &Path,
-    source_root: &Path,
-    value: &str,
-) -> Result<PathBuf, ConfigError> {
-    if let Some(stripped) = value.strip_prefix("@/") {
-        return join_checked(source_root, stripped, value);
-    }
-
-    join_checked(project_root, value, value)
-}
-
-fn join_checked(base: &Path, relative: &str, original: &str) -> Result<PathBuf, ConfigError> {
-    let path = Path::new(relative);
+fn validate_relative_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    let path = Path::new(value);
     if path.is_absolute() {
-        return Err(ConfigError::PathMustBeRelative(original.to_owned()));
+        return Err(ConfigError::PathMustBeRelative {
+            field,
+            value: value.to_owned(),
+        });
     }
 
     if path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(ConfigError::PathTraversal(original.to_owned()));
+        return Err(ConfigError::PathTraversal {
+            field,
+            value: value.to_owned(),
+        });
     }
 
-    Ok(base.join(path))
+    Ok(())
+}
+
+fn join_checked(
+    project_root: &Path,
+    relative: &str,
+    field: &'static str,
+) -> Result<PathBuf, ConfigError> {
+    validate_relative_path(field, relative)?;
+    Ok(project_root.join(relative))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn normalize_options() -> NormalizeOptions {
-        NormalizeOptions {
-            project_root: PathBuf::from("/workspace/demo"),
-            source_root: PathBuf::from("/workspace/demo/src"),
-            detected_render_mode: Some(RenderMode::Hydrate),
-            tailwind_version: TailwindVersion::V4,
+    fn valid_config_json() -> String {
+        canonical_components_json().expect("serialize config")
+    }
+
+    #[test]
+    fn parses_canonical_components_json() {
+        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+
+        assert_eq!(config.schema_version, SCHEMA_VERSION);
+        assert_eq!(config.leptos.version, LEPTOS_VERSION);
+        assert_eq!(config.leptos.router_version, LEPTOS_ROUTER_VERSION);
+        assert_eq!(config.leptos.render_mode, RenderMode::Csr);
+        assert_eq!(config.styles.mode, StylesMode::PureCss);
+        assert_eq!(config.registry.source, RegistrySource::Builtin);
+    }
+
+    #[test]
+    fn canonical_json_is_deterministic() {
+        let first = canonical_components_json().expect("serialize first");
+        let second = canonical_components_json().expect("serialize second");
+
+        assert_eq!(first, second);
+        assert!(first.ends_with('\n'));
+        assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_field() {
+        let input = valid_config_json().replace(
+            "\"state\": {",
+            "\"tailwind\": { \"css\": \"input.css\" },\n  \"state\": {",
+        );
+
+        let error = parse_components_json_str(&input).expect_err("unknown field should fail");
+
+        assert!(matches!(error, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn rejects_forbidden_legacy_fields() {
+        for field in ["tailwind", "aliases", "rsc", "tsx"] {
+            let input = valid_config_json().replace(
+                "\"state\": {",
+                &format!("\"{field}\": true,\n  \"state\": {{"),
+            );
+
+            let error = parse_components_json_str(&input).expect_err("legacy field should fail");
+
+            assert!(matches!(error, ConfigError::Parse(_)), "{field}");
         }
     }
 
     #[test]
-    fn parses_upstream_components_json_shape() {
-        let config = parse_components_json_str(
-            r#"{
-              "$schema": "https://ui.shadcn.com/schema.json",
-              "style": "new-york",
-              "rsc": true,
-              "tsx": true,
-              "tailwind": {
-                "config": "",
-                "css": "app/globals.css",
-                "baseColor": "neutral",
-                "cssVariables": true,
-                "prefix": ""
-              },
-              "aliases": {
-                "components": "@/components",
-                "utils": "@/lib/utils",
-                "ui": "@/registry/new-york-v4/ui",
-                "lib": "@/lib",
-                "hooks": "@/hooks"
-              },
-              "iconLibrary": "lucide"
-            }"#,
-        )
-        .expect("components.json should parse");
+    fn rejects_non_csr_render_mode() {
+        let input =
+            valid_config_json().replace("\"renderMode\": \"csr\"", "\"renderMode\": \"hydrate\"");
 
-        assert_eq!(config.style, "new-york");
-        assert_eq!(config.tailwind.base_color, "neutral");
-        assert_eq!(config.aliases.components, "@/components");
-        assert_eq!(config.icon_library.as_deref(), Some("lucide"));
+        let error = parse_components_json_str(&input).expect_err("hydrate should fail");
+
+        assert!(matches!(error, ConfigError::Parse(_)));
     }
 
     #[test]
-    fn parses_leptos_extension_block() {
-        let config = parse_components_json_str(
-            r##"{
-              "style": "base-nova",
-              "tailwind": {
-                "css": "src/styles/app.css",
-                "baseColor": "stone"
-              },
-              "aliases": {
-                "components": "src/components",
-                "utils": "src/lib/utils"
-              },
-              "leptos": {
-                "renderMode": "csr",
-                "portalSelector": "#portal-root"
-              }
-            }"##,
-        )
-        .expect("components.json should parse");
+    fn rejects_wrong_leptos_version() {
+        let input =
+            valid_config_json().replace("\"version\": \"0.9.0-alpha\"", "\"version\": \"0.8.17\"");
 
-        assert_eq!(config.leptos.render_mode.as_deref(), Some("csr"));
-        assert_eq!(
-            config.leptos.portal_selector.as_deref(),
-            Some("#portal-root")
+        let error = parse_components_json_str(&input).expect_err("version should fail");
+
+        assert!(
+            matches!(error, ConfigError::InvalidValue { field, .. } if field == "leptos.version")
         );
     }
 
     #[test]
-    fn rejects_invalid_registry_names_and_templates() {
-        let error = parse_components_json_str(
-            r#"{
-              "style": "base-nova",
-              "tailwind": {
-                "css": "src/styles/app.css",
-                "baseColor": "stone"
-              },
-              "aliases": {
-                "components": "src/components",
-                "utils": "src/lib/utils"
-              },
-              "registries": {
-                "bad": "https://example.com/item.json"
-              }
-            }"#,
-        )
-        .expect_err("registry config should be rejected");
+    fn rejects_non_homepage_paths() {
+        let input =
+            valid_config_json().replace("\"css\": \"styles/app.css\"", "\"css\": \"src/app.css\"");
 
-        assert!(matches!(error, ConfigError::InvalidRegistryName(_)));
+        let error = parse_components_json_str(&input).expect_err("css path should fail");
+
+        assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "styles.css"));
     }
 
     #[test]
-    fn normalizes_new_york_single_crate_project() {
-        let config = parse_components_json_str(
-            r#"{
-              "style": "new-york",
-              "tailwind": {
-                "css": "src/styles/app.css",
-                "baseColor": "neutral"
-              },
-              "aliases": {
-                "components": "src/components",
-                "utils": "src/lib/utils"
-              }
-            }"#,
+    fn rejects_parent_traversal_in_paths() {
+        let input =
+            valid_config_json().replace("\"css\": \"styles/app.css\"", "\"css\": \"../app.css\"");
+
+        let error = parse_components_json_str(&input).expect_err("traversal should fail");
+
+        assert!(matches!(error, ConfigError::PathTraversal { field, .. } if field == "styles.css"));
+    }
+
+    #[test]
+    fn normalizes_canonical_install_roots() {
+        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+        let normalized = normalize_single_crate_project(
+            &config,
+            &NormalizeOptions {
+                project_root: PathBuf::from("/workspace/demo"),
+            },
         )
-        .expect("components.json should parse");
+        .expect("normalize");
 
-        let normalized =
-            normalize_single_crate_project(&config, &normalize_options()).expect("normalize");
-
-        assert_eq!(normalized.base, StyleBase::Radix);
-        assert_eq!(normalized.style_family, StyleFamily::Nova);
-        assert_eq!(normalized.legacy_alias, Some(LegacyStyleAlias::NewYork));
+        assert_eq!(normalized.render_mode, RenderMode::Csr);
+        assert_eq!(normalized.source_root, PathBuf::from("/workspace/demo/src"));
         assert_eq!(
-            normalized.resolved_style_target,
-            ResolvedStyleTarget::LegacyNewYorkV4
-        );
-        assert_eq!(normalized.render_mode, RenderMode::Hydrate);
-        assert_eq!(
-            normalized.alias_roots.components,
-            PathBuf::from("/workspace/demo/src/components")
-        );
-        assert_eq!(
-            normalized.alias_roots.ui,
+            normalized.install_roots.ui_dir,
             PathBuf::from("/workspace/demo/src/components/ui")
         );
         assert_eq!(
-            normalized.alias_roots.lib,
-            PathBuf::from("/workspace/demo/src/lib")
-        );
-        assert_eq!(
             normalized.install_roots.css_file,
-            PathBuf::from("/workspace/demo/src/styles/app.css")
+            PathBuf::from("/workspace/demo/styles/app.css")
         );
-        assert_eq!(normalized.portal_selector, "body");
-        assert_eq!(normalized.icon_library, "lucide");
-    }
-
-    #[test]
-    fn explicit_leptos_render_mode_overrides_detected_mode() {
-        let config = parse_components_json_str(
-            r#"{
-              "style": "base-vega",
-              "tailwind": {
-                "css": "@/styles/app.css",
-                "baseColor": "slate"
-              },
-              "aliases": {
-                "components": "@/components",
-                "utils": "@/lib/utils",
-                "hooks": "@/hooks"
-              },
-              "leptos": {
-                "renderMode": "islands"
-              }
-            }"#,
-        )
-        .expect("components.json should parse");
-
-        let normalized =
-            normalize_single_crate_project(&config, &normalize_options()).expect("normalize");
-
-        assert_eq!(normalized.base, StyleBase::Base);
-        assert_eq!(normalized.style_family, StyleFamily::Vega);
-        assert_eq!(normalized.legacy_alias, None);
-        assert_eq!(normalized.render_mode, RenderMode::Islands);
-        assert_eq!(
-            normalized.alias_roots.components,
-            PathBuf::from("/workspace/demo/src/components")
-        );
-        assert_eq!(
-            normalized.alias_roots.hooks,
-            PathBuf::from("/workspace/demo/src/hooks")
-        );
-        assert_eq!(
-            normalized.install_roots.styles,
-            PathBuf::from("/workspace/demo/src/styles")
-        );
-    }
-
-    #[test]
-    fn missing_render_mode_fails_without_detection() {
-        let config = parse_components_json_str(
-            r#"{
-              "style": "base-maia",
-              "tailwind": {
-                "css": "src/styles/app.css",
-                "baseColor": "zinc"
-              },
-              "aliases": {
-                "components": "src/components",
-                "utils": "src/lib/utils"
-              }
-            }"#,
-        )
-        .expect("components.json should parse");
-
-        let error = normalize_single_crate_project(
-            &config,
-            &NormalizeOptions {
-                detected_render_mode: None,
-                ..normalize_options()
-            },
-        )
-        .expect_err("normalize should fail");
-
-        assert!(matches!(error, ConfigError::MissingRenderMode));
-    }
-
-    #[test]
-    fn rejects_parent_traversal_in_project_paths() {
-        let config = parse_components_json_str(
-            r#"{
-              "style": "base-lyra",
-              "tailwind": {
-                "css": "../styles/app.css",
-                "baseColor": "gray"
-              },
-              "aliases": {
-                "components": "src/components",
-                "utils": "src/lib/utils"
-              },
-              "leptos": {
-                "renderMode": "csr"
-              }
-            }"#,
-        )
-        .expect("components.json should parse");
-
-        let error =
-            normalize_single_crate_project(&config, &normalize_options()).expect_err("should fail");
-
-        assert!(matches!(error, ConfigError::PathTraversal(_)));
     }
 }

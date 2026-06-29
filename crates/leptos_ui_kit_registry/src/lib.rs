@@ -7,15 +7,14 @@ mod detect;
 mod item;
 
 pub use config::{
-    AliasRoots, ComponentsConfig, ComponentsConfigAliases, ComponentsConfigLeptos,
-    ComponentsConfigTailwind, ConfigError, InstallRoots, LegacyStyleAlias, MenuAccent, MenuColor,
-    NormalizeOptions, NormalizedProjectConfig, RegistryConfigItem, RenderMode, ResolvedStyleTarget,
-    StyleBase, StyleFamily, TailwindVersion, WorkspaceMode, normalize_single_crate_project,
-    parse_components_json_str,
+    COMPONENTS_SCHEMA_URL, ComponentsConfig, ConfigError, InstallConfig, InstallRoots,
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, LeptosConfig, NormalizeOptions, NormalizedProjectConfig,
+    ProjectConfig, ProjectKind, RegistryConfig, RegistrySource, RenderMode, SCHEMA_VERSION,
+    StateConfig, StylesConfig, StylesMode, WorkspaceMode, canonical_components_config,
+    canonical_components_json, normalize_single_crate_project, parse_components_json_str,
 };
 pub use detect::{
-    DetectedProject, DetectedTailwind, DetectionError, InfoOutput, build_info_output,
-    detect_single_crate_project,
+    DetectedProject, DetectionError, InfoOutput, build_info_output, detect_single_crate_project,
 };
 pub use item::{
     RegistryError, RegistryItem, RegistryItemFile, RegistryItemType, RegistrySourceKind,

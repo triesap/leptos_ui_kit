@@ -103,22 +103,17 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     }
 
     Ok(format!(
-        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nrender_mode: {}\ntailwind_css: {}",
+        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}",
         output.detected.project_root.display(),
         output.detected.workspace_mode,
         output.detected.source_root.display(),
+        output.detected.index_html_path.display(),
+        output.detected.css_file_path.display(),
         output
             .detected
             .render_mode
             .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|| "unknown".to_owned()),
-        output
-            .detected
-            .tailwind
-            .css_entry
-            .as_ref()
-            .map(|value| value.display().to_string())
-            .unwrap_or_else(|| "none".to_owned())
+            .unwrap_or_else(|| "unknown".to_owned())
     ))
 }
 
@@ -165,36 +160,33 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-leptos = { version = "0.8.17", features = ["csr"] }
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
 "#,
         )
         .expect("write cargo");
         fs::create_dir(root.join("src")).expect("create src");
-        fs::write(
-            root.join("Trunk.toml"),
-            "[tools]\ntailwindcss = \"4.1.13\"\n",
-        )
-        .expect("write trunk");
+        fs::create_dir(root.join("styles")).expect("create styles");
+        fs::write(root.join("styles/app.css"), ":root {}\n").expect("write css");
         fs::write(
             root.join("index.html"),
             r#"<!DOCTYPE html>
 <html>
   <head>
-    <link data-trunk rel="tailwind-css" href="input.css" />
+    <link data-trunk rel="css" href="styles/app.css" />
   </head>
   <body></body>
 </html>
 "#,
         )
         .expect("write html");
-        fs::write(root.join("input.css"), "@import \"tailwindcss\";\n").expect("write css");
 
         let info = build_info_output(root).expect("build info output");
         let output = render_info_output(&info, true).expect("render json");
 
         assert!(output.contains("\"project_root\""));
         assert!(output.contains("\"render_mode\": \"csr\""));
-        assert!(output.contains("\"css_entry\""));
+        assert!(output.contains("\"css_file_path\""));
     }
 
     #[test]
