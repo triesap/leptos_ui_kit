@@ -10,8 +10,8 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
-    InstalledFile, InstalledItem, InstalledStyleBlock, apply_add, apply_init, hash_content_bytes,
-    parse_install_state_str, plan_add, plan_init,
+    InstalledFile, InstalledItem, InstalledStyleBlock, apply_add, apply_init,
+    extract_managed_css_block, hash_content_bytes, parse_install_state_str, plan_add, plan_init,
 };
 use leptos_ui_kit_registry::{
     DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
@@ -877,20 +877,35 @@ fn compare_css_block_to_baseline(
         );
     }
 
-    checks.push(if css.contains(&baseline) {
-        DoctorCheck::pass(
-            "style_block",
-            format!("managed CSS block {block_id} matches baseline"),
-        )
-        .with_path(css_path.display().to_string())
-    } else {
-        strict_check(
-            strict,
-            "style_block",
-            format!("managed CSS block {block_id} differs from baseline"),
-        )
-        .with_path(css_path.display().to_string())
-    });
+    match extract_managed_css_block(&css, block_id) {
+        Ok(Some(current)) if current == baseline => checks.push(
+            DoctorCheck::pass(
+                "style_block",
+                format!("managed CSS block {block_id} matches baseline"),
+            )
+            .with_path(css_path.display().to_string()),
+        ),
+        Ok(Some(_)) => checks.push(
+            strict_check(
+                strict,
+                "style_block",
+                format!("managed CSS block {block_id} differs from baseline"),
+            )
+            .with_path(css_path.display().to_string()),
+        ),
+        Ok(None) => checks.push(
+            strict_check(
+                strict,
+                "style_block",
+                format!("managed CSS block {block_id} is missing"),
+            )
+            .with_path(css_path.display().to_string()),
+        ),
+        Err(error) => checks.push(
+            DoctorCheck::fail("style_block", error.to_string())
+                .with_path(css_path.display().to_string()),
+        ),
+    }
 
     checks
 }
@@ -1257,6 +1272,50 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.baseline_hash\""));
         assert!(output.contains("file baseline hash differs from state"));
+    }
+
+    #[test]
+    fn doctor_rejects_duplicate_managed_css_blocks() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+leptos_router = "0.9.0-alpha"
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        let css_path = root.join("styles/app.css");
+        let baseline =
+            fs::read_to_string(root.join(".leptos-ui/baselines/builtin-button/button.css"))
+                .expect("read baseline");
+        let mut css = fs::read_to_string(&css_path).expect("read css");
+        css.push('\n');
+        css.push_str(&baseline);
+        fs::write(&css_path, css).expect("write css");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.style_block\""));
+        assert!(output.contains("managed CSS block button markers are ambiguous"));
     }
 
     #[test]

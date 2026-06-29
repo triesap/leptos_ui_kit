@@ -907,6 +907,14 @@ pub fn patch_css_block(
     }
 }
 
+pub fn extract_managed_css_block(
+    existing: &str,
+    block_id: &str,
+) -> Result<Option<String>, CodegenError> {
+    validate_css_block_id(block_id)?;
+    Ok(find_managed_css_block(existing, block_id)?.map(|range| existing[range].to_owned()))
+}
+
 pub fn patch_components_mod(existing: Option<&str>) -> Result<String, CodegenError> {
     patch_module_lines(
         existing.unwrap_or_default(),
@@ -1972,6 +1980,22 @@ mod tests {
         assert!(patched.contains("color: blue"));
         assert!(!patched.contains("color: red"));
         assert!(patched.contains(".other {}"));
+    }
+
+    #[test]
+    fn css_block_extractor_requires_exact_managed_markers() {
+        let block =
+            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+        let css = format!(":root {{}}\n\n{block}.app {{}}\n");
+
+        let extracted = extract_managed_css_block(&css, "button").expect("extract block");
+
+        assert_eq!(extracted, Some(block.to_owned()));
+        assert_eq!(
+            extract_managed_css_block(":root {}\n", "button").expect("missing block"),
+            None
+        );
+        assert!(extract_managed_css_block(&format!("{block}{block}"), "button").is_err());
     }
 
     #[test]
