@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION};
 
@@ -35,6 +36,13 @@ pub enum RegistryError {
         path: String,
     },
     DuplicateTarget(String),
+    UnknownDependency {
+        item: String,
+        dependency: String,
+    },
+    DependencyCycle(String),
+    MissingSource(PathBuf),
+    Serialize(serde_json::Error),
 }
 
 impl fmt::Display for RegistryError {
@@ -67,6 +75,19 @@ impl fmt::Display for RegistryError {
                 write!(f, "unsafe registry path for {field}: {path}")
             }
             Self::DuplicateTarget(target) => write!(f, "duplicate registry target: {target}"),
+            Self::UnknownDependency { item, dependency } => {
+                write!(
+                    f,
+                    "registry item {item} depends on unknown item {dependency}"
+                )
+            }
+            Self::DependencyCycle(item) => {
+                write!(f, "registry dependency cycle includes item {item}")
+            }
+            Self::MissingSource(path) => {
+                write!(f, "registry source file missing: {}", path.display())
+            }
+            Self::Serialize(error) => write!(f, "failed to serialize registry metadata: {error}"),
         }
     }
 }
@@ -302,7 +323,27 @@ pub enum RegistrySourceKind {
 pub struct ResolvedRegistryItem {
     pub source_kind: RegistrySourceKind,
     pub source_path: PathBuf,
+    pub content_hash: String,
+    pub targets: ResolvedRegistryTargets,
     pub item: RegistryItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedRegistryTargets {
+    pub ui_files: Vec<ResolvedUiTarget>,
+    pub style_blocks: Vec<ResolvedStyleBlockTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedUiTarget {
+    pub source: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStyleBlockTarget {
+    pub source: String,
+    pub id: String,
 }
 
 pub fn parse_registry_root_str(input: &str) -> Result<RegistryRoot, serde_json::Error> {
@@ -345,12 +386,185 @@ pub fn load_built_in_registry_item(name: &str) -> Result<ResolvedRegistryItem, R
     }
 
     let item = parse_registry_item_file(&path)?;
+    validate_registry_graph(std::slice::from_ref(&item))?;
+    let targets = resolve_registry_targets(&item)?;
+    let content_hash = registry_item_content_hash(&item, &built_in_registry_root())?;
 
     Ok(ResolvedRegistryItem {
         source_kind: RegistrySourceKind::BuiltIn,
         source_path: path,
+        content_hash,
+        targets,
         item,
     })
+}
+
+pub fn resolve_built_in_registry_items(
+    names: &[String],
+) -> Result<Vec<ResolvedRegistryItem>, RegistryError> {
+    let root = load_built_in_registry_root()?;
+    let mut items = Vec::new();
+
+    for name in names {
+        let Some(entry) = root.items.iter().find(|item| item.name == *name) else {
+            return Err(RegistryError::BuiltInNotFound(name.clone()));
+        };
+        let path = built_in_registry_root().join(&entry.path);
+        items.push(parse_registry_item_file(&path)?);
+    }
+
+    let order = validate_registry_graph(&items)?;
+    order
+        .into_iter()
+        .map(|name| load_built_in_registry_item(&name))
+        .collect()
+}
+
+pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, RegistryError> {
+    let mut by_name = BTreeMap::new();
+    let mut targets = BTreeSet::new();
+
+    for item in items {
+        item.validate()?;
+        if by_name.insert(item.name.clone(), item).is_some() {
+            return Err(RegistryError::DuplicateTarget(format!(
+                "item:{}",
+                item.name
+            )));
+        }
+
+        for file in &item.files {
+            if !targets.insert(format!("ui:{}", file.target.path)) {
+                return Err(RegistryError::DuplicateTarget(file.target.path.clone()));
+            }
+        }
+
+        for style in &item.styles {
+            if !targets.insert(format!("css-block:{}", style.target.id)) {
+                return Err(RegistryError::DuplicateTarget(style.target.id.clone()));
+            }
+        }
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut order = Vec::new();
+
+    for item in items {
+        visit_item(
+            item.name.as_str(),
+            &by_name,
+            &mut visiting,
+            &mut visited,
+            &mut order,
+        )?;
+    }
+
+    Ok(order)
+}
+
+fn visit_item(
+    name: &str,
+    by_name: &BTreeMap<String, &RegistryItem>,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+) -> Result<(), RegistryError> {
+    if visited.contains(name) {
+        return Ok(());
+    }
+
+    if !visiting.insert(name.to_owned()) {
+        return Err(RegistryError::DependencyCycle(name.to_owned()));
+    }
+
+    let Some(item) = by_name.get(name) else {
+        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
+    };
+
+    for dependency in &item.registry_dependencies {
+        if !by_name.contains_key(dependency) {
+            return Err(RegistryError::UnknownDependency {
+                item: item.name.clone(),
+                dependency: dependency.clone(),
+            });
+        }
+        visit_item(dependency, by_name, visiting, visited, order)?;
+    }
+
+    visiting.remove(name);
+    visited.insert(name.to_owned());
+    order.push(name.to_owned());
+    Ok(())
+}
+
+pub fn resolve_registry_targets(
+    item: &RegistryItem,
+) -> Result<ResolvedRegistryTargets, RegistryError> {
+    item.validate()?;
+    Ok(ResolvedRegistryTargets {
+        ui_files: item
+            .files
+            .iter()
+            .map(|file| ResolvedUiTarget {
+                source: file.source.clone(),
+                path: file.target.path.clone(),
+            })
+            .collect(),
+        style_blocks: item
+            .styles
+            .iter()
+            .map(|style| ResolvedStyleBlockTarget {
+                source: style.source.clone(),
+                id: style.target.id.clone(),
+            })
+            .collect(),
+    })
+}
+
+pub fn registry_item_content_hash(
+    item: &RegistryItem,
+    registry_root: &Path,
+) -> Result<String, RegistryError> {
+    item.validate()?;
+    let mut hasher = Sha256::new();
+    let metadata = serde_json::to_vec(item).map_err(RegistryError::Serialize)?;
+
+    hasher.update(b"leptos-ui-kit-registry-item-v1\0");
+    hasher.update((metadata.len() as u64).to_be_bytes());
+    hasher.update(&metadata);
+
+    for file in &item.files {
+        update_hash_with_source(&mut hasher, registry_root, &file.source)?;
+    }
+
+    for style in &item.styles {
+        update_hash_with_source(&mut hasher, registry_root, &style.source)?;
+    }
+
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn update_hash_with_source(
+    hasher: &mut Sha256,
+    registry_root: &Path,
+    source: &str,
+) -> Result<(), RegistryError> {
+    validate_registry_source_path("source", source)?;
+    let path = registry_root.join(source);
+    if !path.is_file() {
+        return Err(RegistryError::MissingSource(path));
+    }
+    let bytes = fs::read(&path).map_err(|source| RegistryError::Io {
+        path: path.clone(),
+        source,
+    })?;
+
+    hasher.update(source.as_bytes());
+    hasher.update([0]);
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(&bytes);
+    Ok(())
 }
 
 fn parse_registry_root_file(path: &Path) -> Result<RegistryRoot, RegistryError> {
@@ -476,6 +690,9 @@ mod tests {
         assert_eq!(resolved.item.kind, RegistryItemKind::Ui);
         assert_eq!(resolved.item.files[0].target.path, "button.rs");
         assert_eq!(resolved.item.styles[0].target.id, "button");
+        assert!(resolved.content_hash.starts_with("sha256:"));
+        assert_eq!(resolved.targets.ui_files[0].path, "button.rs");
+        assert_eq!(resolved.targets.style_blocks[0].id, "button");
     }
 
     #[test]
@@ -551,5 +768,94 @@ mod tests {
         let error = item.validate().expect_err("unsafe path should fail");
 
         assert!(matches!(error, RegistryError::UnsafePath { .. }));
+    }
+
+    #[test]
+    fn registry_hash_is_stable_for_built_in_item() {
+        let first = load_built_in_registry_item("button").expect("load first");
+        let second = load_built_in_registry_item("button").expect("load second");
+
+        assert_eq!(first.content_hash, second.content_hash);
+    }
+
+    #[test]
+    fn graph_validates_registry_dependency_order() {
+        let dependency = item_with_name_and_target("base", "base.rs", "base", &[]);
+        let dependent = item_with_name_and_target("button", "button.rs", "button", &["base"]);
+
+        let order = validate_registry_graph(&[dependent, dependency]).expect("graph");
+
+        assert_eq!(order, vec!["base".to_owned(), "button".to_owned()]);
+    }
+
+    #[test]
+    fn graph_rejects_unknown_registry_dependencies() {
+        let item = item_with_name_and_target("button", "button.rs", "button", &["missing"]);
+
+        let error = validate_registry_graph(&[item]).expect_err("unknown dependency should fail");
+
+        assert!(matches!(error, RegistryError::UnknownDependency { .. }));
+    }
+
+    #[test]
+    fn graph_rejects_registry_dependency_cycles() {
+        let first = item_with_name_and_target("first", "first.rs", "first", &["second"]);
+        let second = item_with_name_and_target("second", "second.rs", "second", &["first"]);
+
+        let error = validate_registry_graph(&[first, second]).expect_err("cycle should fail");
+
+        assert!(matches!(error, RegistryError::DependencyCycle(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_registry_targets() {
+        let first = item_with_name_and_target("first", "button.rs", "first", &[]);
+        let second = item_with_name_and_target("second", "button.rs", "second", &[]);
+
+        let error = validate_registry_graph(&[first, second]).expect_err("duplicate should fail");
+
+        assert!(matches!(error, RegistryError::DuplicateTarget(_)));
+    }
+
+    fn item_with_name_and_target(
+        name: &str,
+        file_target: &str,
+        style_id: &str,
+        dependencies: &[&str],
+    ) -> RegistryItem {
+        RegistryItem {
+            schema: REGISTRY_ITEM_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: name.to_owned(),
+            kind: RegistryItemKind::Ui,
+            version: SCHEMA_VERSION.to_owned(),
+            title: name.to_owned(),
+            description: name.to_owned(),
+            leptos: RegistryLeptos {
+                version: LEPTOS_VERSION.to_owned(),
+                router_version: LEPTOS_ROUTER_VERSION.to_owned(),
+                render_mode: RenderMode::Csr,
+            },
+            files: vec![RegistryItemFile {
+                source: format!("ui/{file_target}"),
+                target: RegistryFileTarget {
+                    kind: RegistryFileTargetKind::Ui,
+                    path: file_target.to_owned(),
+                },
+            }],
+            styles: vec![RegistryItemStyle {
+                source: format!("styles/{style_id}.css"),
+                target: RegistryStyleTarget {
+                    kind: RegistryStyleTargetKind::ManagedCssBlock,
+                    id: style_id.to_owned(),
+                },
+            }],
+            registry_dependencies: dependencies
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            cargo_plan: vec![],
+            extra: BTreeMap::new(),
+        }
     }
 }
