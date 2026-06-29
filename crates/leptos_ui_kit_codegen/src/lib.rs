@@ -1170,6 +1170,7 @@ fn ui_exports_for_item(item_name: &str) -> Result<Vec<UiModuleExport>, CodegenEr
             vec![
                 "Button".to_owned(),
                 "ButtonSize".to_owned(),
+                "ButtonType".to_owned(),
                 "ButtonVariant".to_owned(),
             ],
         )]),
@@ -1794,7 +1795,7 @@ mod tests {
         assert!(
             fs::read_to_string(root.join("src/components/ui/mod.rs"))
                 .expect("read ui mod")
-                .contains("pub use button::{Button, ButtonSize, ButtonVariant};")
+                .contains("pub use button::{Button, ButtonSize, ButtonType, ButtonVariant};")
         );
         assert!(
             fs::read_to_string(root.join("styles/app.css"))
@@ -1932,6 +1933,7 @@ mod tests {
                 vec![
                     "Button".to_owned(),
                     "ButtonSize".to_owned(),
+                    "ButtonType".to_owned(),
                     "ButtonVariant".to_owned(),
                 ],
             )],
@@ -1941,7 +1943,7 @@ mod tests {
         assert_eq!(components, "// existing\npub mod ui;\n");
         assert_eq!(
             ui,
-            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonVariant};\n"
+            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonType, ButtonVariant};\n"
         );
         assert_eq!(
             patch_ui_mod(
@@ -1951,6 +1953,7 @@ mod tests {
                     vec![
                         "Button".to_owned(),
                         "ButtonSize".to_owned(),
+                        "ButtonType".to_owned(),
                         "ButtonVariant".to_owned(),
                     ],
                 )],

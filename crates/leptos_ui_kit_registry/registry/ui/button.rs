@@ -14,44 +14,66 @@ pub enum ButtonSize {
     Lg,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ButtonType {
+    Button,
+    Submit,
+    Reset,
+}
+
+impl ButtonVariant {
+    fn class(self) -> &'static str {
+        match self {
+            Self::Primary => "luk-button--primary",
+            Self::Secondary => "luk-button--secondary",
+            Self::Ghost => "luk-button--ghost",
+        }
+    }
+}
+
+impl ButtonSize {
+    fn class(self) -> &'static str {
+        match self {
+            Self::Sm => "luk-button--sm",
+            Self::Md => "luk-button--md",
+            Self::Lg => "luk-button--lg",
+        }
+    }
+}
+
+impl ButtonType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Button => "button",
+            Self::Submit => "submit",
+            Self::Reset => "reset",
+        }
+    }
+}
+
 #[component]
 pub fn Button(
     #[prop(optional, default = ButtonVariant::Primary)] variant: ButtonVariant,
     #[prop(optional, default = ButtonSize::Md)] size: ButtonSize,
-    #[prop(optional)] disabled: bool,
+    #[prop(optional, default = ButtonType::Button)] button_type: ButtonType,
+    #[prop(optional, into, default = false.into())] disabled: Signal<bool>,
+    #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
-    let class = match (variant, size) {
-        (ButtonVariant::Primary, ButtonSize::Sm) => {
-            "luk-button luk-button--primary luk-button--sm"
-        }
-        (ButtonVariant::Primary, ButtonSize::Md) => {
-            "luk-button luk-button--primary luk-button--md"
-        }
-        (ButtonVariant::Primary, ButtonSize::Lg) => {
-            "luk-button luk-button--primary luk-button--lg"
-        }
-        (ButtonVariant::Secondary, ButtonSize::Sm) => {
-            "luk-button luk-button--secondary luk-button--sm"
-        }
-        (ButtonVariant::Secondary, ButtonSize::Md) => {
-            "luk-button luk-button--secondary luk-button--md"
-        }
-        (ButtonVariant::Secondary, ButtonSize::Lg) => {
-            "luk-button luk-button--secondary luk-button--lg"
-        }
-        (ButtonVariant::Ghost, ButtonSize::Sm) => {
-            "luk-button luk-button--ghost luk-button--sm"
-        }
-        (ButtonVariant::Ghost, ButtonSize::Md) => {
-            "luk-button luk-button--ghost luk-button--md"
-        }
-        (ButtonVariant::Ghost, ButtonSize::Lg) => {
-            "luk-button luk-button--ghost luk-button--lg"
-        }
+    let base_class = format!("luk-button {} {}", variant.class(), size.class(),);
+    let class = if class.is_empty() {
+        base_class
+    } else {
+        format!("{base_class} {class}")
     };
 
     view! {
-        <button class=class disabled=disabled>{children()}</button>
+        <button
+            class=class
+            type=button_type.as_str()
+            disabled=move || disabled.get()
+        >
+            {children()}
+        </button>
     }
 }
