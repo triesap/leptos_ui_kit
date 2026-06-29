@@ -1,7 +1,90 @@
 /* leptos-ui-kit:start button */
+:root {
+  --luk-color-primary: #111827;
+  --luk-color-primary-foreground: #ffffff;
+  --luk-color-secondary: #ffffff;
+  --luk-color-secondary-foreground: #111827;
+  --luk-color-border: #d1d5db;
+  --luk-color-muted: #f3f4f6;
+  --luk-color-muted-foreground: #374151;
+  --luk-focus-ring: #2563eb;
+  --luk-radius-md: 0.375rem;
+}
+
 .luk-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 0.375rem;
+  border: 1px solid transparent;
+  border-radius: var(--luk-radius-md);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.luk-button:focus-visible {
+  outline: 2px solid var(--luk-focus-ring);
+  outline-offset: 2px;
+}
+
+.luk-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.luk-button--primary {
+  background: var(--luk-color-primary);
+  color: var(--luk-color-primary-foreground);
+}
+
+.luk-button--primary:hover:not(:disabled) {
+  background: #1f2937;
+}
+
+.luk-button--secondary {
+  background: var(--luk-color-secondary);
+  border-color: var(--luk-color-border);
+  color: var(--luk-color-secondary-foreground);
+}
+
+.luk-button--secondary:hover:not(:disabled) {
+  background: var(--luk-color-muted);
+}
+
+.luk-button--ghost {
+  background: transparent;
+  color: var(--luk-color-muted-foreground);
+}
+
+.luk-button--ghost:hover:not(:disabled) {
+  background: var(--luk-color-muted);
+  color: var(--luk-color-secondary-foreground);
+}
+
+.luk-button--sm {
+  min-height: 2rem;
+  padding: 0 0.75rem;
+  font-size: 0.875rem;
+}
+
+.luk-button--md {
+  min-height: 2.5rem;
+  padding: 0 1rem;
+  font-size: 0.9375rem;
+}
+
+.luk-button--lg {
+  min-height: 3rem;
+  padding: 0 1.25rem;
+  font-size: 1rem;
 }
 /* leptos-ui-kit:end button */

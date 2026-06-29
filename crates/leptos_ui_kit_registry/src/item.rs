@@ -779,6 +779,25 @@ mod tests {
     }
 
     #[test]
+    fn button_source_and_css_are_mvp_pure_css() {
+        let root = built_in_registry_root();
+        let source = fs::read_to_string(root.join("ui/button.rs")).expect("read button source");
+        let css = fs::read_to_string(root.join("styles/button.css")).expect("read button css");
+
+        assert!(source.contains("use leptos::prelude::*;"));
+        assert!(source.contains("#[component]"));
+        assert!(source.contains("pub fn Button"));
+        assert!(source.contains("Children"));
+        assert!(source.contains("<button"));
+        assert!(!source.contains("leptos_router"));
+        assert!(!source.contains("tailwind"));
+        assert!(css.contains(".luk-button"));
+        assert!(css.contains("--luk-focus-ring"));
+        assert!(css.contains(":focus-visible"));
+        assert!(!css.contains("@import"));
+    }
+
+    #[test]
     fn graph_validates_registry_dependency_order() {
         let dependency = item_with_name_and_target("base", "base.rs", "base", &[]);
         let dependent = item_with_name_and_target("button", "button.rs", "button", &["base"]);
