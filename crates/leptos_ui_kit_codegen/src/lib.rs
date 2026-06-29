@@ -11,7 +11,8 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    ConfigError, RegistryError, SCHEMA_VERSION, canonical_components_json,
+    ComponentsConfig, ConfigError, RegistryError, SCHEMA_VERSION, canonical_components_json,
+    components_config_to_json, components_config_with_desired_item, desired_builtin_button_item,
     load_built_in_registry_item, parse_components_json_str, read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
@@ -260,6 +261,23 @@ impl AddPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SyncPlan {
+    pub project_root: PathBuf,
+    pub item_ids: Vec<String>,
+    pub files: Vec<PlannedFile>,
+    pub changes: Vec<ChangeRecord>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub state: InstallState,
+}
+
+impl SyncPlan {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannedFile {
     pub path: String,
     pub action: PlannedFileAction,
@@ -473,6 +491,14 @@ pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 }
 
 pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
+    let item = load_built_in_registry_item(item_name)?;
+    let desired_item = match item.item.name.as_str() {
+        "button" => desired_builtin_button_item(),
+        _ => return Err(RegistryError::BuiltInNotFound(item_name.to_owned()).into()),
+    };
+    let item_id = built_in_item_id(&item.item.name);
+    let item_name = item.item.name.clone();
+    let content_hash = item.content_hash.clone();
     let init_plan = plan_init(project_root)?;
     let mut files = init_plan
         .files
@@ -484,15 +510,125 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         .into_iter()
         .filter(|change| change.path != ".leptos-ui/state.json")
         .collect::<Vec<_>>();
-    let diagnostics = Vec::new();
 
     let config_content = planned_or_existing_content(&files, project_root, "components.json")?
         .unwrap_or(canonical_components_json()?);
+    let config = parse_components_json_str(&config_content)?;
+    let config = components_config_with_desired_item(config, desired_item)?;
+    let config_content = components_config_to_json(&config)?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        "components.json",
+        config_content.clone(),
+        ChangeKind::UpdateFile,
+        Some(&item_id),
+    )?;
+
+    let sync = plan_sync_from_config(project_root, files, changes, config, config_content)?;
+
+    Ok(AddPlan {
+        project_root: sync.project_root,
+        item_id,
+        item_name,
+        content_hash,
+        files: sync.files,
+        changes: sync.changes,
+        diagnostics: sync.diagnostics,
+        state: sync.state,
+    })
+}
+
+pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
+    let plan = plan_add(project_root, item_name)?;
+    apply_planned_files(project_root, &plan.files)?;
+
+    Ok(plan)
+}
+
+pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
+    let init_plan = plan_init(project_root)?;
+    let files = init_plan
+        .files
+        .into_iter()
+        .filter(|file| file.path != ".leptos-ui/state.json")
+        .collect::<Vec<_>>();
+    let changes = init_plan
+        .changes
+        .into_iter()
+        .filter(|change| change.path != ".leptos-ui/state.json")
+        .collect::<Vec<_>>();
+
+    let config_content = planned_or_existing_content(&files, project_root, "components.json")?
+        .unwrap_or(canonical_components_json()?);
+    let config = parse_components_json_str(&config_content)?;
+
+    plan_sync_from_config(project_root, files, changes, config, config_content)
+}
+
+pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
+    let plan = plan_sync(project_root)?;
+    apply_planned_files(project_root, &plan.files)?;
+
+    Ok(plan)
+}
+
+fn plan_sync_from_config(
+    project_root: &Path,
+    mut files: Vec<PlannedFile>,
+    mut changes: Vec<ChangeRecord>,
+    config: ComponentsConfig,
+    config_content: String,
+) -> Result<SyncPlan, CodegenError> {
+    let diagnostics = Vec::new();
     let config_hash = hash_bytes(config_content.as_bytes());
     let mut state = load_or_empty_state(project_root, config_hash.clone())?;
     state.project.config_hash = config_hash;
+    let mut item_ids = Vec::new();
 
-    let item = load_built_in_registry_item(item_name)?;
+    for desired_item in &config.items {
+        let item = load_built_in_registry_item(desired_item.item_name())?;
+        let item_id =
+            plan_built_in_item(project_root, &mut files, &mut changes, &mut state, &item)?;
+        item_ids.push(item_id);
+    }
+
+    state.validate()?;
+    let state_json = state_to_json(&state)?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        ".leptos-ui/state.json",
+        state_json,
+        ChangeKind::WriteState,
+        None,
+    )?;
+
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths)?;
+
+    Ok(SyncPlan {
+        project_root: project_root.to_path_buf(),
+        item_ids,
+        files,
+        changes,
+        diagnostics,
+        state,
+    })
+}
+
+fn plan_built_in_item(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    state: &mut InstallState,
+    item: &leptos_ui_kit_registry::ResolvedRegistryItem,
+) -> Result<String, CodegenError> {
     let item_id = built_in_item_id(&item.item.name);
     let safe_item_id = safe_item_id(&item_id);
     let mut installed_files = Vec::new();
@@ -506,17 +642,17 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
 
         plan_generated_source_file(
             project_root,
-            &mut files,
-            &mut changes,
-            &state,
+            files,
+            changes,
+            state,
             &item_id,
             &logical_path,
             &generated,
         )?;
         upsert_planned_file(
             project_root,
-            &mut files,
-            &mut changes,
+            files,
+            changes,
             &baseline_path,
             generated.clone(),
             ChangeKind::WriteBaseline,
@@ -533,25 +669,24 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         state.files_by_path.insert(logical_path, item_id.clone());
     }
 
-    let components_mod =
-        planned_or_existing_content(&files, project_root, "src/components/mod.rs")?;
+    let components_mod = planned_or_existing_content(files, project_root, "src/components/mod.rs")?;
     let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
     upsert_planned_file(
         project_root,
-        &mut files,
-        &mut changes,
+        files,
+        changes,
         "src/components/mod.rs",
         patched_components_mod,
         ChangeKind::UpdateFile,
         Some(&item_id),
     )?;
 
-    let ui_mod = planned_or_existing_content(&files, project_root, "src/components/ui/mod.rs")?;
+    let ui_mod = planned_or_existing_content(files, project_root, "src/components/ui/mod.rs")?;
     let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item.name)?)?;
     upsert_planned_file(
         project_root,
-        &mut files,
-        &mut changes,
+        files,
+        changes,
         "src/components/ui/mod.rs",
         patched_ui_mod,
         ChangeKind::UpdateFile,
@@ -562,16 +697,16 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         let generated = read_built_in_registry_source(&style.source)?;
         let css_path = "styles/app.css";
         let baseline_path = format!(".leptos-ui/baselines/{safe_item_id}/{}.css", style.id);
-        let baseline = tracked_style_baseline(project_root, &state, &item_id, &style.id)?;
-        let existing_css = planned_or_existing_content(&files, project_root, css_path)?
+        let baseline = tracked_style_baseline(project_root, state, &item_id, &style.id)?;
+        let existing_css = planned_or_existing_content(files, project_root, css_path)?
             .unwrap_or_else(|| ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned());
         let patched_css =
             patch_css_block(&existing_css, &style.id, &generated, baseline.as_deref())?;
 
         upsert_planned_file(
             project_root,
-            &mut files,
-            &mut changes,
+            files,
+            changes,
             css_path,
             patched_css,
             ChangeKind::UpdateCssBlock,
@@ -579,8 +714,8 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         )?;
         upsert_planned_file(
             project_root,
-            &mut files,
-            &mut changes,
+            files,
+            changes,
             &baseline_path,
             generated.clone(),
             ChangeKind::WriteBaseline,
@@ -610,61 +745,30 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
             style_blocks: installed_style_blocks,
         },
     );
-    state.validate()?;
-    let state_json = state_to_json(&state)?;
-    upsert_planned_file(
-        project_root,
-        &mut files,
-        &mut changes,
-        ".leptos-ui/state.json",
-        state_json,
-        ChangeKind::WriteState,
-        Some(&item_id),
-    )?;
+    Ok(item_id)
+}
 
+fn apply_planned_files(project_root: &Path, files: &[PlannedFile]) -> Result<(), CodegenError> {
     let paths = files
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     validate_planned_write_paths(&paths)?;
 
-    Ok(AddPlan {
-        project_root: project_root.to_path_buf(),
-        item_id,
-        item_name: item.item.name,
-        content_hash: item.content_hash,
-        files,
-        changes,
-        diagnostics,
-        state,
-    })
-}
-
-pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
-    let plan = plan_add(project_root, item_name)?;
-    let paths = plan
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    validate_planned_write_paths(&paths)?;
-
-    if plan.is_empty() {
-        return Ok(plan);
+    if files.is_empty() {
+        return Ok(());
     }
 
     let _lock = WriteLock::acquire(project_root)?;
 
-    for file in plan
-        .files
+    for file in files
         .iter()
         .filter(|file| file.path != ".leptos-ui/state.json")
     {
         write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
     }
 
-    if let Some(state_file) = plan
-        .files
+    if let Some(state_file) = files
         .iter()
         .find(|file| file.path == ".leptos-ui/state.json")
     {
@@ -675,7 +779,7 @@ pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codege
         )?;
     }
 
-    Ok(plan)
+    Ok(())
 }
 
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
@@ -1886,7 +1990,64 @@ mod tests {
         )
         .expect("parse state");
         assert!(state.items.contains_key("builtin:button"));
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        assert_eq!(config.items.len(), 1);
+        assert_eq!(config.items[0].item_name(), "button");
         assert!(!root.join(".leptos-ui/lock").exists());
+    }
+
+    #[test]
+    fn sync_plan_installs_declared_button_without_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        write_desired_button_config(root);
+
+        let plan = plan_sync(root).expect("plan sync");
+        let paths = plan
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"src/components/ui/button.rs"));
+        assert!(paths.contains(&"src/components/ui/mod.rs"));
+        assert!(paths.contains(&"styles/app.css"));
+        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.rs"));
+        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.css"));
+        assert!(paths.contains(&".leptos-ui/state.json"));
+        assert!(!root.join("src/components/ui/button.rs").exists());
+        assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
+    }
+
+    #[test]
+    fn sync_write_is_idempotent_when_declared_button_is_current() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        write_desired_button_config(root);
+
+        let first = apply_sync(root).expect("first sync");
+        let second = apply_sync(root).expect("second sync");
+
+        assert!(!first.is_empty());
+        assert!(second.is_empty());
+        assert!(root.join("src/components/ui/button.rs").is_file());
     }
 
     #[test]
@@ -1942,6 +2103,20 @@ mod tests {
         let error = plan_add(root, "button").expect_err("tracked edit should conflict");
 
         assert!(matches!(error, CodegenError::UnsafePatch { .. }));
+    }
+
+    fn write_desired_button_config(root: &Path) {
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("add desired item");
+        fs::write(
+            root.join("components.json"),
+            components_config_to_json(&config).expect("serialize config"),
+        )
+        .expect("write config");
     }
 
     #[test]

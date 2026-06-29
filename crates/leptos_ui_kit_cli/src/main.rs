@@ -10,8 +10,9 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
-    InstalledFile, InstalledItem, InstalledStyleBlock, apply_add, apply_init,
+    InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync,
     extract_managed_css_block, hash_content_bytes, parse_install_state_str, plan_add, plan_init,
+    plan_sync,
 };
 use leptos_ui_kit_registry::{
     DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
@@ -171,6 +172,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "doctor" => run_doctor(&args[1..], &cwd),
         "info" => run_info(&args[1..], &cwd),
         "init" => run_init(&args[1..], &cwd),
+        "sync" => run_sync(&args[1..], &cwd),
         "view" => run_view(&args[1..], &cwd),
         _ => Err(usage()),
     }
@@ -396,6 +398,44 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut dry_run = false;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            "--dry-run" => dry_run = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for sync: {value}"));
+            }
+            _ => return Err("sync does not accept positional arguments".to_owned()),
+        }
+    }
+
+    let plan = if dry_run {
+        plan_sync(cwd)
+            .map_err(|error| format!("failed to plan sync for {}: {error}", cwd.display()))?
+    } else {
+        apply_sync(cwd).map_err(|error| format!("failed to sync {}: {error}", cwd.display()))?
+    };
+    let status = if dry_run {
+        CommandStatus::Planned
+    } else if plan.is_empty() {
+        CommandStatus::NoChange
+    } else {
+        CommandStatus::Success
+    };
+
+    println!("{}", render_sync_plan(&plan, json, status)?);
+
+    Ok(())
+}
+
 fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(
@@ -411,6 +451,27 @@ fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<
     }
 
     let mut output = format!("add {} planned changes:", plan.item_name);
+    for change in &plan.changes {
+        output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
+    }
+    Ok(output)
+}
+
+fn render_sync_plan(plan: &SyncPlan, json: bool, status: CommandStatus) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(
+            &CommandEnvelope::new("sync", status, plan)
+                .with_changes(plan.changes.clone())
+                .with_diagnostics(plan.diagnostics.clone()),
+        )
+        .map_err(|error| format!("failed to serialize sync plan: {error}"));
+    }
+
+    if plan.is_empty() {
+        return Ok("sync: no changes planned".to_owned());
+    }
+
+    let mut output = "sync planned changes:".to_owned();
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -982,7 +1043,7 @@ fn read_installed_state(project_root: &Path) -> Option<InstallState> {
 }
 
 fn usage() -> String {
-    "usage: leptos_ui_kit <add|doctor|info|init|view> [--json] [--dry-run] [path-or-source]"
+    "usage: leptos_ui_kit <add|doctor|info|init|sync|view> [--json] [--dry-run] [path-or-source]"
         .to_owned()
 }
 
@@ -995,6 +1056,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use leptos_ui_kit_registry::{
+        components_config_to_json, components_config_with_desired_item,
+        desired_builtin_button_item, parse_components_json_str,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -1176,6 +1241,68 @@ leptos_router = "0.9.0-alpha"
             CommandStatus::NoChange,
         )
         .expect("render add");
+        assert!(output.contains("\"status\": \"no_change\""));
+    }
+
+    #[test]
+    fn sync_dry_run_envelope_json_outputs_declared_button_changes() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        write_desired_button_config(root);
+
+        run(
+            vec![
+                OsString::from("sync"),
+                OsString::from("--dry-run"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect("run sync dry-run");
+
+        let output = render_sync_plan(
+            &plan_sync(root).expect("plan sync"),
+            true,
+            CommandStatus::Planned,
+        )
+        .expect("render sync");
+        assert!(output.contains("\"command\": \"sync\""));
+        assert!(output.contains("\"status\": \"planned\""));
+        assert!(output.contains("\"itemIds\": ["));
+        assert!(output.contains("\"builtin:button\""));
+        assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
+    }
+
+    #[test]
+    fn sync_write_installs_declared_button_and_then_reports_no_change() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        write_desired_button_config(root);
+
+        run(vec![OsString::from("sync")], root).expect("run sync");
+        assert!(root.join("src/components/ui/button.rs").is_file());
+
+        run(vec![OsString::from("sync")], root).expect("run second sync");
+        let output = render_sync_plan(
+            &plan_sync(root).expect("plan sync"),
+            true,
+            CommandStatus::NoChange,
+        )
+        .expect("render sync");
         assert!(output.contains("\"status\": \"no_change\""));
     }
 
@@ -1435,5 +1562,19 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(check.status, DoctorCheckStatus::Fail);
         assert!(check.message.contains("failed to run"));
+    }
+
+    fn write_desired_button_config(root: &Path) {
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("add desired item");
+        fs::write(
+            root.join("components.json"),
+            components_config_to_json(&config).expect("serialize config"),
+        )
+        .expect("write config");
     }
 }

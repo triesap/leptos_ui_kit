@@ -263,12 +263,24 @@ impl DesiredItemConfig {
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
         }
     }
+
+    pub fn item_name(&self) -> &'static str {
+        self.name.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesiredItemName {
     Button,
+}
+
+impl DesiredItemName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Button => "button",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,8 +437,12 @@ fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), ConfigError> {
 }
 
 pub fn canonical_components_json() -> Result<String, ConfigError> {
-    let mut output = serde_json::to_string_pretty(&canonical_components_config()?)
-        .map_err(ConfigError::Serialize)?;
+    components_config_to_json(&canonical_components_config()?)
+}
+
+pub fn components_config_to_json(config: &ComponentsConfig) -> Result<String, ConfigError> {
+    config.validate()?;
+    let mut output = serde_json::to_string_pretty(config).map_err(ConfigError::Serialize)?;
     output.push('\n');
     Ok(output)
 }
