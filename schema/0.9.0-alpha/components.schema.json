@@ -165,7 +165,12 @@
         ],
         "properties": {
           "name": {
-            "const": "button"
+            "enum": [
+              "button",
+              "collapsible",
+              "dialog",
+              "tabs"
+            ]
           },
           "source": {
             "const": "builtin"
@@ -181,7 +186,18 @@
       ],
       "properties": {
         "dir": {
-          "const": ".leptos-ui"
+          "type": "string",
+          "default": "src/components/ui/_kit_state",
+          "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\.(?:rs|css|html)$)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+          "not": {
+            "enum": [
+              "components.json",
+              "index.html",
+              "styles/app.css",
+              "src/components/mod.rs",
+              "src/components/ui/mod.rs"
+            ]
+          }
         }
       }
     }

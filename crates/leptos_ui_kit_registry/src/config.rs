@@ -14,6 +14,7 @@ pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
 pub const TOOL_PACKAGE: &str = "leptos_ui_kit_cli";
 pub const TOOL_BINARY: &str = "leptos_ui_kit";
 pub const TOOL_GIT_URL: &str = "https://github.com/triesap/leptos_ui_kit";
+pub const DEFAULT_STATE_DIR: &str = "src/components/ui/_kit_state";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -29,6 +30,14 @@ pub enum ConfigError {
         value: String,
     },
     PathTraversal {
+        field: &'static str,
+        value: String,
+    },
+    UnsafePathSegment {
+        field: &'static str,
+        value: String,
+    },
+    PathOverlap {
         field: &'static str,
         value: String,
     },
@@ -58,6 +67,18 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "components.json path {field} must not traverse parent segments: {value}"
+                )
+            }
+            Self::UnsafePathSegment { field, value } => {
+                write!(
+                    f,
+                    "components.json path {field} contains an unsafe segment: {value}"
+                )
+            }
+            Self::PathOverlap { field, value } => {
+                write!(
+                    f,
+                    "components.json path {field} overlaps a reserved target: {value}"
                 )
             }
             Self::MissingToolProvenance { package, binary } => {
@@ -106,6 +127,7 @@ impl ComponentsConfig {
         self.registry.validate()?;
         validate_desired_items(&self.items)?;
         self.state.validate()?;
+        validate_state_dir_target(self)?;
         Ok(())
     }
 }
@@ -300,7 +322,7 @@ pub struct StateConfig {
 
 impl StateConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        expect_path("state.dir", ".leptos-ui", &self.dir)
+        validate_safe_relative_dir("state.dir", &self.dir)
     }
 }
 
@@ -389,7 +411,7 @@ pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
         },
         items: Vec::new(),
         state: StateConfig {
-            dir: ".leptos-ui".to_owned(),
+            dir: DEFAULT_STATE_DIR.to_owned(),
         },
     };
     config.validate()?;
@@ -572,6 +594,66 @@ fn validate_relative_path(field: &'static str, value: &str) -> Result<(), Config
     Ok(())
 }
 
+fn validate_safe_relative_dir(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    validate_safe_relative_path(field, value)?;
+    if value.ends_with(".rs") || value.ends_with(".css") || value.ends_with(".html") {
+        return Err(ConfigError::PathOverlap {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_safe_relative_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    validate_relative_path(field, value)?;
+    if value.is_empty() || value.contains('\\') {
+        return Err(ConfigError::UnsafePathSegment {
+            field,
+            value: value.to_owned(),
+        });
+    }
+
+    for segment in value.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(ConfigError::UnsafePathSegment {
+                field,
+                value: value.to_owned(),
+            });
+        }
+        if !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(ConfigError::UnsafePathSegment {
+                field,
+                value: value.to_owned(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_state_dir_target(config: &ComponentsConfig) -> Result<(), ConfigError> {
+    let reserved = [
+        "components.json",
+        config.project.index_html.as_str(),
+        config.install.ui_mod.as_str(),
+        config.install.components_mod.as_str(),
+        config.styles.css.as_str(),
+    ];
+
+    if reserved.contains(&config.state.dir.as_str()) {
+        return Err(ConfigError::PathOverlap {
+            field: "state.dir",
+            value: config.state.dir.clone(),
+        });
+    }
+
+    Ok(())
+}
+
 fn join_checked(
     project_root: &Path,
     relative: &str,
@@ -616,6 +698,7 @@ mod tests {
         assert!(first.contains("\"package\": \"leptos_ui_kit_cli\""));
         assert!(first.contains("\"binary\": \"leptos_ui_kit\""));
         assert!(first.contains("\"items\": []"));
+        assert!(first.contains("\"dir\": \"src/components/ui/_kit_state\""));
         assert!(!first.contains("classPrefix"));
         assert!(!first.contains("cssVariablePrefix"));
     }
@@ -774,6 +857,93 @@ mod tests {
     }
 
     #[test]
+    fn accepts_explicit_safe_state_dir() {
+        let input = valid_config_json().replace(
+            "\"dir\": \"src/components/ui/_kit_state\"",
+            "\"dir\": \"src/components/ui/_state_v2\"",
+        );
+
+        let config = parse_components_json_str(&input).expect("parse config");
+
+        assert_eq!(config.state.dir, "src/components/ui/_state_v2");
+    }
+
+    #[test]
+    fn accepts_explicit_hidden_state_dir() {
+        let input = valid_config_json().replace(
+            "\"dir\": \"src/components/ui/_kit_state\"",
+            "\"dir\": \".leptos-ui\"",
+        );
+
+        let config = parse_components_json_str(&input).expect("parse config");
+
+        assert_eq!(config.state.dir, ".leptos-ui");
+    }
+
+    #[test]
+    fn rejects_unsafe_state_dirs() {
+        for value in [
+            "",
+            "../.leptos-ui",
+            "/tmp/leptos-ui",
+            "src/components/ui/state dir",
+            "src/components/ui/state\\dir",
+            "src/components/ui//state",
+        ] {
+            let quoted = serde_json::to_string(value).expect("quote value");
+            let input = valid_config_json().replace(
+                "\"dir\": \"src/components/ui/_kit_state\"",
+                &format!("\"dir\": {quoted}"),
+            );
+
+            let error = parse_components_json_str(&input).expect_err("state dir should fail");
+
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::PathMustBeRelative {
+                        field: "state.dir",
+                        ..
+                    } | ConfigError::PathTraversal {
+                        field: "state.dir",
+                        ..
+                    } | ConfigError::UnsafePathSegment {
+                        field: "state.dir",
+                        ..
+                    }
+                ),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_reserved_state_dir_targets() {
+        for value in [
+            "components.json",
+            "index.html",
+            "styles/app.css",
+            "src/components/mod.rs",
+            "src/components/ui/mod.rs",
+        ] {
+            let input = valid_config_json().replace(
+                "\"dir\": \"src/components/ui/_kit_state\"",
+                &format!("\"dir\": \"{value}\""),
+            );
+
+            let error = parse_components_json_str(&input).expect_err("state target should fail");
+
+            assert!(matches!(
+                error,
+                ConfigError::PathOverlap {
+                    field: "state.dir",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn normalizes_canonical_install_roots() {
         let config = parse_components_json_str(&valid_config_json()).expect("parse config");
         let normalized = normalize_single_crate_project(
@@ -793,6 +963,10 @@ mod tests {
         assert_eq!(
             normalized.install_roots.css_file,
             PathBuf::from("/workspace/demo/styles/app.css")
+        );
+        assert_eq!(
+            normalized.install_roots.state_dir,
+            PathBuf::from("/workspace/demo/src/components/ui/_kit_state")
         );
     }
 }
