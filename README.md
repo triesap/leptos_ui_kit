@@ -54,6 +54,9 @@ leptos_ui_kit info
 leptos_ui_kit init
 leptos_ui_kit view button
 leptos_ui_kit add button
+leptos_ui_kit add collapsible
+leptos_ui_kit add tabs
+leptos_ui_kit add dialog
 leptos_ui_kit sync
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
@@ -72,11 +75,15 @@ The CLI emits dependency plans for:
 ```toml
 leptos = "0.9.0-alpha"
 leptos_router = "0.9.0-alpha"
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "<rev>", features = ["leptos"] }
 ```
 
-It does not mutate `Cargo.toml` in the MVP.
+`web_ui_primitives` is required only by primitive-backed items such as
+`collapsible`, `tabs`, and `dialog`. The CLI does not mutate `Cargo.toml` in the
+MVP; it reports dependency plans and `doctor --strict` verifies the consumer app
+manifest.
 
-## Built-In Button
+## Built-In Components
 
 The built-in `button` item installs `Button`, `ButtonVariant`, `ButtonSize`,
 and `ButtonType`. `ButtonType` defaults to `Button`; use `ButtonType::Submit`
@@ -84,12 +91,23 @@ for form submit buttons. The `disabled` prop accepts static booleans or
 reactive closures, and the generated CSS exposes `--luk-*` tokens for app-owned
 theming without editing the managed CSS block.
 
+The built-in `collapsible`, `tabs`, and `dialog` items install editable
+component families backed by `web_ui_primitives` behavior contracts. These items
+keep semantic DOM in generated app-owned source while delegating accessibility
+state, keyboard behavior, focus management, dismissible overlay behavior,
+presence, modal hiding, scroll lock, and ARIA attributes to the primitive
+substrate.
+
+Generated component CSS is emitted into managed `/* leptos-ui-kit:start ... */`
+blocks in `styles/app.css`. App-specific styling should use `.luk-*` classes and
+`--luk-*` CSS variables outside those managed blocks.
+
 ## Non-Goals
 
 The MVP does not support Tailwind, shadcn compatibility, alias shims, React,
 Radix runtime compatibility, SSR, hydration, islands, multi-member workspace
-installs, remote registries, Cargo manifest mutation, telemetry, or complex
-interactive primitives.
+installs, remote registries, Cargo manifest mutation, telemetry, or generated
+runtime component-library imports.
 
 ## Version Policy
 

@@ -24,3 +24,12 @@ Semantic Versioning.
   desired/install drift, and the `cargo leptos_ui_kit` subcommand entrypoint.
 - Add a Radroots-shaped workflow fixture that compiles the generated `Button`
   in a wasm Trunk CSR app.
+- Add dependency-plan metadata for pinned git/rev primitive dependencies without
+  mutating consumer `Cargo.toml`.
+- Add multi-file generated component targets and accessibility contract
+  metadata for composite component families.
+- Add primitive-backed generated `Collapsible`, `Tabs`, and `Dialog` component
+  families using `web_ui_primitives`.
+- Extend the workflow fixture to install Button, Collapsible, Tabs, and Dialog
+  together, run `sync`, pass strict doctor, and compile for
+  `wasm32-unknown-unknown`.
