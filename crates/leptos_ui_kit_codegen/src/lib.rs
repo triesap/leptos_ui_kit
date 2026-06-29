@@ -4,6 +4,8 @@
 
 use std::{
     fmt, fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -163,6 +165,12 @@ pub enum CodegenError {
         path: PathBuf,
         reason: String,
     },
+    UnsafePath {
+        path: String,
+        reason: String,
+    },
+    DuplicatePath(String),
+    LockExists(PathBuf),
 }
 
 impl fmt::Display for CodegenError {
@@ -173,6 +181,11 @@ impl fmt::Display for CodegenError {
             Self::UnsafePatch { path, reason } => {
                 write!(f, "cannot safely patch {}: {reason}", path.display())
             }
+            Self::UnsafePath { path, reason } => {
+                write!(f, "unsafe write path {path}: {reason}")
+            }
+            Self::DuplicatePath(path) => write!(f, "duplicate planned write path: {path}"),
+            Self::LockExists(path) => write!(f, "write lock already exists: {}", path.display()),
         }
     }
 }
@@ -229,6 +242,192 @@ pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
         files,
         changes,
     })
+}
+
+pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for path in paths {
+        validate_logical_write_path(path)?;
+        let folded = path.to_ascii_lowercase();
+        if !seen.insert(folded) {
+            return Err(CodegenError::DuplicatePath(path.clone()));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_project_write_path(
+    project_root: &Path,
+    logical_path: &str,
+) -> Result<PathBuf, CodegenError> {
+    validate_logical_write_path(logical_path)?;
+    let root = project_root
+        .canonicalize()
+        .map_err(|source| CodegenError::Io {
+            path: project_root.to_path_buf(),
+            source,
+        })?;
+    let full_path = project_root.join(logical_path);
+    let existing_parent =
+        nearest_existing_parent(&full_path).ok_or_else(|| CodegenError::UnsafePath {
+            path: logical_path.to_owned(),
+            reason: "no existing parent within project".to_owned(),
+        })?;
+    let canonical_parent = existing_parent
+        .canonicalize()
+        .map_err(|source| CodegenError::Io {
+            path: existing_parent,
+            source,
+        })?;
+
+    if !canonical_parent.starts_with(&root) {
+        return Err(CodegenError::UnsafePath {
+            path: logical_path.to_owned(),
+            reason: "path escapes project root through symlink".to_owned(),
+        });
+    }
+
+    Ok(full_path)
+}
+
+pub fn validate_logical_write_path(path: &str) -> Result<(), CodegenError> {
+    if path.is_empty() {
+        return unsafe_path(path, "path is empty");
+    }
+    if path.starts_with('/')
+        || path.starts_with("//")
+        || path.starts_with("\\\\")
+        || path.as_bytes().get(1) == Some(&b':')
+    {
+        return unsafe_path(path, "absolute paths and platform prefixes are rejected");
+    }
+    if !path.is_ascii() {
+        return unsafe_path(path, "path must be ASCII");
+    }
+    if path.contains('\\') {
+        return unsafe_path(path, "backslashes are rejected");
+    }
+
+    let mut components = path.split('/').peekable();
+    while let Some(component) = components.next() {
+        if component.is_empty() || component == "." {
+            return unsafe_path(path, "empty or current-dir segments are rejected");
+        }
+        if component == ".." {
+            return unsafe_path(path, "parent traversal is rejected");
+        }
+        if component.starts_with('.') {
+            let allowed_internal = component == ".leptos-ui" && components.peek().is_some();
+            if !allowed_internal {
+                return unsafe_path(path, "hidden paths are rejected except .leptos-ui");
+            }
+        }
+        if !component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return unsafe_path(path, "file name contains unsafe characters");
+        }
+    }
+
+    if is_allowed_write_path(path) {
+        Ok(())
+    } else {
+        unsafe_path(path, "path is outside the MVP write allow-list")
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteLock {
+    path: PathBuf,
+}
+
+impl WriteLock {
+    pub fn acquire(project_root: &Path) -> Result<Self, CodegenError> {
+        let lock_path = project_root.join(".leptos-ui/lock");
+        fs::create_dir_all(project_root.join(".leptos-ui")).map_err(|source| CodegenError::Io {
+            path: project_root.join(".leptos-ui"),
+            source,
+        })?;
+
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                file.write_all(b"locked\n")
+                    .map_err(|source| CodegenError::Io {
+                        path: lock_path.clone(),
+                        source,
+                    })?;
+                Ok(Self { path: lock_path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(CodegenError::LockExists(lock_path))
+            }
+            Err(source) => Err(CodegenError::Io {
+                path: lock_path,
+                source,
+            }),
+        }
+    }
+}
+
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub fn write_file_atomic(
+    project_root: &Path,
+    logical_path: &str,
+    content: &[u8],
+) -> Result<(), CodegenError> {
+    let full_path = validate_project_write_path(project_root, logical_path)?;
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CodegenError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let temp_path = full_path.with_extension("leptos-ui-kit.tmp");
+    fs::write(&temp_path, content).map_err(|source| CodegenError::Io {
+        path: temp_path.clone(),
+        source,
+    })?;
+    fs::rename(&temp_path, &full_path).map_err(|source| CodegenError::Io {
+        path: full_path,
+        source,
+    })?;
+    Ok(())
+}
+
+fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
+    Err(CodegenError::UnsafePath {
+        path: path.to_owned(),
+        reason: reason.to_owned(),
+    })
+}
+
+fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.parent()?;
+    loop {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
+fn is_allowed_write_path(path: &str) -> bool {
+    matches!(
+        path,
+        "components.json" | "index.html" | "styles/app.css" | "src/components/mod.rs"
+    ) || path.starts_with("src/components/ui/")
+        || path.starts_with(".leptos-ui/")
 }
 
 fn plan_components_json(
@@ -492,5 +691,92 @@ mod tests {
         let error = plan_init(root).expect_err("invalid config should fail");
 
         assert!(matches!(error, CodegenError::Config(_)));
+    }
+
+    #[test]
+    fn path_safety_accepts_mvp_paths() {
+        let paths = vec![
+            "components.json".to_owned(),
+            "index.html".to_owned(),
+            "styles/app.css".to_owned(),
+            "src/components/mod.rs".to_owned(),
+            "src/components/ui/button.rs".to_owned(),
+            ".leptos-ui/state.json".to_owned(),
+        ];
+
+        validate_planned_write_paths(&paths).expect("paths should pass");
+    }
+
+    #[test]
+    fn path_safety_rejects_unsafe_paths() {
+        for path in [
+            "../evil.rs",
+            "/tmp/evil.rs",
+            "C:\\evil.rs",
+            "\\\\server\\share\\evil.rs",
+            ".hidden",
+            "src/components/ui/../../evil.rs",
+            "src/components/ui/Button Rs",
+            "src/lib.rs",
+        ] {
+            assert!(validate_logical_write_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn path_safety_rejects_casefold_duplicate_paths() {
+        let paths = vec![
+            "src/components/ui/button.rs".to_owned(),
+            "src/components/ui/Button.rs".to_owned(),
+        ];
+
+        let error = validate_planned_write_paths(&paths).expect_err("duplicate should fail");
+
+        assert!(matches!(error, CodegenError::DuplicatePath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_safety_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/components")).expect("create components");
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), root.join("src/components/ui"))
+            .expect("symlink");
+
+        let error = validate_project_write_path(root, "src/components/ui/button.rs")
+            .expect_err("symlink escape should fail");
+
+        assert!(matches!(error, CodegenError::UnsafePath { .. }));
+    }
+
+    #[test]
+    fn transaction_lock_fails_when_lock_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let _first = WriteLock::acquire(root).expect("first lock");
+        let error = WriteLock::acquire(root).expect_err("second lock should fail");
+
+        assert!(matches!(error, CodegenError::LockExists(_)));
+    }
+
+    #[test]
+    fn transaction_atomic_write_creates_file_and_releases_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("styles")).expect("styles");
+
+        {
+            let _lock = WriteLock::acquire(root).expect("lock");
+            write_file_atomic(root, "styles/app.css", b":root {}\n").expect("write css");
+            assert!(root.join(".leptos-ui/lock").exists());
+        }
+
+        assert_eq!(
+            fs::read_to_string(root.join("styles/app.css")).expect("read css"),
+            ":root {}\n"
+        );
+        assert!(!root.join(".leptos-ui/lock").exists());
     }
 }
