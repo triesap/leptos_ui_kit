@@ -22,7 +22,7 @@ pub fn DialogTrigger(
 
     view! {
         <button
-            class=class_with_base("luk-dialog-trigger", &class)
+            class=class_with_base("kit-dialog-trigger", &class)
             type="button"
             disabled=move || disabled.get()
             data-state=move || dialog_state(state_context.open.get())

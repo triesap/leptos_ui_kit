@@ -32,7 +32,7 @@ pub fn TabsPanel(
     view! {
         <div
             node_ref=bindings.node_ref()
-            class=class_with_base("luk-tabs-panel", &class)
+            class=class_with_base("kit-tabs-panel", &class)
         >
             {children()}
         </div>

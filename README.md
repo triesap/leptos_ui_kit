@@ -9,7 +9,7 @@ The MVP target is intentionally narrow:
 ```text
 Cargo.toml
 index.html
-styles/app.css
+styles/kit.css
 src/
 ```
 
@@ -17,10 +17,10 @@ The project may be a plain single crate or a single-package workspace root.
 Multi-member workspace installs are not supported.
 
 Generated components are installed under `src/components/ui` and styled with
-pure CSS in `styles/app.css`.
+pure CSS in `styles/kit.css`.
 Installed components are declared in `components.json`, while the configured
 state directory stores installer state and generated baselines. The default
-state directory is `src/components/ui/_kit_state`. Commit both with the
+state directory is `src/components/ui/_kit`. Commit both with the
 generated source so `sync` and `doctor` can reconcile the app deterministically.
 
 ## Goals
@@ -28,7 +28,7 @@ generated source so `sync` and `doctor` can reconcile the app deterministically.
 - Provide a consistent, Leptos-native component source foundation.
 - Install components as project-owned source files.
 - Use a CLI to inspect, initialize, view, add, sync, and verify components.
-- Keep styling simple with `.luk-*` CSS classes and `--luk-*` CSS variables.
+- Keep styling simple with `.kit-*` CSS classes and `--kit-*` CSS variables.
 - Keep generated source compatible with Leptos `0.9.0-alpha`.
 - Store minimal configured state and baselines for idempotency and future
   conflict-aware updates.
@@ -59,7 +59,7 @@ leptos_ui_kit add collapsible
 leptos_ui_kit add tabs
 leptos_ui_kit add dialog
 leptos_ui_kit sync
-leptos_ui_kit migrate state-dir src/components/ui/_kit_state
+leptos_ui_kit migrate state-dir src/components/ui/_kit
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
 ```
@@ -94,7 +94,7 @@ manifest.
 The built-in `button` item installs `Button`, `ButtonVariant`, `ButtonSize`,
 and `ButtonType`. `ButtonType` defaults to `Button`; use `ButtonType::Submit`
 for form submit buttons. The `disabled` prop accepts static booleans or
-reactive closures, and the generated CSS exposes `--luk-*` tokens for app-owned
+reactive closures, and the generated CSS exposes `--kit-*` tokens for app-owned
 theming without editing the managed CSS block.
 
 The built-in `collapsible`, `tabs`, and `dialog` items install editable
@@ -105,8 +105,10 @@ presence, modal hiding, scroll lock, and ARIA attributes to the primitive
 substrate.
 
 Generated component CSS is emitted into managed `/* leptos-ui-kit:start ... */`
-blocks in `styles/app.css`. App-specific styling should use `.luk-*` classes and
-`--luk-*` CSS variables outside those managed blocks.
+blocks in `styles/kit.css`. App-specific styling should use `.kit-*` classes and
+`--kit-*` CSS variables outside those managed blocks.
+Apps that need a different generated stylesheet can set `styles.css` in
+`components.json` to another safe CSS file under `styles/` and then run `sync`.
 
 ## Non-Goals
 

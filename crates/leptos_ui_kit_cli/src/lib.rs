@@ -18,9 +18,10 @@ use leptos_ui_kit_codegen::{
     plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, DEFAULT_STATE_DIR, DependencyRequirement, DependencyStatus,
-    InfoOutput, ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
-    load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
+    CargoPlanEntry, ComponentsConfig, DEFAULT_CSS_PATH, DEFAULT_STATE_DIR, DependencyRequirement,
+    DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
+    detect_cargo_plan_requirements, load_built_in_registry_item, load_registry_item,
+    read_built_in_registry_source,
 };
 use serde::Serialize;
 
@@ -796,6 +797,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
             );
 
             checks.extend(state_checks(cwd, strict, info.components_config.as_ref()));
+            checks.extend(stylesheet_checks(cwd, strict, &info));
             checks.extend(registry_dependency_checks(cwd, strict, &info));
         }
         Err(error) => {
@@ -1002,6 +1004,69 @@ fn state_checks(
     ));
 
     checks
+}
+
+fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let css_logical_path = info
+        .components_config
+        .as_ref()
+        .map(|config| config.styles.css.as_str())
+        .unwrap_or(DEFAULT_CSS_PATH);
+    let css_path = cwd.join(css_logical_path);
+
+    if css_path.is_file() {
+        checks.push(
+            DoctorCheck::pass("stylesheet", format!("{css_logical_path} exists"))
+                .with_path(css_path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            strict_check(
+                strict,
+                "stylesheet",
+                format!("{css_logical_path} is missing; run leptos_ui_kit init or sync"),
+            )
+            .with_path(css_path.display().to_string()),
+        );
+    }
+
+    match fs::read_to_string(&info.detected.index_html_path) {
+        Ok(html) if contains_trunk_css_link(&html, css_logical_path) => {
+            checks.push(
+                DoctorCheck::pass(
+                    "stylesheet_link",
+                    format!("index.html links {css_logical_path} for Trunk"),
+                )
+                .with_path(info.detected.index_html_path.display().to_string()),
+            );
+        }
+        Ok(_) => checks.push(
+            strict_check(
+                strict,
+                "stylesheet_link",
+                format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
+            )
+            .with_path(info.detected.index_html_path.display().to_string()),
+        ),
+        Err(error) => checks.push(
+            DoctorCheck::fail(
+                "stylesheet_link",
+                format!("failed to read index.html: {error}"),
+            )
+            .with_path(info.detected.index_html_path.display().to_string()),
+        ),
+    }
+
+    checks
+}
+
+fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
+    html.lines().any(|line| {
+        line.contains("data-trunk")
+            && line.contains("rel=\"css\"")
+            && line.contains(&format!("href=\"{css_path}\""))
+    })
 }
 
 fn registry_dependency_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
@@ -1594,13 +1659,13 @@ leptos_router = "0.9.0-alpha"
         .expect("write cargo");
         fs::create_dir(root.join("src")).expect("create src");
         fs::create_dir(root.join("styles")).expect("create styles");
-        fs::write(root.join("styles/app.css"), ":root {}\n").expect("write css");
+        fs::write(root.join("styles/kit.css"), ":root {}\n").expect("write css");
         fs::write(
             root.join("index.html"),
             r#"<!DOCTYPE html>
 <html>
   <head>
-    <link data-trunk rel="css" href="styles/app.css" />
+    <link data-trunk rel="css" href="styles/kit.css" />
   </head>
   <body></body>
 </html>
@@ -1640,7 +1705,7 @@ leptos_router = "0.9.0-alpha"
 
         assert!(output.contains("\"sources\""));
         assert!(output.contains("pub fn Button"));
-        assert!(output.contains(".luk-button"));
+        assert!(output.contains(".kit-button"));
     }
 
     #[test]
@@ -1690,10 +1755,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
 
         assert!(root.join("components.json").is_file());
-        assert!(
-            root.join("src/components/ui/_kit_state/state.json")
-                .is_file()
-        );
+        assert!(root.join("src/components/ui/_kit/state.json").is_file());
     }
 
     #[test]
@@ -1758,9 +1820,11 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
-        assert!(output.contains(
-            "\"path\": \"src/components/ui/_kit_state/baselines/builtin-button/button.rs\""
-        ));
+        assert!(
+            output.contains(
+                "\"path\": \"src/components/ui/_kit/baselines/builtin-button/button.rs\""
+            )
+        );
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -1779,7 +1843,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
         assert!(root.join("src/components/ui/button.rs").is_file());
         assert!(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css")
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.css")
                 .is_file()
         );
 
@@ -1947,8 +2011,7 @@ leptos_router = "0.9.0-alpha"
         let root = dir.path();
         create_doctor_project(root);
         init_git(root);
-        fs::write(root.join(".gitignore"), "/src/components/ui/_kit_state/\n")
-            .expect("write gitignore");
+        fs::write(root.join(".gitignore"), "/src/components/ui/_kit/\n").expect("write gitignore");
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
@@ -1958,9 +2021,10 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.git_metadata\""));
-        assert!(output.contains(
-            "installer metadata src/components/ui/_kit_state/state.json is ignored by Git"
-        ));
+        assert!(
+            output
+                .contains("installer metadata src/components/ui/_kit/state.json is ignored by Git")
+        );
     }
 
     #[test]
@@ -1989,7 +2053,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
-        let state_path = root.join("src/components/ui/_kit_state/state.json");
+        let state_path = root.join("src/components/ui/_kit/state.json");
         let mut state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
                 .expect("parse state");
@@ -2039,9 +2103,9 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
-        let css_path = root.join("styles/app.css");
+        let css_path = root.join("styles/kit.css");
         let baseline = fs::read_to_string(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css"),
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.css"),
         )
         .expect("read baseline");
         let mut css = fs::read_to_string(&css_path).expect("read css");
@@ -2090,12 +2154,9 @@ leptos_router = "0.9.0-alpha"
         )
         .expect("run migrate");
 
+        assert!(root.join("src/components/ui/_kit/state.json").is_file());
         assert!(
-            root.join("src/components/ui/_kit_state/state.json")
-                .is_file()
-        );
-        assert!(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
                 .is_file()
         );
         assert!(!root.join(".leptos-ui").exists());
@@ -2150,13 +2211,13 @@ leptos_router = "0.9.0-alpha"
         .expect("write cargo");
         fs::create_dir(root.join("src")).expect("create src");
         fs::create_dir(root.join("styles")).expect("create styles");
-        fs::write(root.join("styles/app.css"), ":root {}\n").expect("write css");
+        fs::write(root.join("styles/kit.css"), ":root {}\n").expect("write css");
         fs::write(
             root.join("index.html"),
             r#"<!DOCTYPE html>
 <html>
   <head>
-    <link data-trunk rel="css" href="styles/app.css" />
+    <link data-trunk rel="css" href="styles/kit.css" />
   </head>
   <body></body>
 </html>

@@ -29,7 +29,7 @@ pub fn CollapsibleRoot(
     });
 
     view! {
-        <div class=class_with_base("luk-collapsible", &class)>
+        <div class=class_with_base("kit-collapsible", &class)>
             {children()}
         </div>
     }
@@ -45,5 +45,5 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
 
 fn next_content_id() -> String {
     let id = NEXT_COLLAPSIBLE_ID.fetch_add(1, Ordering::Relaxed);
-    format!("luk-collapsible-content-{id}")
+    format!("kit-collapsible-content-{id}")
 }

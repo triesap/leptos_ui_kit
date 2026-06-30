@@ -27,9 +27,9 @@ pub enum ButtonType {
 impl ButtonVariant {
     fn class(self) -> &'static str {
         match self {
-            Self::Primary => "luk-button--primary",
-            Self::Secondary => "luk-button--secondary",
-            Self::Ghost => "luk-button--ghost",
+            Self::Primary => "kit-button--primary",
+            Self::Secondary => "kit-button--secondary",
+            Self::Ghost => "kit-button--ghost",
         }
     }
 }
@@ -37,9 +37,9 @@ impl ButtonVariant {
 impl ButtonSize {
     fn class(self) -> &'static str {
         match self {
-            Self::Sm => "luk-button--sm",
-            Self::Md => "luk-button--md",
-            Self::Lg => "luk-button--lg",
+            Self::Sm => "kit-button--sm",
+            Self::Md => "kit-button--md",
+            Self::Lg => "kit-button--lg",
         }
     }
 }
@@ -63,7 +63,7 @@ pub fn Button(
     #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
-    let base_class = format!("luk-button {} {}", variant.class(), size.class(),);
+    let base_class = format!("kit-button {} {}", variant.class(), size.class(),);
     let class = if class.is_empty() {
         base_class
     } else {

@@ -19,7 +19,7 @@ pub fn DialogClose(
 
     view! {
         <button
-            class=class_with_base("luk-dialog-close", &class)
+            class=class_with_base("kit-dialog-close", &class)
             type="button"
             disabled=move || disabled.get()
             on:click=on_click

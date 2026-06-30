@@ -33,7 +33,7 @@ pub fn DialogContent(
     let children = StoredValue::new(children);
     let content_id_value = context.content_id.clone();
     let content_id = Signal::derive(move || content_id_value.clone());
-    let content_class_value = class_with_base("luk-dialog-content", &class);
+    let content_class_value = class_with_base("kit-dialog-content", &class);
     let content_class = Signal::derive(move || content_class_value.clone());
     let modal = context.modal;
     let label_value = label.clone();

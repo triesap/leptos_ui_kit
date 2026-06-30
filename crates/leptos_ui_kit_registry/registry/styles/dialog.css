@@ -1,151 +1,151 @@
 /* leptos-ui-kit:start dialog */
 :root {
-  --luk-dialog-background: #ffffff;
-  --luk-dialog-border-color: var(--luk-color-border, #d1d5db);
-  --luk-dialog-border-width: 1px;
-  --luk-dialog-close-background: transparent;
-  --luk-dialog-close-background-hover: #f3f4f6;
-  --luk-dialog-close-border-color: var(--luk-color-border, #d1d5db);
-  --luk-dialog-close-color: #111827;
-  --luk-dialog-close-disabled-opacity: 0.55;
-  --luk-dialog-close-focus-ring: var(--luk-focus-ring, #2563eb);
-  --luk-dialog-close-font-weight: 600;
-  --luk-dialog-close-min-height: 2.5rem;
-  --luk-dialog-close-padding-block: 0.5rem;
-  --luk-dialog-close-padding-inline: 0.75rem;
-  --luk-dialog-close-radius: var(--luk-radius-md, 0.375rem);
-  --luk-dialog-color: #111827;
-  --luk-dialog-description-color: #4b5563;
-  --luk-dialog-description-font-size: 0.9375rem;
-  --luk-dialog-description-line-height: 1.5;
-  --luk-dialog-elevation: 0 20px 40px rgb(15 23 42 / 18%);
-  --luk-dialog-focus-outline-offset: 2px;
-  --luk-dialog-focus-outline-width: 2px;
-  --luk-dialog-focus-ring: var(--luk-focus-ring, #2563eb);
-  --luk-dialog-gap: 1rem;
-  --luk-dialog-max-block-size: min(42rem, calc(100vh - 2rem));
-  --luk-dialog-max-inline-size: min(32rem, calc(100vw - 2rem));
-  --luk-dialog-padding-block: 1.25rem;
-  --luk-dialog-padding-inline: 1.25rem;
-  --luk-dialog-radius: var(--luk-radius-md, 0.375rem);
-  --luk-dialog-title-font-size: 1.125rem;
-  --luk-dialog-title-font-weight: 700;
-  --luk-dialog-title-line-height: 1.25;
-  --luk-dialog-transition-duration: 140ms;
-  --luk-dialog-transition-timing: ease;
-  --luk-dialog-trigger-background: transparent;
-  --luk-dialog-trigger-background-hover: #f3f4f6;
-  --luk-dialog-trigger-border-color: var(--luk-color-border, #d1d5db);
-  --luk-dialog-trigger-color: #111827;
-  --luk-dialog-trigger-disabled-opacity: 0.55;
-  --luk-dialog-trigger-focus-ring: var(--luk-focus-ring, #2563eb);
-  --luk-dialog-trigger-font-weight: 600;
-  --luk-dialog-trigger-min-height: 2.5rem;
-  --luk-dialog-trigger-padding-block: 0.5rem;
-  --luk-dialog-trigger-padding-inline: 0.75rem;
-  --luk-dialog-trigger-radius: var(--luk-radius-md, 0.375rem);
-  --luk-dialog-z-index: 50;
+  --kit-dialog-background: #ffffff;
+  --kit-dialog-border-color: var(--kit-color-border, #d1d5db);
+  --kit-dialog-border-width: 1px;
+  --kit-dialog-close-background: transparent;
+  --kit-dialog-close-background-hover: #f3f4f6;
+  --kit-dialog-close-border-color: var(--kit-color-border, #d1d5db);
+  --kit-dialog-close-color: #111827;
+  --kit-dialog-close-disabled-opacity: 0.55;
+  --kit-dialog-close-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-dialog-close-font-weight: 600;
+  --kit-dialog-close-min-height: 2.5rem;
+  --kit-dialog-close-padding-block: 0.5rem;
+  --kit-dialog-close-padding-inline: 0.75rem;
+  --kit-dialog-close-radius: var(--kit-radius-md, 0.375rem);
+  --kit-dialog-color: #111827;
+  --kit-dialog-description-color: #4b5563;
+  --kit-dialog-description-font-size: 0.9375rem;
+  --kit-dialog-description-line-height: 1.5;
+  --kit-dialog-elevation: 0 20px 40px rgb(15 23 42 / 18%);
+  --kit-dialog-focus-outline-offset: 2px;
+  --kit-dialog-focus-outline-width: 2px;
+  --kit-dialog-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-dialog-gap: 1rem;
+  --kit-dialog-max-block-size: min(42rem, calc(100vh - 2rem));
+  --kit-dialog-max-inline-size: min(32rem, calc(100vw - 2rem));
+  --kit-dialog-padding-block: 1.25rem;
+  --kit-dialog-padding-inline: 1.25rem;
+  --kit-dialog-radius: var(--kit-radius-md, 0.375rem);
+  --kit-dialog-title-font-size: 1.125rem;
+  --kit-dialog-title-font-weight: 700;
+  --kit-dialog-title-line-height: 1.25;
+  --kit-dialog-transition-duration: 140ms;
+  --kit-dialog-transition-timing: ease;
+  --kit-dialog-trigger-background: transparent;
+  --kit-dialog-trigger-background-hover: #f3f4f6;
+  --kit-dialog-trigger-border-color: var(--kit-color-border, #d1d5db);
+  --kit-dialog-trigger-color: #111827;
+  --kit-dialog-trigger-disabled-opacity: 0.55;
+  --kit-dialog-trigger-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-dialog-trigger-font-weight: 600;
+  --kit-dialog-trigger-min-height: 2.5rem;
+  --kit-dialog-trigger-padding-block: 0.5rem;
+  --kit-dialog-trigger-padding-inline: 0.75rem;
+  --kit-dialog-trigger-radius: var(--kit-radius-md, 0.375rem);
+  --kit-dialog-z-index: 50;
 }
 
-.luk-dialog-trigger,
-.luk-dialog-close {
+.kit-dialog-trigger,
+.kit-dialog-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--luk-dialog-trigger-border-color);
-  border-radius: var(--luk-dialog-trigger-radius);
-  min-height: var(--luk-dialog-trigger-min-height);
+  border: 1px solid var(--kit-dialog-trigger-border-color);
+  border-radius: var(--kit-dialog-trigger-radius);
+  min-height: var(--kit-dialog-trigger-min-height);
   padding:
-    var(--luk-dialog-trigger-padding-block)
-    var(--luk-dialog-trigger-padding-inline);
-  background: var(--luk-dialog-trigger-background);
-  color: var(--luk-dialog-trigger-color);
+    var(--kit-dialog-trigger-padding-block)
+    var(--kit-dialog-trigger-padding-inline);
+  background: var(--kit-dialog-trigger-background);
+  color: var(--kit-dialog-trigger-color);
   font: inherit;
-  font-weight: var(--luk-dialog-trigger-font-weight);
+  font-weight: var(--kit-dialog-trigger-font-weight);
   cursor: pointer;
 }
 
-.luk-dialog-close {
-  border-color: var(--luk-dialog-close-border-color);
-  border-radius: var(--luk-dialog-close-radius);
-  min-height: var(--luk-dialog-close-min-height);
+.kit-dialog-close {
+  border-color: var(--kit-dialog-close-border-color);
+  border-radius: var(--kit-dialog-close-radius);
+  min-height: var(--kit-dialog-close-min-height);
   padding:
-    var(--luk-dialog-close-padding-block)
-    var(--luk-dialog-close-padding-inline);
-  background: var(--luk-dialog-close-background);
-  color: var(--luk-dialog-close-color);
-  font-weight: var(--luk-dialog-close-font-weight);
+    var(--kit-dialog-close-padding-block)
+    var(--kit-dialog-close-padding-inline);
+  background: var(--kit-dialog-close-background);
+  color: var(--kit-dialog-close-color);
+  font-weight: var(--kit-dialog-close-font-weight);
 }
 
-.luk-dialog-trigger:hover:not(:disabled) {
-  background: var(--luk-dialog-trigger-background-hover);
+.kit-dialog-trigger:hover:not(:disabled) {
+  background: var(--kit-dialog-trigger-background-hover);
 }
 
-.luk-dialog-close:hover:not(:disabled) {
-  background: var(--luk-dialog-close-background-hover);
+.kit-dialog-close:hover:not(:disabled) {
+  background: var(--kit-dialog-close-background-hover);
 }
 
-.luk-dialog-trigger:focus-visible,
-.luk-dialog-close:focus-visible,
-.luk-dialog-content:focus-visible {
-  outline: var(--luk-dialog-focus-outline-width) solid var(--luk-dialog-focus-ring);
-  outline-offset: var(--luk-dialog-focus-outline-offset);
+.kit-dialog-trigger:focus-visible,
+.kit-dialog-close:focus-visible,
+.kit-dialog-content:focus-visible {
+  outline: var(--kit-dialog-focus-outline-width) solid var(--kit-dialog-focus-ring);
+  outline-offset: var(--kit-dialog-focus-outline-offset);
 }
 
-.luk-dialog-trigger:disabled {
+.kit-dialog-trigger:disabled {
   cursor: not-allowed;
-  opacity: var(--luk-dialog-trigger-disabled-opacity);
+  opacity: var(--kit-dialog-trigger-disabled-opacity);
 }
 
-.luk-dialog-close:disabled {
+.kit-dialog-close:disabled {
   cursor: not-allowed;
-  opacity: var(--luk-dialog-close-disabled-opacity);
+  opacity: var(--kit-dialog-close-disabled-opacity);
 }
 
-.luk-dialog-content {
+.kit-dialog-content {
   position: fixed;
   inset-block-start: 50%;
   inset-inline-start: 50%;
-  z-index: var(--luk-dialog-z-index);
+  z-index: var(--kit-dialog-z-index);
   display: grid;
-  gap: var(--luk-dialog-gap);
+  gap: var(--kit-dialog-gap);
   box-sizing: border-box;
-  inline-size: var(--luk-dialog-max-inline-size);
-  max-block-size: var(--luk-dialog-max-block-size);
+  inline-size: var(--kit-dialog-max-inline-size);
+  max-block-size: var(--kit-dialog-max-block-size);
   overflow: auto;
-  border: var(--luk-dialog-border-width) solid var(--luk-dialog-border-color);
-  border-radius: var(--luk-dialog-radius);
+  border: var(--kit-dialog-border-width) solid var(--kit-dialog-border-color);
+  border-radius: var(--kit-dialog-radius);
   padding:
-    var(--luk-dialog-padding-block)
-    var(--luk-dialog-padding-inline);
-  background: var(--luk-dialog-background);
-  color: var(--luk-dialog-color);
-  box-shadow: var(--luk-dialog-elevation);
+    var(--kit-dialog-padding-block)
+    var(--kit-dialog-padding-inline);
+  background: var(--kit-dialog-background);
+  color: var(--kit-dialog-color);
+  box-shadow: var(--kit-dialog-elevation);
   transform: translate(-50%, -50%);
   transition:
-    opacity var(--luk-dialog-transition-duration) var(--luk-dialog-transition-timing),
-    transform var(--luk-dialog-transition-duration) var(--luk-dialog-transition-timing);
+    opacity var(--kit-dialog-transition-duration) var(--kit-dialog-transition-timing),
+    transform var(--kit-dialog-transition-duration) var(--kit-dialog-transition-timing);
 }
 
-.luk-dialog-content[data-state="closed"] {
+.kit-dialog-content[data-state="closed"] {
   opacity: 0;
   transform: translate(-50%, calc(-50% + 0.5rem)) scale(0.98);
 }
 
-.luk-dialog-title,
-.luk-dialog-description {
+.kit-dialog-title,
+.kit-dialog-description {
   margin: 0;
 }
 
-.luk-dialog-title {
-  font-size: var(--luk-dialog-title-font-size);
-  font-weight: var(--luk-dialog-title-font-weight);
-  line-height: var(--luk-dialog-title-line-height);
+.kit-dialog-title {
+  font-size: var(--kit-dialog-title-font-size);
+  font-weight: var(--kit-dialog-title-font-weight);
+  line-height: var(--kit-dialog-title-line-height);
 }
 
-.luk-dialog-description {
-  color: var(--luk-dialog-description-color);
-  font-size: var(--luk-dialog-description-font-size);
-  line-height: var(--luk-dialog-description-line-height);
+.kit-dialog-description {
+  color: var(--kit-dialog-description-color);
+  font-size: var(--kit-dialog-description-font-size);
+  line-height: var(--kit-dialog-description-line-height);
 }
 /* leptos-ui-kit:end dialog */

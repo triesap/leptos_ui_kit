@@ -8,8 +8,9 @@ use toml::Value as TomlValue;
 
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ComponentsConfig, ConfigError,
-    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig, RenderMode,
-    WorkspaceMode, normalize_single_crate_project, parse_components_json_str,
+    DEFAULT_CSS_PATH, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions,
+    NormalizedProjectConfig, RenderMode, WorkspaceMode, normalize_single_crate_project,
+    parse_components_json_str,
 };
 
 #[derive(Debug)]
@@ -22,11 +23,6 @@ pub enum DetectionError {
     MissingCargoManifest(PathBuf),
     MissingIndexHtml(PathBuf),
     MissingSourceRoot(PathBuf),
-    MissingStylesheet(PathBuf),
-    MissingTrunkCssLink {
-        index_html: PathBuf,
-        css_href: String,
-    },
     UnsupportedProject(String),
     Config(ConfigError),
 }
@@ -43,17 +39,6 @@ impl fmt::Display for DetectionError {
             Self::MissingSourceRoot(path) => {
                 write!(f, "missing source root at {}", path.display())
             }
-            Self::MissingStylesheet(path) => {
-                write!(f, "missing stylesheet at {}", path.display())
-            }
-            Self::MissingTrunkCssLink {
-                index_html,
-                css_href,
-            } => write!(
-                f,
-                "missing Trunk CSS link for {css_href} in {}",
-                index_html.display()
-            ),
             Self::UnsupportedProject(reason) => write!(f, "unsupported project: {reason}"),
             Self::Config(error) => write!(f, "{error}"),
         }
@@ -182,25 +167,23 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         return Err(DetectionError::MissingIndexHtml(index_html_path));
     }
 
-    let css_file_path = project_root.join("styles/app.css");
-    if !css_file_path.is_file() {
-        return Err(DetectionError::MissingStylesheet(css_file_path));
-    }
-
-    let html = read_to_string(&index_html_path)?;
-    if !contains_trunk_css_link(&html, "styles/app.css") {
-        return Err(DetectionError::MissingTrunkCssLink {
-            index_html: index_html_path,
-            css_href: "styles/app.css".to_owned(),
-        });
-    }
-
-    let dependency_plan = DependencyPlan::from_manifest(&manifest);
-    let render_mode = detect_render_mode(&dependency_plan);
     let components_config_path = project_root.join("components.json");
     let components_config_path = components_config_path
         .is_file()
         .then_some(components_config_path);
+    let components_config = match components_config_path.as_ref() {
+        Some(path) => Some(parse_components_json_str(&read_to_string(path)?)?),
+        None => None,
+    };
+    let css_file_path = project_root.join(
+        components_config
+            .as_ref()
+            .map(|config| config.styles.css.as_str())
+            .unwrap_or(DEFAULT_CSS_PATH),
+    );
+
+    let dependency_plan = DependencyPlan::from_manifest(&manifest);
+    let render_mode = detect_render_mode(&dependency_plan);
 
     Ok(DetectedProject {
         project_root: project_root.to_path_buf(),
@@ -411,14 +394,6 @@ fn dependency_features(value: &TomlValue) -> Option<Vec<String>> {
     }
 }
 
-fn contains_trunk_css_link(html: &str, href: &str) -> bool {
-    html.lines().any(|line| {
-        line.contains("data-trunk")
-            && line.contains("rel=\"css\"")
-            && line.contains(&format!("href=\"{href}\""))
-    })
-}
-
 fn read_to_string(path: &Path) -> Result<String, DetectionError> {
     fs::read_to_string(path).map_err(|source| DetectionError::Io {
         path: path.to_path_buf(),
@@ -452,13 +427,13 @@ leptos_router = "0.9.0-alpha"
         .expect("write cargo");
         fs::create_dir(root.join("src")).expect("create src");
         fs::create_dir(root.join("styles")).expect("create styles");
-        fs::write(root.join("styles/app.css"), ":root {}\n").expect("write css");
+        fs::write(root.join("styles/kit.css"), ":root {}\n").expect("write css");
         fs::write(
             root.join("index.html"),
             r#"<!DOCTYPE html>
 <html>
   <head>
-    <link data-trunk rel="css" href="styles/app.css" />
+    <link data-trunk rel="css" href="styles/kit.css" />
   </head>
   <body></body>
 </html>
@@ -478,7 +453,7 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(detected.workspace_mode, WorkspaceMode::SingleCrate);
         assert_eq!(detected.source_root, root.join("src"));
         assert_eq!(detected.index_html_path, root.join("index.html"));
-        assert_eq!(detected.css_file_path, root.join("styles/app.css"));
+        assert_eq!(detected.css_file_path, root.join("styles/kit.css"));
         assert_eq!(detected.render_mode, Some(RenderMode::Csr));
         assert_eq!(
             detected.dependency_plan.leptos.status,
@@ -527,7 +502,7 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
-    fn rejects_missing_trunk_css_link() {
+    fn detects_project_before_generated_stylesheet_link_exists() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write_homepage_fixture(root, "\"csr\"");
@@ -537,9 +512,9 @@ leptos_router = "0.9.0-alpha"
         )
         .expect("write html");
 
-        let error = detect_single_crate_project(root).expect_err("css link should fail");
+        let detected = detect_single_crate_project(root).expect("detect project");
 
-        assert!(matches!(error, DetectionError::MissingTrunkCssLink { .. }));
+        assert_eq!(detected.css_file_path, root.join(DEFAULT_CSS_PATH));
     }
 
     #[test]
@@ -674,7 +649,32 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(normalized.render_mode, RenderMode::Csr);
         assert_eq!(
             normalized.install_roots.css_file,
-            root.join("styles/app.css")
+            root.join("styles/kit.css")
+        );
+    }
+
+    #[test]
+    fn info_output_uses_configured_css_path_when_present() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        write_homepage_fixture(root, "\"csr\"");
+        let config = canonical_components_json()
+            .expect("canonical config")
+            .replace(
+                "\"css\": \"styles/kit.css\"",
+                "\"css\": \"styles/custom.css\"",
+            );
+        fs::write(root.join("components.json"), config).expect("write components.json");
+
+        let info = build_info_output(root).expect("build info output");
+
+        assert_eq!(info.detected.css_file_path, root.join("styles/custom.css"));
+        assert_eq!(
+            info.normalized_config
+                .expect("normalized config")
+                .install_roots
+                .css_file,
+            root.join("styles/custom.css")
         );
     }
 }

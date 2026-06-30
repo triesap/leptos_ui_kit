@@ -27,7 +27,7 @@ pub fn CollapsibleTrigger(
     view! {
         <button
             node_ref=bindings.node_ref()
-            class=class_with_base("luk-collapsible-trigger", &class)
+            class=class_with_base("kit-collapsible-trigger", &class)
             type="button"
             on:click=on_click
         >

@@ -514,8 +514,10 @@ pub fn plan_init_with_state_dir(
     let mut changes = Vec::new();
 
     plan_components_json(project_root, &mut files, &mut changes, state_dir)?;
-    plan_stylesheet(project_root, &mut files, &mut changes)?;
-    plan_index_html(project_root, &mut files, &mut changes)?;
+    let config_content = planned_or_existing_components_config_content(project_root, &files)?;
+    let config = parse_components_json_str(&config_content)?;
+    plan_stylesheet(project_root, &mut files, &mut changes, &config)?;
+    plan_index_html(project_root, &mut files, &mut changes, &config)?;
     plan_component_modules(project_root, &mut files, &mut changes)?;
     plan_empty_state(project_root, &mut files, &mut changes)?;
 
@@ -918,12 +920,12 @@ fn plan_built_in_item(
 
     for style in &item.targets.style_blocks {
         let generated = read_built_in_registry_source(&style.source)?;
-        let css_path = "styles/app.css";
+        let css_path = config.styles.css.as_str();
         let baseline_path =
             state_baseline_path(config, &safe_item_id, &format!("{}.css", style.id));
         let baseline = tracked_style_baseline(project_root, state, &item_id, &style.id)?;
-        let existing_css = planned_or_existing_content(files, project_root, css_path)?
-            .unwrap_or_else(|| ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned());
+        let existing_css =
+            planned_or_existing_content(files, project_root, css_path)?.unwrap_or_default();
         let patched_css =
             patch_css_block(&existing_css, &style.id, &generated, baseline.as_deref())?;
 
@@ -1275,11 +1277,11 @@ pub fn patch_css_block(
                     Ok(output)
                 }
                 Some(_) => unsafe_patch(
-                    "styles/app.css",
+                    "styles/kit.css",
                     format!("managed CSS block {block_id} differs from its tracked baseline"),
                 ),
                 None => unsafe_patch(
-                    "styles/app.css",
+                    "styles/kit.css",
                     format!("managed CSS block {block_id} already exists but is not tracked"),
                 ),
             }
@@ -1709,7 +1711,7 @@ fn tracked_style_baseline(
     };
     if owner != item_id {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("CSS block is already tracked by {owner}"),
         );
     }
@@ -1857,9 +1859,14 @@ fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        "components.json" | "index.html" | "styles/app.css" | "src/components/mod.rs"
-    ) || path.starts_with("src/components/ui/")
+        "components.json" | "index.html" | "src/components/mod.rs"
+    ) || is_allowed_stylesheet_path(path)
+        || path.starts_with("src/components/ui/")
         || path.starts_with(".leptos-ui/")
+}
+
+fn is_allowed_stylesheet_path(path: &str) -> bool {
+    path.starts_with("styles/") && path.ends_with(".css")
 }
 
 fn is_allowed_state_dir_path(path: &str, state_dir: &str) -> bool {
@@ -1910,8 +1917,10 @@ fn plan_stylesheet(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
+    config: &ComponentsConfig,
 ) -> Result<(), CodegenError> {
-    let path = project_root.join("styles/app.css");
+    let css_path = config.styles.css.as_str();
+    let path = project_root.join(css_path);
     if path.is_file() {
         return Ok(());
     }
@@ -1919,9 +1928,9 @@ fn plan_stylesheet(
     push_file_plan(
         files,
         changes,
-        "styles/app.css",
+        css_path,
         PlannedFileAction::Create,
-        ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned(),
+        String::new(),
         ChangeKind::CreateFile,
     );
     Ok(())
@@ -1931,13 +1940,12 @@ fn plan_index_html(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
+    config: &ComponentsConfig,
 ) -> Result<(), CodegenError> {
     let path = project_root.join("index.html");
     let html = read_to_string(&path)?;
-    if html.contains("data-trunk")
-        && html.contains("rel=\"css\"")
-        && html.contains("styles/app.css")
-    {
+    let css_path = config.styles.css.as_str();
+    if contains_trunk_css_link(&html, css_path) {
         return Ok(());
     }
 
@@ -1955,11 +1963,12 @@ fn plan_index_html(
         });
     }
 
+    let insert_at = first_head_trunk_css_link_index(&html, head_end).unwrap_or(head_end);
+    let indent = line_indent_at(&html, insert_at).unwrap_or("    ");
+    let link = format!("{indent}<link data-trunk rel=\"css\" href=\"{css_path}\" />\n");
+
     let mut patched = html;
-    patched.insert_str(
-        head_end,
-        "    <link data-trunk rel=\"css\" href=\"styles/app.css\" />\n",
-    );
+    patched.insert_str(insert_at, &link);
 
     push_file_plan(
         files,
@@ -1970,6 +1979,37 @@ fn plan_index_html(
         ChangeKind::UpdateFile,
     );
     Ok(())
+}
+
+fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
+    html.lines().any(|line| {
+        line.contains("data-trunk")
+            && line.contains("rel=\"css\"")
+            && line.contains(&format!("href=\"{css_path}\""))
+    })
+}
+
+fn first_head_trunk_css_link_index(html: &str, head_end: usize) -> Option<usize> {
+    let mut offset = 0;
+    for line in html.split_inclusive('\n') {
+        if offset >= head_end {
+            return None;
+        }
+        if line.contains("data-trunk") && line.contains("rel=\"css\"") {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+fn line_indent_at(html: &str, index: usize) -> Option<&str> {
+    let line = html.get(index..)?.lines().next()?;
+    let indent_len = line
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    line.get(..indent_len)
 }
 
 fn plan_component_modules(
@@ -2023,26 +2063,26 @@ fn normalize_managed_css_block(block_id: &str, block: &str) -> Result<String, Co
 
     if block.matches(&start_marker).count() != 1 || block.matches(&end_marker).count() != 1 {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("managed CSS block {block_id} must contain exactly one start and end marker"),
         );
     }
 
     let Some(start) = block.find(&start_marker) else {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("managed CSS block {block_id} is missing its start marker"),
         );
     };
     let Some(end) = block.find(&end_marker) else {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("managed CSS block {block_id} is missing its end marker"),
         );
     };
     if start > end {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("managed CSS block {block_id} markers are reversed"),
         );
     }
@@ -2068,7 +2108,7 @@ fn find_managed_css_block(
             let end_start = existing.find(&end_marker).expect("count confirmed end");
             if start > end_start {
                 return unsafe_patch(
-                    "styles/app.css",
+                    "styles/kit.css",
                     format!("managed CSS block {block_id} markers are reversed"),
                 );
             }
@@ -2079,7 +2119,7 @@ fn find_managed_css_block(
             Ok(Some(start..end))
         }
         _ => unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             format!("managed CSS block {block_id} markers are ambiguous"),
         ),
     }
@@ -2173,7 +2213,7 @@ fn validate_css_block_id(block_id: &str) -> Result<(), CodegenError> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         return unsafe_patch(
-            "styles/app.css",
+            "styles/kit.css",
             "CSS block id must be lowercase ASCII, digits, or hyphens",
         );
     }
@@ -2331,7 +2371,7 @@ mod tests {
 
         assert_eq!(plan.files.len(), 6);
         assert!(plan.files.iter().any(|file| file.path == "components.json"));
-        assert!(plan.files.iter().any(|file| file.path == "styles/app.css"));
+        assert!(plan.files.iter().any(|file| file.path == "styles/kit.css"));
         assert!(plan.files.iter().any(|file| file.path == "index.html"));
         assert!(
             plan.files
@@ -2341,7 +2381,7 @@ mod tests {
         assert!(
             plan.files
                 .iter()
-                .any(|file| file.path == "src/components/ui/_kit_state/state.json")
+                .any(|file| file.path == "src/components/ui/_kit/state.json")
         );
         assert!(!root.join("components.json").exists());
     }
@@ -2363,6 +2403,40 @@ mod tests {
     }
 
     #[test]
+    fn init_plan_uses_configured_stylesheet_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let config = canonical_components_json()
+            .expect("canonical config")
+            .replace(
+                "\"css\": \"styles/kit.css\"",
+                "\"css\": \"styles/custom.css\"",
+            );
+        fs::write(root.join("components.json"), config).expect("write config");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        let plan = plan_init(root).expect("plan init");
+
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == "styles/custom.css")
+        );
+        assert!(!plan.files.iter().any(|file| file.path == "styles/kit.css"));
+        let index = plan
+            .files
+            .iter()
+            .find(|file| file.path == "index.html")
+            .expect("index plan");
+        assert!(index.content.contains("styles/custom.css"));
+    }
+
+    #[test]
     fn init_write_creates_expected_files_and_releases_lock() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -2377,18 +2451,15 @@ mod tests {
 
         assert!(!plan.is_empty());
         assert!(root.join("components.json").is_file());
-        assert!(root.join("styles/app.css").is_file());
+        assert!(root.join("styles/kit.css").is_file());
         assert!(root.join("src/components/mod.rs").is_file());
         assert!(root.join("src/components/ui/mod.rs").is_file());
-        assert!(
-            root.join("src/components/ui/_kit_state/state.json")
-                .is_file()
-        );
-        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
+        assert!(root.join("src/components/ui/_kit/state.json").is_file());
+        assert!(!root.join("src/components/ui/_kit/lock").exists());
         assert!(
             fs::read_to_string(root.join("index.html"))
                 .expect("read index")
-                .contains("styles/app.css")
+                .contains("styles/kit.css")
         );
     }
 
@@ -2501,16 +2572,12 @@ mod tests {
         let rust_baseline = plan
             .files
             .iter()
-            .find(|file| {
-                file.path == "src/components/ui/_kit_state/baselines/builtin-button/button.rs"
-            })
+            .find(|file| file.path == "src/components/ui/_kit/baselines/builtin-button/button.rs")
             .expect("rust baseline");
         let css_baseline = plan
             .files
             .iter()
-            .find(|file| {
-                file.path == "src/components/ui/_kit_state/baselines/builtin-button/button.css"
-            })
+            .find(|file| file.path == "src/components/ui/_kit/baselines/builtin-button/button.css")
             .expect("css baseline");
 
         assert_eq!(rust_target.content, source);
@@ -2553,18 +2620,49 @@ mod tests {
 
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
-        assert!(paths.contains(&"styles/app.css"));
-        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
-        assert!(
-            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
-        );
-        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
+        assert!(paths.contains(&"styles/kit.css"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
+        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
         assert_eq!(plan.cargo_plan.len(), 2);
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert!(
             !root
-                .join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+                .join("src/components/ui/_kit/baselines/builtin-button/button.rs")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn add_plan_uses_configured_stylesheet_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let config = canonical_components_json()
+            .expect("canonical config")
+            .replace(
+                "\"css\": \"styles/kit.css\"",
+                "\"css\": \"styles/custom.css\"",
+            );
+        fs::write(root.join("components.json"), config).expect("write config");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        let plan = plan_add(root, "button").expect("plan add");
+
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == "styles/custom.css")
+        );
+        assert!(!plan.files.iter().any(|file| file.path == "styles/kit.css"));
+        assert_eq!(
+            plan.state.items["builtin:button"].style_blocks[0].css_path,
+            "styles/custom.css"
         );
     }
 
@@ -2602,9 +2700,7 @@ mod tests {
 
         assert_eq!(item_id, "builtin:nested");
         assert!(paths.contains(&"src/components/ui/nested/root.rs"));
-        assert!(
-            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-nested/nested/root.rs")
-        );
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-nested/nested/root.rs"));
         assert!(
             ui_mod
                 .content
@@ -2638,22 +2734,22 @@ mod tests {
                 .contains("pub use button::{Button, ButtonSize, ButtonType, ButtonVariant};")
         );
         assert!(
-            fs::read_to_string(root.join("styles/app.css"))
+            fs::read_to_string(root.join("styles/kit.css"))
                 .expect("read css")
                 .contains("/* leptos-ui-kit:start button */")
         );
         assert!(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
                 .is_file()
         );
         assert!(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css")
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.css")
                 .is_file()
         );
         let state = parse_install_state_str_at_path(
-            &fs::read_to_string(root.join("src/components/ui/_kit_state/state.json"))
+            &fs::read_to_string(root.join("src/components/ui/_kit/state.json"))
                 .expect("read state"),
-            Path::new("src/components/ui/_kit_state/state.json"),
+            Path::new("src/components/ui/_kit/state.json"),
         )
         .expect("parse state");
         assert!(state.items.contains_key("builtin:button"));
@@ -2663,7 +2759,7 @@ mod tests {
         .expect("parse config");
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].item_name(), "button");
-        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
+        assert!(!root.join("src/components/ui/_kit/lock").exists());
     }
 
     #[test]
@@ -2688,12 +2784,10 @@ mod tests {
 
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
-        assert!(paths.contains(&"styles/app.css"));
-        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
-        assert!(
-            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
-        );
-        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
+        assert!(paths.contains(&"styles/kit.css"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
+        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
     }
@@ -2741,21 +2835,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(paths.contains(&"components.json"));
-        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
-        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
-        assert!(
-            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
-        );
+        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
+        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
 
         let applied = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("apply migrate");
 
         assert!(!applied.is_empty());
+        assert!(root.join("src/components/ui/_kit/state.json").is_file());
         assert!(
-            root.join("src/components/ui/_kit_state/state.json")
-                .is_file()
-        );
-        assert!(
-            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
                 .is_file()
         );
         assert!(!root.join(".leptos-ui").exists());
@@ -2767,16 +2856,16 @@ mod tests {
         assert_eq!(config.state.dir, DEFAULT_STATE_DIR);
 
         let state = parse_install_state_str_at_path(
-            &fs::read_to_string(root.join("src/components/ui/_kit_state/state.json"))
+            &fs::read_to_string(root.join("src/components/ui/_kit/state.json"))
                 .expect("read state"),
-            Path::new("src/components/ui/_kit_state/state.json"),
+            Path::new("src/components/ui/_kit/state.json"),
         )
         .expect("parse state");
         let installed = state.items.get("builtin:button").expect("button state");
         assert!(
             installed.files[0]
                 .baseline_path
-                .starts_with("src/components/ui/_kit_state/baselines/")
+                .starts_with("src/components/ui/_kit/baselines/")
         );
 
         let second = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("second migrate");
@@ -2868,20 +2957,20 @@ mod tests {
     fn css_patcher_appends_managed_block() {
         let existing = ":root {\n  color-scheme: light;\n}\n";
         let block =
-            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+            "/* leptos-ui-kit:start button */\n.kit-button {}\n/* leptos-ui-kit:end button */\n";
 
         let patched = patch_css_block(existing, "button", block, None).expect("patch css");
 
         assert!(patched.starts_with(existing));
         assert!(patched.contains("/* leptos-ui-kit:start button */"));
-        assert!(patched.contains(".luk-button {}"));
+        assert!(patched.contains(".kit-button {}"));
         assert!(patched.ends_with("/* leptos-ui-kit:end button */\n"));
     }
 
     #[test]
     fn css_patcher_is_idempotent_for_existing_matching_block() {
         let block =
-            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+            "/* leptos-ui-kit:start button */\n.kit-button {}\n/* leptos-ui-kit:end button */\n";
 
         let patched = patch_css_block(block, "button", block, None).expect("patch css");
 
@@ -2890,8 +2979,8 @@ mod tests {
 
     #[test]
     fn css_patcher_replaces_tracked_baseline() {
-        let baseline = "/* leptos-ui-kit:start button */\n.luk-button { color: red; }\n/* leptos-ui-kit:end button */\n";
-        let next = "/* leptos-ui-kit:start button */\n.luk-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
+        let baseline = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+        let next = "/* leptos-ui-kit:start button */\n.kit-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
         let existing = format!("/* app */\n{baseline}.other {{}}\n");
 
         let patched =
@@ -2905,7 +2994,7 @@ mod tests {
     #[test]
     fn css_block_extractor_requires_exact_managed_markers() {
         let block =
-            "/* leptos-ui-kit:start button */\n.luk-button {}\n/* leptos-ui-kit:end button */\n";
+            "/* leptos-ui-kit:start button */\n.kit-button {}\n/* leptos-ui-kit:end button */\n";
         let css = format!(":root {{}}\n\n{block}.app {{}}\n");
 
         let extracted = extract_managed_css_block(&css, "button").expect("extract block");
@@ -2920,9 +3009,9 @@ mod tests {
 
     #[test]
     fn css_patcher_rejects_edited_tracked_block() {
-        let baseline = "/* leptos-ui-kit:start button */\n.luk-button { color: red; }\n/* leptos-ui-kit:end button */\n";
-        let edited = "/* leptos-ui-kit:start button */\n.luk-button { color: green; }\n/* leptos-ui-kit:end button */\n";
-        let next = "/* leptos-ui-kit:start button */\n.luk-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
+        let baseline = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+        let edited = "/* leptos-ui-kit:start button */\n.kit-button { color: green; }\n/* leptos-ui-kit:end button */\n";
+        let next = "/* leptos-ui-kit:start button */\n.kit-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
 
         let error =
             patch_css_block(edited, "button", next, Some(baseline)).expect_err("should conflict");
@@ -2996,11 +3085,11 @@ mod tests {
         let paths = vec![
             "components.json".to_owned(),
             "index.html".to_owned(),
-            "styles/app.css".to_owned(),
+            "styles/kit.css".to_owned(),
             "src/components/mod.rs".to_owned(),
             "src/components/ui/button.rs".to_owned(),
             "src/components/ui/nested/root.rs".to_owned(),
-            "src/components/ui/_kit_state/state.json".to_owned(),
+            "src/components/ui/_kit/state.json".to_owned(),
         ];
 
         validate_planned_write_paths(&paths).expect("paths should pass");
@@ -3068,15 +3157,15 @@ mod tests {
 
         {
             let _lock = WriteLock::acquire(root).expect("lock");
-            write_file_atomic(root, "styles/app.css", b":root {}\n").expect("write css");
-            assert!(root.join("src/components/ui/_kit_state/lock").exists());
+            write_file_atomic(root, "styles/kit.css", b":root {}\n").expect("write css");
+            assert!(root.join("src/components/ui/_kit/lock").exists());
         }
 
         assert_eq!(
-            fs::read_to_string(root.join("styles/app.css")).expect("read css"),
+            fs::read_to_string(root.join("styles/kit.css")).expect("read css"),
             ":root {}\n"
         );
-        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
+        assert!(!root.join("src/components/ui/_kit/lock").exists());
     }
 
     fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {

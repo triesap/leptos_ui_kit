@@ -15,13 +15,13 @@ The MVP supported app shape is intentionally narrow:
 ```text
 Cargo.toml
 index.html
-styles/app.css
+styles/kit.css
 src/
 ```
 
 Generated components are installed under `src/components/ui`, exported through
 `src/components/ui/mod.rs`, wired through `src/components/mod.rs`, and styled
-with pure CSS in `styles/app.css`.
+with pure CSS in `styles/kit.css`.
 
 The supported app may be a plain single crate or a single-package workspace
 root. Multi-member workspace installs remain out of scope.
@@ -71,8 +71,8 @@ change:
   workspace installs, and remote registries are future work, not silent
   compatibility paths.
 - Generated source should be app-owned, readable, editable Rust and CSS.
-- Generated component CSS classes use the `.luk-*` prefix and CSS custom
-  properties use the `--luk-*` prefix.
+- Generated component CSS classes use the `.kit-*` prefix and CSS custom
+  properties use the `--kit-*` prefix.
 
 ## CLI Contract
 
@@ -86,7 +86,7 @@ leptos_ui_kit init
 leptos_ui_kit view button
 leptos_ui_kit add button
 leptos_ui_kit sync
-leptos_ui_kit migrate state-dir src/components/ui/_kit_state
+leptos_ui_kit migrate state-dir src/components/ui/_kit
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
 ```
@@ -114,11 +114,13 @@ The config model is strict. Unknown fields should fail. Legacy shadcn/Tailwind
 fields should fail.
 
 `components.json` declares desired registry items, the pinned tool source, and
-`state.dir`. The default state directory is `src/components/ui/_kit_state`.
+`state.dir`. The default state directory is `src/components/ui/_kit`.
 That directory records installer state and baselines. Strict doctor checks
 should fail when desired items are not installed, installed items are not
 declared, config hashes drift, generated baselines drift, or installer metadata
 is ignored by Git.
+`styles.css` defaults to `styles/kit.css` and may be changed to another safe
+CSS file under `styles/`.
 
 ## Generated Source Rules
 

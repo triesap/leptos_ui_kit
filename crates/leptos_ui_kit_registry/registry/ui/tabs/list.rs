@@ -13,7 +13,7 @@ pub fn TabsList(#[prop(optional, into)] class: String, children: Children) -> im
     view! {
         <div
             node_ref=bindings.node_ref()
-            class=class_with_base("luk-tabs-list", &class)
+            class=class_with_base("kit-tabs-list", &class)
         >
             {children()}
         </div>

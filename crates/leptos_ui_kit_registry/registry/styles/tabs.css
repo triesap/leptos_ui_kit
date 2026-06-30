@@ -1,93 +1,93 @@
 /* leptos-ui-kit:start tabs */
 :root {
-  --luk-tabs-gap: 1rem;
-  --luk-tabs-list-gap: 0.25rem;
-  --luk-tabs-panel-background: transparent;
-  --luk-tabs-panel-color: inherit;
-  --luk-tabs-panel-focus-ring: var(--luk-focus-ring, #2563eb);
-  --luk-tabs-panel-focus-outline-offset: 2px;
-  --luk-tabs-panel-focus-outline-width: 2px;
-  --luk-tabs-panel-padding-block: 0.75rem;
-  --luk-tabs-panel-padding-inline: 0;
-  --luk-tabs-trigger-background: transparent;
-  --luk-tabs-trigger-background-active: #ffffff;
-  --luk-tabs-trigger-background-hover: #f3f4f6;
-  --luk-tabs-trigger-border-color: #d1d5db;
-  --luk-tabs-trigger-color: #111827;
-  --luk-tabs-trigger-color-inactive: #374151;
-  --luk-tabs-trigger-disabled-opacity: 0.55;
-  --luk-tabs-trigger-focus-ring: var(--luk-focus-ring, #2563eb);
-  --luk-tabs-trigger-focus-outline-offset: 2px;
-  --luk-tabs-trigger-focus-outline-width: 2px;
-  --luk-tabs-trigger-font-weight: 600;
-  --luk-tabs-trigger-min-height: 2.5rem;
-  --luk-tabs-trigger-padding-block: 0.5rem;
-  --luk-tabs-trigger-padding-inline: 0.75rem;
-  --luk-tabs-trigger-radius: var(--luk-radius-md, 0.375rem);
+  --kit-tabs-gap: 1rem;
+  --kit-tabs-list-gap: 0.25rem;
+  --kit-tabs-panel-background: transparent;
+  --kit-tabs-panel-color: inherit;
+  --kit-tabs-panel-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-tabs-panel-focus-outline-offset: 2px;
+  --kit-tabs-panel-focus-outline-width: 2px;
+  --kit-tabs-panel-padding-block: 0.75rem;
+  --kit-tabs-panel-padding-inline: 0;
+  --kit-tabs-trigger-background: transparent;
+  --kit-tabs-trigger-background-active: #ffffff;
+  --kit-tabs-trigger-background-hover: #f3f4f6;
+  --kit-tabs-trigger-border-color: #d1d5db;
+  --kit-tabs-trigger-color: #111827;
+  --kit-tabs-trigger-color-inactive: #374151;
+  --kit-tabs-trigger-disabled-opacity: 0.55;
+  --kit-tabs-trigger-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-tabs-trigger-focus-outline-offset: 2px;
+  --kit-tabs-trigger-focus-outline-width: 2px;
+  --kit-tabs-trigger-font-weight: 600;
+  --kit-tabs-trigger-min-height: 2.5rem;
+  --kit-tabs-trigger-padding-block: 0.5rem;
+  --kit-tabs-trigger-padding-inline: 0.75rem;
+  --kit-tabs-trigger-radius: var(--kit-radius-md, 0.375rem);
 }
 
-.luk-tabs {
+.kit-tabs {
   display: grid;
-  gap: var(--luk-tabs-gap);
+  gap: var(--kit-tabs-gap);
 }
 
-.luk-tabs-list {
+.kit-tabs-list {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--luk-tabs-list-gap);
+  gap: var(--kit-tabs-list-gap);
 }
 
-.luk-tabs-list[aria-orientation="vertical"] {
+.kit-tabs-list[aria-orientation="vertical"] {
   flex-direction: column;
   align-items: flex-start;
 }
 
-.luk-tabs-trigger {
+.kit-tabs-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--luk-tabs-trigger-border-color);
-  border-radius: var(--luk-tabs-trigger-radius);
-  min-height: var(--luk-tabs-trigger-min-height);
+  border: 1px solid var(--kit-tabs-trigger-border-color);
+  border-radius: var(--kit-tabs-trigger-radius);
+  min-height: var(--kit-tabs-trigger-min-height);
   padding:
-    var(--luk-tabs-trigger-padding-block)
-    var(--luk-tabs-trigger-padding-inline);
-  background: var(--luk-tabs-trigger-background);
-  color: var(--luk-tabs-trigger-color-inactive);
+    var(--kit-tabs-trigger-padding-block)
+    var(--kit-tabs-trigger-padding-inline);
+  background: var(--kit-tabs-trigger-background);
+  color: var(--kit-tabs-trigger-color-inactive);
   font: inherit;
-  font-weight: var(--luk-tabs-trigger-font-weight);
+  font-weight: var(--kit-tabs-trigger-font-weight);
   cursor: pointer;
 }
 
-.luk-tabs-trigger[data-state="active"] {
-  background: var(--luk-tabs-trigger-background-active);
-  color: var(--luk-tabs-trigger-color);
+.kit-tabs-trigger[data-state="active"] {
+  background: var(--kit-tabs-trigger-background-active);
+  color: var(--kit-tabs-trigger-color);
 }
 
-.luk-tabs-trigger:hover:not(:disabled) {
-  background: var(--luk-tabs-trigger-background-hover);
+.kit-tabs-trigger:hover:not(:disabled) {
+  background: var(--kit-tabs-trigger-background-hover);
 }
 
-.luk-tabs-trigger:focus-visible {
-  outline: var(--luk-tabs-trigger-focus-outline-width) solid var(--luk-tabs-trigger-focus-ring);
-  outline-offset: var(--luk-tabs-trigger-focus-outline-offset);
+.kit-tabs-trigger:focus-visible {
+  outline: var(--kit-tabs-trigger-focus-outline-width) solid var(--kit-tabs-trigger-focus-ring);
+  outline-offset: var(--kit-tabs-trigger-focus-outline-offset);
 }
 
-.luk-tabs-trigger:disabled {
+.kit-tabs-trigger:disabled {
   cursor: not-allowed;
-  opacity: var(--luk-tabs-trigger-disabled-opacity);
+  opacity: var(--kit-tabs-trigger-disabled-opacity);
 }
 
-.luk-tabs-panel {
+.kit-tabs-panel {
   padding:
-    var(--luk-tabs-panel-padding-block)
-    var(--luk-tabs-panel-padding-inline);
-  background: var(--luk-tabs-panel-background);
-  color: var(--luk-tabs-panel-color);
+    var(--kit-tabs-panel-padding-block)
+    var(--kit-tabs-panel-padding-inline);
+  background: var(--kit-tabs-panel-background);
+  color: var(--kit-tabs-panel-color);
 }
 
-.luk-tabs-panel:focus-visible {
-  outline: var(--luk-tabs-panel-focus-outline-width) solid var(--luk-tabs-panel-focus-ring);
-  outline-offset: var(--luk-tabs-panel-focus-outline-offset);
+.kit-tabs-panel:focus-visible {
+  outline: var(--kit-tabs-panel-focus-outline-width) solid var(--kit-tabs-panel-focus-ring);
+  outline-offset: var(--kit-tabs-panel-focus-outline-offset);
 }
 /* leptos-ui-kit:end tabs */

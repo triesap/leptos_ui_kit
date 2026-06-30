@@ -137,7 +137,9 @@
           "const": "pure-css"
         },
         "css": {
-          "const": "styles/app.css"
+          "type": "string",
+          "default": "styles/kit.css",
+          "pattern": "^styles/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.css$"
         }
       }
     },
@@ -187,13 +189,13 @@
       "properties": {
         "dir": {
           "type": "string",
-          "default": "src/components/ui/_kit_state",
+          "default": "src/components/ui/_kit",
           "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\.(?:rs|css|html)$)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
           "not": {
             "enum": [
               "components.json",
               "index.html",
-              "styles/app.css",
+              "styles/kit.css",
               "src/components/mod.rs",
               "src/components/ui/mod.rs"
             ]

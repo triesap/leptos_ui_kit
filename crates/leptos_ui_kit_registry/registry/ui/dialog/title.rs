@@ -8,7 +8,7 @@ pub fn DialogTitle(#[prop(optional, into)] class: String, children: Children) ->
         use_context::<DialogContext>().expect("DialogTitle must be used inside DialogRoot");
 
     view! {
-        <h2 id=context.title_id class=class_with_base("luk-dialog-title", &class)>
+        <h2 id=context.title_id class=class_with_base("kit-dialog-title", &class)>
             {children()}
         </h2>
     }

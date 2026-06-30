@@ -41,7 +41,7 @@ pub fn DialogRoot(
     });
 
     view! {
-        <div class=class_with_base("luk-dialog", &class)>
+        <div class=class_with_base("kit-dialog", &class)>
             {children()}
         </div>
     }
@@ -57,5 +57,5 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
 
 fn next_dialog_id() -> String {
     let id = NEXT_DIALOG_ID.fetch_add(1, Ordering::Relaxed);
-    format!("luk-dialog-{id}")
+    format!("kit-dialog-{id}")
 }

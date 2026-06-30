@@ -16,7 +16,7 @@ pub fn DialogDescription(
     });
 
     view! {
-        <p id=context.description_id class=class_with_base("luk-dialog-description", &class)>
+        <p id=context.description_id class=class_with_base("kit-dialog-description", &class)>
             {children()}
         </p>
     }

@@ -34,8 +34,11 @@ Semantic Versioning.
   together, run `sync`, pass strict doctor, and compile for
   `wasm32-unknown-unknown`.
 - Change the canonical installer state directory to
-  `src/components/ui/_kit_state`, with strict `components.json` `state.dir`
+  `src/components/ui/_kit`, with strict `components.json` `state.dir`
   validation and configurable init support.
+- Change the generated stylesheet default to `styles/kit.css`, allow
+  `components.json` to choose another safe CSS file under `styles/`, and emit
+  generated selectors and variables with the `kit` prefix.
 - Add `leptos_ui_kit migrate state-dir <path>` for explicit state and baseline
   migrations.
 - Add top-level and command-specific help plus `--version` output.

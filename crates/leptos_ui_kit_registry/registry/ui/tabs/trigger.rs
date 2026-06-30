@@ -88,7 +88,7 @@ pub fn TabsTrigger(
     view! {
         <button
             node_ref=node_ref
-            class=class_with_base("luk-tabs-trigger", &class)
+            class=class_with_base("kit-tabs-trigger", &class)
             on:click=on_click
             on:focus=on_focus
             on:keydown=on_keydown

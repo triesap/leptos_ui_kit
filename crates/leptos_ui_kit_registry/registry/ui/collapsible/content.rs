@@ -21,7 +21,7 @@ pub fn CollapsibleContent(
     view! {
         <div
             node_ref=bindings.node_ref()
-            class=class_with_base("luk-collapsible-content", &class)
+            class=class_with_base("kit-collapsible-content", &class)
         >
             {children()}
         </div>

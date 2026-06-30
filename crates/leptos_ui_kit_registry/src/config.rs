@@ -14,7 +14,8 @@ pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
 pub const TOOL_PACKAGE: &str = "leptos_ui_kit_cli";
 pub const TOOL_BINARY: &str = "leptos_ui_kit";
 pub const TOOL_GIT_URL: &str = "https://github.com/triesap/leptos_ui_kit";
-pub const DEFAULT_STATE_DIR: &str = "src/components/ui/_kit_state";
+pub const DEFAULT_CSS_PATH: &str = "styles/kit.css";
+pub const DEFAULT_STATE_DIR: &str = "src/components/ui/_kit";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -242,7 +243,7 @@ pub struct StylesConfig {
 
 impl StylesConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        expect_path("styles.css", "styles/app.css", &self.css)
+        validate_safe_relative_css_file("styles.css", &self.css)
     }
 }
 
@@ -404,7 +405,7 @@ pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
         },
         styles: StylesConfig {
             mode: StylesMode::PureCss,
-            css: "styles/app.css".to_owned(),
+            css: DEFAULT_CSS_PATH.to_owned(),
         },
         registry: RegistryConfig {
             source: RegistrySource::Builtin,
@@ -605,6 +606,28 @@ fn validate_safe_relative_dir(field: &'static str, value: &str) -> Result<(), Co
     Ok(())
 }
 
+fn validate_safe_relative_css_file(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    validate_safe_relative_path(field, value)?;
+    if !value.starts_with("styles/") || !value.ends_with(".css") || value == "styles/.css" {
+        return Err(ConfigError::InvalidValue {
+            field,
+            expected: "safe relative .css file under styles/",
+            actual: value.to_owned(),
+        });
+    }
+    if value
+        .split('/')
+        .skip(1)
+        .any(|segment| segment.starts_with('.'))
+    {
+        return Err(ConfigError::UnsafePathSegment {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_safe_relative_path(field: &'static str, value: &str) -> Result<(), ConfigError> {
     validate_relative_path(field, value)?;
     if value.is_empty() || value.contains('\\') {
@@ -644,7 +667,9 @@ fn validate_state_dir_target(config: &ComponentsConfig) -> Result<(), ConfigErro
         config.styles.css.as_str(),
     ];
 
-    if reserved.contains(&config.state.dir.as_str()) {
+    if reserved.contains(&config.state.dir.as_str())
+        || is_path_equal_or_child(&config.styles.css, &config.state.dir)
+    {
         return Err(ConfigError::PathOverlap {
             field: "state.dir",
             value: config.state.dir.clone(),
@@ -652,6 +677,13 @@ fn validate_state_dir_target(config: &ComponentsConfig) -> Result<(), ConfigErro
     }
 
     Ok(())
+}
+
+fn is_path_equal_or_child(path: &str, parent: &str) -> bool {
+    path == parent
+        || path
+            .strip_prefix(parent)
+            .is_some_and(|remaining| remaining.starts_with('/'))
 }
 
 fn join_checked(
@@ -698,7 +730,7 @@ mod tests {
         assert!(first.contains("\"package\": \"leptos_ui_kit_cli\""));
         assert!(first.contains("\"binary\": \"leptos_ui_kit\""));
         assert!(first.contains("\"items\": []"));
-        assert!(first.contains("\"dir\": \"src/components/ui/_kit_state\""));
+        assert!(first.contains("\"dir\": \"src/components/ui/_kit\""));
         assert!(!first.contains("classPrefix"));
         assert!(!first.contains("cssVariablePrefix"));
     }
@@ -804,8 +836,8 @@ mod tests {
     fn rejects_stale_style_prefix_fields() {
         for field in ["classPrefix", "cssVariablePrefix"] {
             let input = valid_config_json().replace(
-                "\"css\": \"styles/app.css\"",
-                &format!("\"css\": \"styles/app.css\",\n    \"{field}\": \"luk\""),
+                "\"css\": \"styles/kit.css\"",
+                &format!("\"css\": \"styles/kit.css\",\n    \"{field}\": \"luk\""),
             );
 
             let error = parse_components_json_str(&input).expect_err("prefix field should fail");
@@ -837,9 +869,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_homepage_paths() {
+    fn accepts_explicit_safe_style_css_path() {
+        let input = valid_config_json().replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/generated.css\"",
+        );
+
+        let config = parse_components_json_str(&input).expect("parse config");
+
+        assert_eq!(config.styles.css, "styles/generated.css");
+    }
+
+    #[test]
+    fn rejects_css_paths_outside_styles_dir() {
         let input =
-            valid_config_json().replace("\"css\": \"styles/app.css\"", "\"css\": \"src/app.css\"");
+            valid_config_json().replace("\"css\": \"styles/kit.css\"", "\"css\": \"src/app.css\"");
 
         let error = parse_components_json_str(&input).expect_err("css path should fail");
 
@@ -847,9 +891,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_css_style_paths() {
+        let input = valid_config_json()
+            .replace("\"css\": \"styles/kit.css\"", "\"css\": \"styles/kit.txt\"");
+
+        let error = parse_components_json_str(&input).expect_err("css path should fail");
+
+        assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "styles.css"));
+    }
+
+    #[test]
+    fn rejects_hidden_style_css_paths() {
+        let input = valid_config_json().replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/.kit.css\"",
+        );
+
+        let error = parse_components_json_str(&input).expect_err("css path should fail");
+
+        assert!(
+            matches!(error, ConfigError::UnsafePathSegment { field, .. } if field == "styles.css")
+        );
+    }
+
+    #[test]
     fn rejects_parent_traversal_in_paths() {
         let input =
-            valid_config_json().replace("\"css\": \"styles/app.css\"", "\"css\": \"../app.css\"");
+            valid_config_json().replace("\"css\": \"styles/kit.css\"", "\"css\": \"../app.css\"");
 
         let error = parse_components_json_str(&input).expect_err("traversal should fail");
 
@@ -859,7 +927,7 @@ mod tests {
     #[test]
     fn accepts_explicit_safe_state_dir() {
         let input = valid_config_json().replace(
-            "\"dir\": \"src/components/ui/_kit_state\"",
+            "\"dir\": \"src/components/ui/_kit\"",
             "\"dir\": \"src/components/ui/_state_v2\"",
         );
 
@@ -871,7 +939,7 @@ mod tests {
     #[test]
     fn accepts_explicit_hidden_state_dir() {
         let input = valid_config_json().replace(
-            "\"dir\": \"src/components/ui/_kit_state\"",
+            "\"dir\": \"src/components/ui/_kit\"",
             "\"dir\": \".leptos-ui\"",
         );
 
@@ -892,7 +960,7 @@ mod tests {
         ] {
             let quoted = serde_json::to_string(value).expect("quote value");
             let input = valid_config_json().replace(
-                "\"dir\": \"src/components/ui/_kit_state\"",
+                "\"dir\": \"src/components/ui/_kit\"",
                 &format!("\"dir\": {quoted}"),
             );
 
@@ -922,12 +990,12 @@ mod tests {
         for value in [
             "components.json",
             "index.html",
-            "styles/app.css",
+            "styles/kit.css",
             "src/components/mod.rs",
             "src/components/ui/mod.rs",
         ] {
             let input = valid_config_json().replace(
-                "\"dir\": \"src/components/ui/_kit_state\"",
+                "\"dir\": \"src/components/ui/_kit\"",
                 &format!("\"dir\": \"{value}\""),
             );
 
@@ -962,11 +1030,11 @@ mod tests {
         );
         assert_eq!(
             normalized.install_roots.css_file,
-            PathBuf::from("/workspace/demo/styles/app.css")
+            PathBuf::from("/workspace/demo/styles/kit.css")
         );
         assert_eq!(
             normalized.install_roots.state_dir,
-            PathBuf::from("/workspace/demo/src/components/ui/_kit_state")
+            PathBuf::from("/workspace/demo/src/components/ui/_kit")
         );
     }
 }

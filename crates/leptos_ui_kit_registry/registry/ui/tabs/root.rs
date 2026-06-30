@@ -87,7 +87,7 @@ pub fn TabsRoot(
     });
 
     view! {
-        <div class=class_with_base("luk-tabs", &class)>
+        <div class=class_with_base("kit-tabs", &class)>
             {children()}
         </div>
     }
@@ -103,5 +103,5 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
 
 fn next_tabs_id() -> String {
     let id = NEXT_TABS_ID.fetch_add(1, Ordering::Relaxed);
-    format!("luk-tabs-{id}")
+    format!("kit-tabs-{id}")
 }
