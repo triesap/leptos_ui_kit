@@ -3,7 +3,7 @@
 //! Code generation and install-planning layer.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     fs::OpenOptions,
     io::Write,
@@ -281,6 +281,24 @@ pub struct SyncPlan {
 impl SyncPlan {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateStateDirPlan {
+    pub project_root: PathBuf,
+    pub source_dir: String,
+    pub target_dir: String,
+    pub files: Vec<PlannedFile>,
+    pub delete_paths: Vec<String>,
+    pub changes: Vec<ChangeRecord>,
+    pub state: InstallState,
+}
+
+impl MigrateStateDirPlan {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.delete_paths.is_empty()
     }
 }
 
@@ -593,6 +611,151 @@ pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
 pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     let plan = plan_sync(project_root)?;
     apply_planned_files(project_root, &plan.files, &plan.changes)?;
+
+    Ok(plan)
+}
+
+pub fn plan_migrate_state_dir(
+    project_root: &Path,
+    target_dir: &str,
+) -> Result<MigrateStateDirPlan, CodegenError> {
+    let config_path = project_root.join("components.json");
+    let config_content = read_to_string(&config_path)?;
+    let mut config = parse_components_json_str(&config_content)?;
+    let source_dir = config.state.dir.clone();
+
+    if source_dir == target_dir {
+        let state_path = install_state_path(&config);
+        let state = load_or_empty_state(
+            project_root,
+            &state_path,
+            hash_bytes(config_content.as_bytes()),
+        )?;
+        return Ok(MigrateStateDirPlan {
+            project_root: project_root.to_path_buf(),
+            source_dir,
+            target_dir: target_dir.to_owned(),
+            files: Vec::new(),
+            delete_paths: Vec::new(),
+            changes: Vec::new(),
+            state,
+        });
+    }
+
+    let source_state_path = install_state_path(&config);
+    let mut state = load_existing_state(project_root, &source_state_path)?;
+    validate_state_baselines(project_root, &state)?;
+
+    config.state.dir = target_dir.to_owned();
+    let target_state_path = install_state_path(&config);
+    let config_content = components_config_to_json(&config)?;
+    validate_state_dir_migration_target(project_root, &source_dir, target_dir)?;
+
+    let mut files = Vec::new();
+    let mut changes = Vec::new();
+    let mut delete_paths = Vec::new();
+
+    migrate_state_baseline_paths(&mut state, &source_dir, target_dir)?;
+    state.project.config_hash = hash_bytes(config_content.as_bytes());
+    let state_json = state_to_json_at_path(&state, Path::new(&target_state_path))?;
+
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        "components.json",
+        config_content,
+        ChangeKind::UpdateFile,
+        None,
+    )?;
+    plan_migrated_baseline_writes(
+        project_root,
+        &state,
+        &source_dir,
+        target_dir,
+        &mut files,
+        &mut changes,
+    )?;
+    upsert_planned_file(
+        project_root,
+        &mut files,
+        &mut changes,
+        &target_state_path,
+        state_json,
+        ChangeKind::WriteState,
+        None,
+    )?;
+
+    for path in migrated_source_paths(&state, &source_dir, target_dir)? {
+        delete_paths.push(path.clone());
+        changes.push(ChangeRecord::new(ChangeKind::DeleteFile, path, true));
+    }
+    delete_paths.push(source_state_path.clone());
+    changes.push(ChangeRecord::new(
+        ChangeKind::DeleteFile,
+        source_state_path,
+        true,
+    ));
+
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths_for_state_dir(&paths, target_dir)?;
+
+    Ok(MigrateStateDirPlan {
+        project_root: project_root.to_path_buf(),
+        source_dir,
+        target_dir: target_dir.to_owned(),
+        files,
+        delete_paths,
+        changes,
+        state,
+    })
+}
+
+pub fn apply_migrate_state_dir(
+    project_root: &Path,
+    target_dir: &str,
+) -> Result<MigrateStateDirPlan, CodegenError> {
+    let plan = plan_migrate_state_dir(project_root, target_dir)?;
+    if plan.is_empty() {
+        return Ok(plan);
+    }
+
+    let _lock = WriteLock::acquire_at(project_root, &plan.source_dir)?;
+    let target_state_path = install_state_path_from_dir(&plan.target_dir);
+
+    for file in plan
+        .files
+        .iter()
+        .filter(|file| file.path.as_str() != target_state_path)
+    {
+        write_file_atomic_with_state_dir(
+            project_root,
+            &file.path,
+            file.content.as_bytes(),
+            &plan.target_dir,
+        )?;
+    }
+
+    if let Some(state_file) = plan
+        .files
+        .iter()
+        .find(|file| file.path.as_str() == target_state_path)
+    {
+        write_file_atomic_with_state_dir(
+            project_root,
+            &state_file.path,
+            state_file.content.as_bytes(),
+            &plan.target_dir,
+        )?;
+    }
+
+    for path in &plan.delete_paths {
+        remove_file_if_exists(&project_root.join(path))?;
+    }
+    cleanup_state_dir(project_root, &plan.source_dir)?;
 
     Ok(plan)
 }
@@ -1200,6 +1363,153 @@ fn load_or_empty_state(
     }
 
     Ok(InstallState::empty(config_hash))
+}
+
+fn load_existing_state(
+    project_root: &Path,
+    state_path: &str,
+) -> Result<InstallState, CodegenError> {
+    let path = project_root.join(state_path);
+    if !path.is_file() {
+        return invalid_state(Path::new(state_path), "state file is missing");
+    }
+    let input = read_to_string(&path)?;
+    parse_install_state_str_at_path(&input, Path::new(state_path))
+}
+
+fn validate_state_baselines(project_root: &Path, state: &InstallState) -> Result<(), CodegenError> {
+    for item in state.items.values() {
+        for file in &item.files {
+            let baseline = read_required_baseline(project_root, &file.baseline_path)?;
+            let baseline_hash = hash_bytes(baseline.as_bytes());
+            if baseline_hash != file.baseline_hash {
+                return invalid_state(
+                    Path::new(&file.baseline_path),
+                    "file baseline hash differs from state",
+                );
+            }
+        }
+        for block in &item.style_blocks {
+            let baseline = read_required_baseline(project_root, &block.baseline_path)?;
+            let baseline_hash = hash_bytes(baseline.as_bytes());
+            if baseline_hash != block.baseline_hash {
+                return invalid_state(
+                    Path::new(&block.baseline_path),
+                    "style baseline hash differs from state",
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_state_dir_migration_target(
+    project_root: &Path,
+    source_dir: &str,
+    target_dir: &str,
+) -> Result<(), CodegenError> {
+    if target_dir.starts_with(&format!("{source_dir}/"))
+        || source_dir.starts_with(&format!("{target_dir}/"))
+    {
+        return unsafe_patch(
+            target_dir,
+            "state directory migration target must not overlap the source directory",
+        );
+    }
+    if project_root.join(target_dir).exists() {
+        return unsafe_patch(
+            target_dir,
+            "state directory migration target already exists",
+        );
+    }
+    Ok(())
+}
+
+fn migrate_state_baseline_paths(
+    state: &mut InstallState,
+    source_dir: &str,
+    target_dir: &str,
+) -> Result<(), CodegenError> {
+    for item in state.items.values_mut() {
+        for file in &mut item.files {
+            file.baseline_path = migrate_state_path(&file.baseline_path, source_dir, target_dir)?;
+        }
+        for block in &mut item.style_blocks {
+            block.baseline_path = migrate_state_path(&block.baseline_path, source_dir, target_dir)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn plan_migrated_baseline_writes(
+    project_root: &Path,
+    state: &InstallState,
+    source_dir: &str,
+    target_dir: &str,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+) -> Result<(), CodegenError> {
+    let mut planned = BTreeSet::new();
+    for baseline_path in migrated_target_baseline_paths(state) {
+        if !planned.insert(baseline_path.clone()) {
+            continue;
+        }
+        let source_path = migrate_state_path(&baseline_path, target_dir, source_dir)?;
+        let content = read_to_string(&project_root.join(&source_path))?;
+        upsert_planned_file(
+            project_root,
+            files,
+            changes,
+            &baseline_path,
+            content,
+            ChangeKind::WriteBaseline,
+            None,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn migrated_source_paths(
+    state: &InstallState,
+    source_dir: &str,
+    target_dir: &str,
+) -> Result<Vec<String>, CodegenError> {
+    let mut paths = BTreeSet::new();
+    for target_path in migrated_target_baseline_paths(state) {
+        paths.insert(migrate_state_path(&target_path, target_dir, source_dir)?);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn migrated_target_baseline_paths(state: &InstallState) -> Vec<String> {
+    let mut paths = Vec::new();
+    for item in state.items.values() {
+        for file in &item.files {
+            paths.push(file.baseline_path.clone());
+        }
+        for block in &item.style_blocks {
+            paths.push(block.baseline_path.clone());
+        }
+    }
+    paths
+}
+
+fn migrate_state_path(
+    path: &str,
+    source_dir: &str,
+    target_dir: &str,
+) -> Result<String, CodegenError> {
+    let prefix = format!("{source_dir}/");
+    let Some(suffix) = path.strip_prefix(&prefix) else {
+        return invalid_state(
+            Path::new(path),
+            format!("state path is not under configured directory {source_dir}"),
+        );
+    };
+    Ok(state_dir_child_path(target_dir, suffix))
 }
 
 fn plan_generated_source_file(
@@ -1894,6 +2204,54 @@ fn read_to_string(path: &Path) -> Result<String, CodegenError> {
     })
 }
 
+fn remove_file_if_exists(path: &Path) -> Result<(), CodegenError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn cleanup_state_dir(project_root: &Path, state_dir: &str) -> Result<(), CodegenError> {
+    let path = project_root.join(state_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    if state_dir_contains_only_locks(&path)? {
+        fs::remove_dir_all(&path).map_err(|source| CodegenError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+fn state_dir_contains_only_locks(path: &Path) -> Result<bool, CodegenError> {
+    for entry in fs::read_dir(path).map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type().map_err(|source| CodegenError::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            if !state_dir_contains_only_locks(&entry_path)? {
+                return Ok(false);
+            }
+        } else if entry.file_name().to_str() != Some(STATE_LOCK_FILE_NAME) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2306,6 +2664,70 @@ mod tests {
     }
 
     #[test]
+    fn migrate_state_dir_moves_legacy_state_and_baselines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        write_legacy_state_config(root);
+        apply_init(root).expect("init");
+        apply_add(root, "button").expect("add");
+
+        let plan = plan_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("plan migrate");
+        let paths = plan
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"components.json"));
+        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
+        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
+        assert!(
+            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
+        );
+
+        let applied = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("apply migrate");
+
+        assert!(!applied.is_empty());
+        assert!(
+            root.join("src/components/ui/_kit_state/state.json")
+                .is_file()
+        );
+        assert!(
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+                .is_file()
+        );
+        assert!(!root.join(".leptos-ui").exists());
+
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        assert_eq!(config.state.dir, DEFAULT_STATE_DIR);
+
+        let state = parse_install_state_str_at_path(
+            &fs::read_to_string(root.join("src/components/ui/_kit_state/state.json"))
+                .expect("read state"),
+            Path::new("src/components/ui/_kit_state/state.json"),
+        )
+        .expect("parse state");
+        let installed = state.items.get("builtin:button").expect("button state");
+        assert!(
+            installed.files[0]
+                .baseline_path
+                .starts_with("src/components/ui/_kit_state/baselines/")
+        );
+
+        let second = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("second migrate");
+        assert!(second.is_empty());
+    }
+
+    #[test]
     fn add_write_is_idempotent_when_tracked_files_are_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -2367,6 +2789,18 @@ mod tests {
         .expect("parse config");
         let config = components_config_with_desired_item(config, desired_builtin_button_item())
             .expect("add desired item");
+        fs::write(
+            root.join("components.json"),
+            components_config_to_json(&config).expect("serialize config"),
+        )
+        .expect("write config");
+    }
+
+    fn write_legacy_state_config(root: &Path) {
+        let mut config =
+            parse_components_json_str(&canonical_components_json().expect("canonical config"))
+                .expect("parse config");
+        config.state.dir = ".leptos-ui".to_owned();
         fs::write(
             root.join("components.json"),
             components_config_to_json(&config).expect("serialize config"),

@@ -11,9 +11,10 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
-    InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync,
-    extract_managed_css_block, hash_content_bytes, install_state_path, install_state_path_from_dir,
-    parse_install_state_str_at_path, plan_add, plan_init, plan_sync,
+    InstalledFile, InstalledItem, InstalledStyleBlock, MigrateStateDirPlan, SyncPlan, apply_add,
+    apply_init, apply_migrate_state_dir, apply_sync, extract_managed_css_block, hash_content_bytes,
+    install_state_path, install_state_path_from_dir, parse_install_state_str_at_path, plan_add,
+    plan_init, plan_migrate_state_dir, plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ComponentsConfig, DEFAULT_STATE_DIR, DependencyRequirement, DependencyStatus,
@@ -187,6 +188,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "doctor" => run_doctor(&args[1..], &cwd),
         "info" => run_info(&args[1..], &cwd),
         "init" => run_init(&args[1..], &cwd),
+        "migrate" => run_migrate(&args[1..], &cwd),
         "sync" => run_sync(&args[1..], &cwd),
         "view" => run_view(&args[1..], &cwd),
         _ => Err(usage()),
@@ -378,6 +380,59 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_migrate(args: &[OsString], cwd: &Path) -> Result<(), String> {
+    let mut json = false;
+    let mut dry_run = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            "--dry-run" => dry_run = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for migrate: {value}"));
+            }
+            value => positional.push(value.to_owned()),
+        }
+    }
+
+    if positional.len() != 2 || positional.first().map(String::as_str) != Some("state-dir") {
+        return Err("migrate accepts exactly: migrate state-dir <path>".to_owned());
+    }
+
+    let target_dir = positional[1].clone();
+    let plan = if dry_run {
+        plan_migrate_state_dir(cwd, &target_dir).map_err(|error| {
+            format!(
+                "failed to plan state directory migration for {}: {error}",
+                cwd.display()
+            )
+        })?
+    } else {
+        apply_migrate_state_dir(cwd, &target_dir).map_err(|error| {
+            format!(
+                "failed to migrate state directory for {}: {error}",
+                cwd.display()
+            )
+        })?
+    };
+    let status = if dry_run {
+        CommandStatus::Planned
+    } else if plan.is_empty() {
+        CommandStatus::NoChange
+    } else {
+        CommandStatus::Success
+    };
+
+    println!("{}", render_migrate_state_dir_plan(&plan, json, status)?);
+
+    Ok(())
+}
+
 fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
     let mut include_source = false;
@@ -542,6 +597,36 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
     }
 
     let mut output = String::from("init planned changes:");
+    for change in &plan.changes {
+        output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
+    }
+    Ok(output)
+}
+
+fn render_migrate_state_dir_plan(
+    plan: &MigrateStateDirPlan,
+    json: bool,
+    status: CommandStatus,
+) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(
+            &CommandEnvelope::new("migrate state-dir", status, plan)
+                .with_changes(plan.changes.clone()),
+        )
+        .map_err(|error| format!("failed to serialize migrate plan: {error}"));
+    }
+
+    if plan.is_empty() {
+        return Ok(format!(
+            "migrate state-dir: no changes planned for {}",
+            plan.target_dir
+        ));
+    }
+
+    let mut output = format!(
+        "migrate state-dir {} -> {} planned changes:",
+        plan.source_dir, plan.target_dir
+    );
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -1372,7 +1457,7 @@ fn read_installed_state(
 }
 
 fn usage() -> String {
-    "usage: leptos_ui_kit <add|doctor|info|init|sync|view> [--json] [--dry-run] [path-or-source]"
+    "usage: leptos_ui_kit <add|doctor|info|init|migrate|sync|view> [--json] [--dry-run] [path-or-source]"
         .to_owned()
 }
 
@@ -1386,7 +1471,7 @@ mod tests {
     use std::fs;
 
     use leptos_ui_kit_registry::{
-        components_config_to_json, components_config_with_desired_item,
+        canonical_components_json, components_config_to_json, components_config_with_desired_item,
         desired_builtin_button_item, parse_components_json_str,
     };
     use tempfile::tempdir;
@@ -1849,6 +1934,53 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn migrate_state_dir_command_moves_legacy_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        write_legacy_state_config(root);
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        run(
+            vec![
+                OsString::from("migrate"),
+                OsString::from("state-dir"),
+                OsString::from(DEFAULT_STATE_DIR),
+                OsString::from("--dry-run"),
+                OsString::from("--json"),
+            ],
+            root,
+        )
+        .expect("run migrate dry-run");
+        assert!(root.join(".leptos-ui/state.json").is_file());
+
+        run(
+            vec![
+                OsString::from("migrate"),
+                OsString::from("state-dir"),
+                OsString::from(DEFAULT_STATE_DIR),
+            ],
+            root,
+        )
+        .expect("run migrate");
+
+        assert!(
+            root.join("src/components/ui/_kit_state/state.json")
+                .is_file()
+        );
+        assert!(
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
+                .is_file()
+        );
+        assert!(!root.join(".leptos-ui").exists());
+        assert_eq!(
+            build_doctor_output(root, true, false, false).has_failures(),
+            false
+        );
+    }
+
+    #[test]
     fn unsupported_flags_return_usage_errors() {
         let error = run(
             vec![
@@ -2002,6 +2134,18 @@ leptos_router = "0.9.0-alpha"
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn write_legacy_state_config(root: &Path) {
+        let mut config =
+            parse_components_json_str(&canonical_components_json().expect("canonical config"))
+                .expect("parse config");
+        config.state.dir = ".leptos-ui".to_owned();
+        fs::write(
+            root.join("components.json"),
+            components_config_to_json(&config).expect("serialize config"),
+        )
+        .expect("write config");
     }
 
     fn write_desired_button_config(root: &Path) {
