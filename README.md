@@ -18,9 +18,10 @@ Multi-member workspace installs are not supported.
 
 Generated components are installed under `src/components/ui` and styled with
 pure CSS in `styles/app.css`.
-Installed components are declared in `components.json`, while `.leptos-ui`
-stores installer state and generated baselines. Commit both with the generated
-source so `sync` and `doctor` can reconcile the app deterministically.
+Installed components are declared in `components.json`, while the configured
+state directory stores installer state and generated baselines. The default
+state directory is `src/components/ui/_kit_state`. Commit both with the
+generated source so `sync` and `doctor` can reconcile the app deterministically.
 
 ## Goals
 
@@ -29,7 +30,7 @@ source so `sync` and `doctor` can reconcile the app deterministically.
 - Use a CLI to inspect, initialize, view, add, sync, and verify components.
 - Keep styling simple with `.luk-*` CSS classes and `--luk-*` CSS variables.
 - Keep generated source compatible with Leptos `0.9.0-alpha`.
-- Store minimal `.leptos-ui` state and baselines for idempotency and future
+- Store minimal configured state and baselines for idempotency and future
   conflict-aware updates.
 
 ## Install
@@ -40,8 +41,8 @@ Install the CLI from a pinned Git revision:
 cargo install \
   --git https://github.com/triesap/leptos_ui_kit \
   --rev <rev> \
-  --package leptos_ui_kit_cli \
-  --locked
+  --locked \
+  leptos_ui_kit_cli
 ```
 
 Apps do not add `leptos_ui_kit` as a runtime dependency or dev-dependency to
@@ -58,6 +59,7 @@ leptos_ui_kit add collapsible
 leptos_ui_kit add tabs
 leptos_ui_kit add dialog
 leptos_ui_kit sync
+leptos_ui_kit migrate state-dir src/components/ui/_kit_state
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
 ```
@@ -67,8 +69,12 @@ support `--json`.
 
 `add button` records `button` in `components.json` and installs the generated
 source. `sync` reconciles the app from `components.json`, and `doctor --strict`
-verifies generated files, managed CSS blocks, desired state, and `.leptos-ui`
-metadata.
+verifies generated files, managed CSS blocks, desired state, and configured
+installer metadata.
+
+Use `leptos_ui_kit init --state-dir <path>` to create a new app with a
+non-default state directory. Use `leptos_ui_kit migrate state-dir <path>` to
+move an existing app's state and baselines explicitly.
 
 The CLI emits dependency plans for:
 

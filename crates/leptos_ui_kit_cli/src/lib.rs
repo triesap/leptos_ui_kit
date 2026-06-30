@@ -12,9 +12,10 @@ use std::{
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
     InstalledFile, InstalledItem, InstalledStyleBlock, MigrateStateDirPlan, SyncPlan, apply_add,
-    apply_init, apply_migrate_state_dir, apply_sync, extract_managed_css_block, hash_content_bytes,
-    install_state_path, install_state_path_from_dir, parse_install_state_str_at_path, plan_add,
-    plan_init, plan_migrate_state_dir, plan_sync,
+    apply_init_with_state_dir, apply_migrate_state_dir, apply_sync, extract_managed_css_block,
+    hash_content_bytes, install_state_path, install_state_path_from_dir,
+    parse_install_state_str_at_path, plan_add, plan_init_with_state_dir, plan_migrate_state_dir,
+    plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ComponentsConfig, DEFAULT_STATE_DIR, DependencyRequirement, DependencyStatus,
@@ -361,8 +362,10 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
 fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
     let mut dry_run = false;
+    let mut state_dir: Option<String> = None;
+    let mut iter = args.iter();
 
-    for arg in args {
+    while let Some(arg) = iter.next() {
         let Some(value) = arg.to_str() else {
             return Err("non-utf8 arguments are not supported".to_owned());
         };
@@ -370,6 +373,15 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
         match value {
             "--json" => json = true,
             "--dry-run" => dry_run = true,
+            "--state-dir" => {
+                let Some(path) = iter.next() else {
+                    return Err("--state-dir requires a path".to_owned());
+                };
+                let Some(path) = path.to_str() else {
+                    return Err("non-utf8 arguments are not supported".to_owned());
+                };
+                state_dir = Some(path.to_owned());
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unsupported flag for init: {value}"));
             }
@@ -378,10 +390,10 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     }
 
     let plan = if dry_run {
-        plan_init(cwd)
+        plan_init_with_state_dir(cwd, state_dir.as_deref())
             .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?
     } else {
-        apply_init(cwd)
+        apply_init_with_state_dir(cwd, state_dir.as_deref())
             .map_err(|error| format!("failed to initialize {}: {error}", cwd.display()))?
     };
 
@@ -1522,7 +1534,7 @@ fn command_help(command: &str) -> Result<String, String> {
             "Inspects a supported single-crate Trunk CSR Leptos app.",
         ],
         "init" => vec![
-            "usage: leptos_ui_kit init [--dry-run] [--json]",
+            "usage: leptos_ui_kit init [--state-dir <path>] [--dry-run] [--json]",
             "",
             "Creates components.json and the minimal app-owned source, CSS, and installer state files.",
         ],
@@ -1555,6 +1567,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use leptos_ui_kit_codegen::plan_init;
     use leptos_ui_kit_registry::{
         canonical_components_json, components_config_to_json, components_config_with_desired_item,
         desired_builtin_button_item, parse_components_json_str,
@@ -1679,6 +1692,33 @@ leptos_router = "0.9.0-alpha"
         assert!(root.join("components.json").is_file());
         assert!(
             root.join("src/components/ui/_kit_state/state.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn init_state_dir_option_creates_configured_state() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        run(
+            vec![
+                OsString::from("init"),
+                OsString::from("--state-dir"),
+                OsString::from("src/components/ui/_custom_state"),
+            ],
+            root,
+        )
+        .expect("run init");
+
+        assert!(
+            root.join("src/components/ui/_custom_state/state.json")
                 .is_file()
         );
     }

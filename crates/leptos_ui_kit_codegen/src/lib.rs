@@ -503,10 +503,17 @@ impl UiModuleExport {
 }
 
 pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
+    plan_init_with_state_dir(project_root, None)
+}
+
+pub fn plan_init_with_state_dir(
+    project_root: &Path,
+    state_dir: Option<&str>,
+) -> Result<InitPlan, CodegenError> {
     let mut files = Vec::new();
     let mut changes = Vec::new();
 
-    plan_components_json(project_root, &mut files, &mut changes)?;
+    plan_components_json(project_root, &mut files, &mut changes, state_dir)?;
     plan_stylesheet(project_root, &mut files, &mut changes)?;
     plan_index_html(project_root, &mut files, &mut changes)?;
     plan_component_modules(project_root, &mut files, &mut changes)?;
@@ -520,7 +527,14 @@ pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 }
 
 pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
-    let plan = plan_init(project_root)?;
+    apply_init_with_state_dir(project_root, None)
+}
+
+pub fn apply_init_with_state_dir(
+    project_root: &Path,
+    state_dir: Option<&str>,
+) -> Result<InitPlan, CodegenError> {
+    let plan = plan_init_with_state_dir(project_root, state_dir)?;
     apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
@@ -1857,19 +1871,36 @@ fn plan_components_json(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
+    state_dir: Option<&str>,
 ) -> Result<(), CodegenError> {
     let path = project_root.join("components.json");
     if path.is_file() {
-        parse_components_json_str(&read_to_string(&path)?)?;
+        let config = parse_components_json_str(&read_to_string(&path)?)?;
+        if let Some(state_dir) = state_dir
+            && config.state.dir != state_dir
+        {
+            return unsafe_patch(
+                "components.json",
+                "components.json already exists; use migrate state-dir to move installer state",
+            );
+        }
         return Ok(());
     }
+
+    let content = if let Some(state_dir) = state_dir {
+        let mut config = parse_components_json_str(&canonical_components_json()?)?;
+        config.state.dir = state_dir.to_owned();
+        components_config_to_json(&config)?
+    } else {
+        canonical_components_json()?
+    };
 
     push_file_plan(
         files,
         changes,
         "components.json",
         PlannedFileAction::Create,
-        canonical_components_json()?,
+        content,
         ChangeKind::CreateFile,
     );
     Ok(())
@@ -2359,6 +2390,31 @@ mod tests {
                 .expect("read index")
                 .contains("styles/app.css")
         );
+    }
+
+    #[test]
+    fn init_state_dir_option_writes_custom_state_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        apply_init_with_state_dir(root, Some("src/components/ui/_custom_state"))
+            .expect("apply init");
+
+        assert!(
+            root.join("src/components/ui/_custom_state/state.json")
+                .is_file()
+        );
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
+        assert_eq!(config.state.dir, "src/components/ui/_custom_state");
     }
 
     #[test]

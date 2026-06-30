@@ -28,8 +28,8 @@ root. Multi-member workspace installs remain out of scope.
 
 Generated components are app-owned source. Consumers should install the CLI
 from a pinned Git revision and commit generated files, `components.json`, and
-`.leptos-ui` state/baselines; they should not add this crate family to an app
-as the way to access generated components.
+the configured state/baseline directory; they should not add this crate family
+to an app as the way to access generated components.
 
 ## Repository Map
 
@@ -86,6 +86,7 @@ leptos_ui_kit init
 leptos_ui_kit view button
 leptos_ui_kit add button
 leptos_ui_kit sync
+leptos_ui_kit migrate state-dir src/components/ui/_kit_state
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
 ```
@@ -112,9 +113,10 @@ unless the domain exists and the user has approved the migration.
 The config model is strict. Unknown fields should fail. Legacy shadcn/Tailwind
 fields should fail.
 
-`components.json` declares desired registry items and the pinned tool source.
-The `.leptos-ui` directory records installer state and baselines. Strict doctor
-checks should fail when desired items are not installed, installed items are not
+`components.json` declares desired registry items, the pinned tool source, and
+`state.dir`. The default state directory is `src/components/ui/_kit_state`.
+That directory records installer state and baselines. Strict doctor checks
+should fail when desired items are not installed, installed items are not
 declared, config hashes drift, generated baselines drift, or installer metadata
 is ignored by Git.
 
@@ -137,7 +139,8 @@ Generated components should:
 - keep CSS in managed blocks delimited by `leptos-ui-kit:start` and
   `leptos-ui-kit:end`
 
-If a generated file or managed CSS block is tracked in `.leptos-ui/state.json`,
+If a generated file or managed CSS block is tracked in the configured
+`state.dir` state file,
 local edits must be detected through baselines instead of overwritten silently.
 
 ## File And Docs Policy
