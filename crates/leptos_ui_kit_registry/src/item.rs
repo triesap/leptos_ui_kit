@@ -1237,6 +1237,7 @@ mod tests {
 
         assert!(source.contains("use leptos::prelude::*;"));
         assert!(source.contains("#[component]"));
+        assert!(source.contains("#[allow(dead_code)]"));
         assert!(source.contains("pub fn Button"));
         assert!(source.contains("Children"));
         assert!(source.contains("<button"));

@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum ButtonVariant {
     Primary,
     Secondary,
@@ -8,6 +9,7 @@ pub enum ButtonVariant {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum ButtonSize {
     Sm,
     Md,
@@ -15,6 +17,7 @@ pub enum ButtonSize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub enum ButtonType {
     Button,
     Submit,
