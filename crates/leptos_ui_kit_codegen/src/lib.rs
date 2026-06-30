@@ -11,14 +11,18 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, RegistryItem, SCHEMA_VERSION,
-    canonical_components_json, components_config_to_json, components_config_with_desired_item,
-    desired_builtin_button_item, desired_builtin_collapsible_item, desired_builtin_dialog_item,
-    desired_builtin_tabs_item, load_built_in_registry_item, parse_components_json_str,
-    read_built_in_registry_source,
+    CargoPlanEntry, ComponentsConfig, ConfigError, DEFAULT_STATE_DIR, RegistryError, RegistryItem,
+    SCHEMA_VERSION, canonical_components_json, components_config_to_json,
+    components_config_with_desired_item, desired_builtin_button_item,
+    desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_tabs_item,
+    load_built_in_registry_item, parse_components_json_str, read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+const STATE_FILE_NAME: &str = "state.json";
+const STATE_LOCK_FILE_NAME: &str = "lock";
+const BASELINES_DIR_NAME: &str = "baselines";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -323,40 +327,43 @@ impl InstallState {
     }
 
     pub fn validate(&self) -> Result<(), CodegenError> {
-        let path = PathBuf::from(".leptos-ui/state.json");
+        self.validate_at_path(Path::new(STATE_FILE_NAME))
+    }
+
+    pub fn validate_at_path(&self, path: &Path) -> Result<(), CodegenError> {
         if self.schema_version != SCHEMA_VERSION {
-            return invalid_state(&path, format!("schemaVersion must be {SCHEMA_VERSION}"));
+            return invalid_state(path, format!("schemaVersion must be {SCHEMA_VERSION}"));
         }
         if self.project.crate_root != "." {
-            return invalid_state(&path, "project.crateRoot must be .");
+            return invalid_state(path, "project.crateRoot must be .");
         }
         if self.project.kind != "single-crate-trunk-csr" {
-            return invalid_state(&path, "project.kind must be single-crate-trunk-csr");
+            return invalid_state(path, "project.kind must be single-crate-trunk-csr");
         }
-        validate_state_hash(&path, "project.configHash", &self.project.config_hash)?;
+        validate_state_hash(path, "project.configHash", &self.project.config_hash)?;
 
         for (key, item) in &self.items {
             if key != &item.id {
-                return invalid_state(&path, format!("item key {key} does not match item id"));
+                return invalid_state(path, format!("item key {key} does not match item id"));
             }
             if item.source != "builtin" {
-                return invalid_state(&path, "only builtin item state is supported");
+                return invalid_state(path, "only builtin item state is supported");
             }
             if item.version != SCHEMA_VERSION {
-                return invalid_state(&path, format!("item version must be {SCHEMA_VERSION}"));
+                return invalid_state(path, format!("item version must be {SCHEMA_VERSION}"));
             }
-            validate_state_hash(&path, "items[].contentHash", &item.content_hash)?;
+            validate_state_hash(path, "items[].contentHash", &item.content_hash)?;
             for file in &item.files {
-                validate_state_hash(&path, "items[].files[].baselineHash", &file.baseline_hash)?;
+                validate_state_hash(path, "items[].files[].baselineHash", &file.baseline_hash)?;
                 validate_state_hash(
-                    &path,
+                    path,
                     "items[].files[].localHashAtInstall",
                     &file.local_hash_at_install,
                 )?;
             }
             for block in &item.style_blocks {
                 validate_state_hash(
-                    &path,
+                    path,
                     "items[].styleBlocks[].baselineHash",
                     &block.baseline_hash,
                 )?;
@@ -366,7 +373,7 @@ impl InstallState {
         for (file_path, item_id) in &self.files_by_path {
             if !self.items.contains_key(item_id) {
                 return invalid_state(
-                    &path,
+                    path,
                     format!("filesByPath entry {file_path} references missing item {item_id}"),
                 );
             }
@@ -375,7 +382,7 @@ impl InstallState {
         for (block_id, item_id) in &self.style_blocks_by_id {
             if !self.items.contains_key(item_id) {
                 return invalid_state(
-                    &path,
+                    path,
                     format!("styleBlocksById entry {block_id} references missing item {item_id}"),
                 );
             }
@@ -422,6 +429,29 @@ pub struct InstalledStyleBlock {
     pub block_id: String,
     pub baseline_path: String,
     pub baseline_hash: String,
+}
+
+pub fn install_state_path(config: &ComponentsConfig) -> String {
+    state_dir_child_path(&config.state.dir, STATE_FILE_NAME)
+}
+
+pub fn install_state_path_from_dir(state_dir: &str) -> String {
+    state_dir_child_path(state_dir, STATE_FILE_NAME)
+}
+
+fn state_baseline_path(config: &ComponentsConfig, safe_item_id: &str, target_path: &str) -> String {
+    state_dir_child_path(
+        &config.state.dir,
+        &format!("{BASELINES_DIR_NAME}/{safe_item_id}/{target_path}"),
+    )
+}
+
+fn state_dir_child_path(state_dir: &str, child_path: &str) -> String {
+    format!("{}/{child_path}", state_dir.trim_end_matches('/'))
+}
+
+fn state_dir_from_state_path(state_path: &str) -> &str {
+    state_path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,38 +503,7 @@ pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 
 pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
     let plan = plan_init(project_root)?;
-    let paths = plan
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    validate_planned_write_paths(&paths)?;
-
-    if plan.is_empty() {
-        return Ok(plan);
-    }
-
-    let _lock = WriteLock::acquire(project_root)?;
-
-    for file in plan
-        .files
-        .iter()
-        .filter(|file| file.path != ".leptos-ui/state.json")
-    {
-        write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
-    }
-
-    if let Some(state_file) = plan
-        .files
-        .iter()
-        .find(|file| file.path == ".leptos-ui/state.json")
-    {
-        write_file_atomic(
-            project_root,
-            &state_file.path,
-            state_file.content.as_bytes(),
-        )?;
-    }
+    apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
 }
@@ -522,20 +521,21 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
     let init_plan = plan_init(project_root)?;
+    let config_content =
+        planned_or_existing_components_config_content(project_root, &init_plan.files)?;
+    let config = parse_components_json_str(&config_content)?;
+    let state_path = install_state_path(&config);
     let mut files = init_plan
         .files
         .into_iter()
-        .filter(|file| file.path != ".leptos-ui/state.json")
+        .filter(|file| file.path != state_path)
         .collect::<Vec<_>>();
     let mut changes = init_plan
         .changes
         .into_iter()
-        .filter(|change| change.path != ".leptos-ui/state.json")
+        .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
 
-    let config_content = planned_or_existing_content(&files, project_root, "components.json")?
-        .unwrap_or(canonical_components_json()?);
-    let config = parse_components_json_str(&config_content)?;
     let config = components_config_with_desired_item(config, desired_item)?;
     let config_content = components_config_to_json(&config)?;
     upsert_planned_file(
@@ -565,34 +565,34 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
 
 pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
     let plan = plan_add(project_root, item_name)?;
-    apply_planned_files(project_root, &plan.files)?;
+    apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
 }
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     let init_plan = plan_init(project_root)?;
+    let config_content =
+        planned_or_existing_components_config_content(project_root, &init_plan.files)?;
+    let config = parse_components_json_str(&config_content)?;
+    let state_path = install_state_path(&config);
     let files = init_plan
         .files
         .into_iter()
-        .filter(|file| file.path != ".leptos-ui/state.json")
+        .filter(|file| file.path != state_path)
         .collect::<Vec<_>>();
     let changes = init_plan
         .changes
         .into_iter()
-        .filter(|change| change.path != ".leptos-ui/state.json")
+        .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
-
-    let config_content = planned_or_existing_content(&files, project_root, "components.json")?
-        .unwrap_or(canonical_components_json()?);
-    let config = parse_components_json_str(&config_content)?;
 
     plan_sync_from_config(project_root, files, changes, config, config_content)
 }
 
 pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     let plan = plan_sync(project_root)?;
-    apply_planned_files(project_root, &plan.files)?;
+    apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
 }
@@ -606,26 +606,33 @@ fn plan_sync_from_config(
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
     let config_hash = hash_bytes(config_content.as_bytes());
-    let mut state = load_or_empty_state(project_root, config_hash.clone())?;
+    let state_path = install_state_path(&config);
+    let mut state = load_or_empty_state(project_root, &state_path, config_hash.clone())?;
     state.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
     let mut cargo_plan = Vec::new();
 
     for desired_item in &config.items {
         let item = load_built_in_registry_item(desired_item.item_name())?;
-        let item_id =
-            plan_built_in_item(project_root, &mut files, &mut changes, &mut state, &item)?;
+        let item_id = plan_built_in_item(
+            project_root,
+            &mut files,
+            &mut changes,
+            &mut state,
+            &config,
+            &item,
+        )?;
         item_ids.push(item_id);
         merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
     }
 
-    state.validate()?;
-    let state_json = state_to_json(&state)?;
+    state.validate_at_path(Path::new(&state_path))?;
+    let state_json = state_to_json_at_path(&state, Path::new(&state_path))?;
     upsert_planned_file(
         project_root,
         &mut files,
         &mut changes,
-        ".leptos-ui/state.json",
+        &state_path,
         state_json,
         ChangeKind::WriteState,
         None,
@@ -635,7 +642,7 @@ fn plan_sync_from_config(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    validate_planned_write_paths(&paths)?;
+    validate_planned_write_paths_for_state_dir(&paths, &config.state.dir)?;
 
     Ok(SyncPlan {
         project_root: project_root.to_path_buf(),
@@ -665,6 +672,7 @@ fn plan_built_in_item(
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     state: &mut InstallState,
+    config: &ComponentsConfig,
     item: &leptos_ui_kit_registry::ResolvedRegistryItem,
 ) -> Result<String, CodegenError> {
     let item_id = built_in_item_id(&item.item.name);
@@ -675,7 +683,7 @@ fn plan_built_in_item(
     for ui_file in &item.targets.ui_files {
         let generated = read_built_in_registry_source(&ui_file.source)?;
         let logical_path = format!("src/components/ui/{}", ui_file.path);
-        let baseline_path = format!(".leptos-ui/baselines/{safe_item_id}/{}", ui_file.path);
+        let baseline_path = state_baseline_path(config, &safe_item_id, &ui_file.path);
         let generated_hash = hash_bytes(generated.as_bytes());
 
         plan_generated_source_file(
@@ -734,7 +742,8 @@ fn plan_built_in_item(
     for style in &item.targets.style_blocks {
         let generated = read_built_in_registry_source(&style.source)?;
         let css_path = "styles/app.css";
-        let baseline_path = format!(".leptos-ui/baselines/{safe_item_id}/{}.css", style.id);
+        let baseline_path =
+            state_baseline_path(config, &safe_item_id, &format!("{}.css", style.id));
         let baseline = tracked_style_baseline(project_root, state, &item_id, &style.id)?;
         let existing_css = planned_or_existing_content(files, project_root, css_path)?
             .unwrap_or_else(|| ":root {\n  --luk-color-primary: #111827;\n}\n".to_owned());
@@ -786,44 +795,65 @@ fn plan_built_in_item(
     Ok(item_id)
 }
 
-fn apply_planned_files(project_root: &Path, files: &[PlannedFile]) -> Result<(), CodegenError> {
+fn apply_planned_files(
+    project_root: &Path,
+    files: &[PlannedFile],
+    changes: &[ChangeRecord],
+) -> Result<(), CodegenError> {
     let paths = files
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    validate_planned_write_paths(&paths)?;
+    let state_paths = state_write_paths(changes);
+    let state_dir = state_paths
+        .first()
+        .map(|path| state_dir_from_state_path(path))
+        .unwrap_or(DEFAULT_STATE_DIR);
+    validate_planned_write_paths_for_state_dir(&paths, state_dir)?;
 
     if files.is_empty() {
         return Ok(());
     }
 
-    let _lock = WriteLock::acquire(project_root)?;
+    let _lock = WriteLock::acquire_at(project_root, state_dir)?;
 
     for file in files
         .iter()
-        .filter(|file| file.path != ".leptos-ui/state.json")
+        .filter(|file| !state_paths.contains(&file.path.as_str()))
     {
-        write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
+        write_file_atomic_with_state_dir(
+            project_root,
+            &file.path,
+            file.content.as_bytes(),
+            state_dir,
+        )?;
     }
 
-    if let Some(state_file) = files
-        .iter()
-        .find(|file| file.path == ".leptos-ui/state.json")
-    {
-        write_file_atomic(
-            project_root,
-            &state_file.path,
-            state_file.content.as_bytes(),
-        )?;
+    for state_path in state_paths {
+        if let Some(state_file) = files.iter().find(|file| file.path == state_path) {
+            write_file_atomic_with_state_dir(
+                project_root,
+                &state_file.path,
+                state_file.content.as_bytes(),
+                state_dir,
+            )?;
+        }
     }
 
     Ok(())
 }
 
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
+    validate_planned_write_paths_for_state_dir(paths, DEFAULT_STATE_DIR)
+}
+
+fn validate_planned_write_paths_for_state_dir(
+    paths: &[String],
+    state_dir: &str,
+) -> Result<(), CodegenError> {
     let mut seen = std::collections::BTreeSet::new();
     for path in paths {
-        validate_logical_write_path(path)?;
+        validate_logical_write_path_with_state_dir(path, state_dir)?;
         let folded = path.to_ascii_lowercase();
         if !seen.insert(folded) {
             return Err(CodegenError::DuplicatePath(path.clone()));
@@ -836,7 +866,15 @@ pub fn validate_project_write_path(
     project_root: &Path,
     logical_path: &str,
 ) -> Result<PathBuf, CodegenError> {
-    validate_logical_write_path(logical_path)?;
+    validate_project_write_path_with_state_dir(project_root, logical_path, DEFAULT_STATE_DIR)
+}
+
+fn validate_project_write_path_with_state_dir(
+    project_root: &Path,
+    logical_path: &str,
+    state_dir: &str,
+) -> Result<PathBuf, CodegenError> {
+    validate_logical_write_path_with_state_dir(logical_path, state_dir)?;
     let root = project_root
         .canonicalize()
         .map_err(|source| CodegenError::Io {
@@ -867,6 +905,13 @@ pub fn validate_project_write_path(
 }
 
 pub fn validate_logical_write_path(path: &str) -> Result<(), CodegenError> {
+    validate_logical_write_path_with_state_dir(path, DEFAULT_STATE_DIR)
+}
+
+fn validate_logical_write_path_with_state_dir(
+    path: &str,
+    state_dir: &str,
+) -> Result<(), CodegenError> {
     if path.is_empty() {
         return unsafe_path(path, "path is empty");
     }
@@ -893,7 +938,8 @@ pub fn validate_logical_write_path(path: &str) -> Result<(), CodegenError> {
             return unsafe_path(path, "parent traversal is rejected");
         }
         if component.starts_with('.') {
-            let allowed_internal = component == ".leptos-ui" && components.peek().is_some();
+            let allowed_internal = is_allowed_state_dir_path(path, state_dir)
+                || (component == ".leptos-ui" && components.peek().is_some());
             if !allowed_internal {
                 return unsafe_path(path, "hidden paths are rejected except .leptos-ui");
             }
@@ -906,7 +952,7 @@ pub fn validate_logical_write_path(path: &str) -> Result<(), CodegenError> {
         }
     }
 
-    if is_allowed_write_path(path) {
+    if is_allowed_write_path(path) || is_allowed_state_dir_path(path, state_dir) {
         Ok(())
     } else {
         unsafe_path(path, "path is outside the MVP write allow-list")
@@ -920,9 +966,14 @@ pub struct WriteLock {
 
 impl WriteLock {
     pub fn acquire(project_root: &Path) -> Result<Self, CodegenError> {
-        let lock_path = project_root.join(".leptos-ui/lock");
-        fs::create_dir_all(project_root.join(".leptos-ui")).map_err(|source| CodegenError::Io {
-            path: project_root.join(".leptos-ui"),
+        Self::acquire_at(project_root, DEFAULT_STATE_DIR)
+    }
+
+    pub fn acquire_at(project_root: &Path, state_dir: &str) -> Result<Self, CodegenError> {
+        let lock_path = project_root.join(state_dir_child_path(state_dir, STATE_LOCK_FILE_NAME));
+        let lock_dir = project_root.join(state_dir);
+        fs::create_dir_all(&lock_dir).map_err(|source| CodegenError::Io {
+            path: lock_dir,
             source,
         })?;
 
@@ -961,7 +1012,17 @@ pub fn write_file_atomic(
     logical_path: &str,
     content: &[u8],
 ) -> Result<(), CodegenError> {
-    let full_path = validate_project_write_path(project_root, logical_path)?;
+    write_file_atomic_with_state_dir(project_root, logical_path, content, DEFAULT_STATE_DIR)
+}
+
+fn write_file_atomic_with_state_dir(
+    project_root: &Path,
+    logical_path: &str,
+    content: &[u8],
+    state_dir: &str,
+) -> Result<(), CodegenError> {
+    let full_path =
+        validate_project_write_path_with_state_dir(project_root, logical_path, state_dir)?;
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(|source| CodegenError::Io {
             path: parent.to_path_buf(),
@@ -982,17 +1043,28 @@ pub fn write_file_atomic(
 }
 
 pub fn parse_install_state_str(input: &str) -> Result<InstallState, CodegenError> {
+    parse_install_state_str_at_path(input, Path::new(STATE_FILE_NAME))
+}
+
+pub fn parse_install_state_str_at_path(
+    input: &str,
+    path: &Path,
+) -> Result<InstallState, CodegenError> {
     let state: InstallState =
         serde_json::from_str(input).map_err(|source| CodegenError::StateParse {
-            path: PathBuf::from(".leptos-ui/state.json"),
+            path: path.to_path_buf(),
             source,
         })?;
-    state.validate()?;
+    state.validate_at_path(path)?;
     Ok(state)
 }
 
 pub fn state_to_json(state: &InstallState) -> Result<String, CodegenError> {
-    state.validate()?;
+    state_to_json_at_path(state, Path::new(STATE_FILE_NAME))
+}
+
+pub fn state_to_json_at_path(state: &InstallState, path: &Path) -> Result<String, CodegenError> {
+    state.validate_at_path(path)?;
     let mut output = serde_json::to_string_pretty(state).map_err(CodegenError::StateSerialize)?;
     output.push('\n');
     Ok(output)
@@ -1110,9 +1182,10 @@ pub fn patch_ui_mod(
 
 fn load_or_empty_state(
     project_root: &Path,
+    state_path: &str,
     config_hash: String,
 ) -> Result<InstallState, CodegenError> {
-    let path = project_root.join(".leptos-ui/state.json");
+    let path = project_root.join(state_path);
     if path.is_file() {
         let input = read_to_string(&path)?;
         let mut state = serde_json::from_str::<InstallState>(&input).map_err(|source| {
@@ -1121,7 +1194,7 @@ fn load_or_empty_state(
                 source,
             }
         })?;
-        state.validate()?;
+        state.validate_at_path(Path::new(state_path))?;
         state.project.config_hash = config_hash;
         return Ok(state);
     }
@@ -1245,6 +1318,25 @@ fn planned_or_existing_content(
     read_optional_to_string(&project_root.join(logical_path))
 }
 
+fn planned_or_existing_components_config_content(
+    project_root: &Path,
+    files: &[PlannedFile],
+) -> Result<String, CodegenError> {
+    if let Some(content) = planned_or_existing_content(files, project_root, "components.json")? {
+        return Ok(content);
+    }
+
+    Ok(canonical_components_json()?)
+}
+
+fn state_write_paths(changes: &[ChangeRecord]) -> Vec<&str> {
+    changes
+        .iter()
+        .filter(|change| change.kind == ChangeKind::WriteState)
+        .map(|change| change.path.as_str())
+        .collect()
+}
+
 fn read_optional_to_string(path: &Path) -> Result<Option<String>, CodegenError> {
     match fs::read_to_string(path) {
         Ok(content) => Ok(Some(content)),
@@ -1262,7 +1354,7 @@ fn tracked_file_baseline(
     item_id: &str,
     logical_path: &str,
 ) -> Result<String, CodegenError> {
-    let path = PathBuf::from(".leptos-ui/state.json");
+    let path = PathBuf::from(STATE_FILE_NAME);
     let item = state
         .items
         .get(item_id)
@@ -1298,7 +1390,7 @@ fn tracked_style_baseline(
         );
     }
 
-    let path = PathBuf::from(".leptos-ui/state.json");
+    let path = PathBuf::from(STATE_FILE_NAME);
     let item = state
         .items
         .get(item_id)
@@ -1444,6 +1536,11 @@ fn is_allowed_write_path(path: &str) -> bool {
         "components.json" | "index.html" | "styles/app.css" | "src/components/mod.rs"
     ) || path.starts_with("src/components/ui/")
         || path.starts_with(".leptos-ui/")
+}
+
+fn is_allowed_state_dir_path(path: &str, state_dir: &str) -> bool {
+    path.strip_prefix(state_dir)
+        .is_some_and(|remaining| remaining.starts_with('/'))
 }
 
 fn plan_components_json(
@@ -1747,16 +1844,19 @@ fn plan_empty_state(
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
 ) -> Result<(), CodegenError> {
-    let path = project_root.join(".leptos-ui/state.json");
+    let config_content = planned_or_existing_components_config_content(project_root, files)?;
+    let config = parse_components_json_str(&config_content)?;
+    let state_path = install_state_path(&config);
+    let path = project_root.join(&state_path);
     if path.is_file() {
         return Ok(());
     }
 
-    let content = empty_state_json(project_root, files)?;
+    let content = empty_state_json(&config_content, &state_path)?;
     push_file_plan(
         files,
         changes,
-        ".leptos-ui/state.json",
+        &state_path,
         PlannedFileAction::Create,
         content,
         ChangeKind::WriteState,
@@ -1780,10 +1880,11 @@ fn push_file_plan(
     changes.push(ChangeRecord::new(change_kind, path, true));
 }
 
-fn empty_state_json(project_root: &Path, files: &[PlannedFile]) -> Result<String, CodegenError> {
-    let config_content = planned_or_existing_content(files, project_root, "components.json")?
-        .unwrap_or(canonical_components_json()?);
-    state_to_json(&InstallState::empty(hash_bytes(config_content.as_bytes())))
+fn empty_state_json(config_content: &str, state_path: &str) -> Result<String, CodegenError> {
+    state_to_json_at_path(
+        &InstallState::empty(hash_bytes(config_content.as_bytes())),
+        Path::new(state_path),
+    )
 }
 
 fn read_to_string(path: &Path) -> Result<String, CodegenError> {
@@ -1851,7 +1952,7 @@ mod tests {
         assert!(
             plan.files
                 .iter()
-                .any(|file| file.path == ".leptos-ui/state.json")
+                .any(|file| file.path == "src/components/ui/_kit_state/state.json")
         );
         assert!(!root.join("components.json").exists());
     }
@@ -1890,8 +1991,11 @@ mod tests {
         assert!(root.join("styles/app.css").is_file());
         assert!(root.join("src/components/mod.rs").is_file());
         assert!(root.join("src/components/ui/mod.rs").is_file());
-        assert!(root.join(".leptos-ui/state.json").is_file());
-        assert!(!root.join(".leptos-ui/lock").exists());
+        assert!(
+            root.join("src/components/ui/_kit_state/state.json")
+                .is_file()
+        );
+        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
         assert!(
             fs::read_to_string(root.join("index.html"))
                 .expect("read index")
@@ -1983,12 +2087,16 @@ mod tests {
         let rust_baseline = plan
             .files
             .iter()
-            .find(|file| file.path == ".leptos-ui/baselines/builtin-button/button.rs")
+            .find(|file| {
+                file.path == "src/components/ui/_kit_state/baselines/builtin-button/button.rs"
+            })
             .expect("rust baseline");
         let css_baseline = plan
             .files
             .iter()
-            .find(|file| file.path == ".leptos-ui/baselines/builtin-button/button.css")
+            .find(|file| {
+                file.path == "src/components/ui/_kit_state/baselines/builtin-button/button.css"
+            })
             .expect("css baseline");
 
         assert_eq!(rust_target.content, source);
@@ -2032,14 +2140,16 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/app.css"));
-        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.rs"));
-        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.css"));
-        assert!(paths.contains(&".leptos-ui/state.json"));
+        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
+        assert!(
+            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
+        );
+        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
         assert_eq!(plan.cargo_plan.len(), 2);
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert!(
             !root
-                .join(".leptos-ui/baselines/builtin-button/button.rs")
+                .join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
                 .exists()
         );
     }
@@ -2058,10 +2168,15 @@ mod tests {
         let mut files = Vec::new();
         let mut changes = Vec::new();
         let mut state = InstallState::empty(hash_bytes(b"components"));
+        let config = parse_components_json_str(
+            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        )
+        .expect("parse config");
         let item = nested_registry_item();
 
-        let item_id = plan_built_in_item(root, &mut files, &mut changes, &mut state, &item)
-            .expect("plan item");
+        let item_id =
+            plan_built_in_item(root, &mut files, &mut changes, &mut state, &config, &item)
+                .expect("plan item");
         let paths = files
             .iter()
             .map(|file| file.path.as_str())
@@ -2073,7 +2188,9 @@ mod tests {
 
         assert_eq!(item_id, "builtin:nested");
         assert!(paths.contains(&"src/components/ui/nested/root.rs"));
-        assert!(paths.contains(&".leptos-ui/baselines/builtin-nested/nested/root.rs"));
+        assert!(
+            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-nested/nested/root.rs")
+        );
         assert!(
             ui_mod
                 .content
@@ -2112,15 +2229,17 @@ mod tests {
                 .contains("/* leptos-ui-kit:start button */")
         );
         assert!(
-            root.join(".leptos-ui/baselines/builtin-button/button.rs")
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
                 .is_file()
         );
         assert!(
-            root.join(".leptos-ui/baselines/builtin-button/button.css")
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css")
                 .is_file()
         );
-        let state = parse_install_state_str(
-            &fs::read_to_string(root.join(".leptos-ui/state.json")).expect("read state"),
+        let state = parse_install_state_str_at_path(
+            &fs::read_to_string(root.join("src/components/ui/_kit_state/state.json"))
+                .expect("read state"),
+            Path::new("src/components/ui/_kit_state/state.json"),
         )
         .expect("parse state");
         assert!(state.items.contains_key("builtin:button"));
@@ -2130,7 +2249,7 @@ mod tests {
         .expect("parse config");
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].item_name(), "button");
-        assert!(!root.join(".leptos-ui/lock").exists());
+        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
     }
 
     #[test]
@@ -2156,9 +2275,11 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/app.css"));
-        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.rs"));
-        assert!(paths.contains(&".leptos-ui/baselines/builtin-button/button.css"));
-        assert!(paths.contains(&".leptos-ui/state.json"));
+        assert!(paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.rs"));
+        assert!(
+            paths.contains(&"src/components/ui/_kit_state/baselines/builtin-button/button.css")
+        );
+        assert!(paths.contains(&"src/components/ui/_kit_state/state.json"));
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
     }
@@ -2389,7 +2510,7 @@ mod tests {
             "src/components/mod.rs".to_owned(),
             "src/components/ui/button.rs".to_owned(),
             "src/components/ui/nested/root.rs".to_owned(),
-            ".leptos-ui/state.json".to_owned(),
+            "src/components/ui/_kit_state/state.json".to_owned(),
         ];
 
         validate_planned_write_paths(&paths).expect("paths should pass");
@@ -2458,14 +2579,14 @@ mod tests {
         {
             let _lock = WriteLock::acquire(root).expect("lock");
             write_file_atomic(root, "styles/app.css", b":root {}\n").expect("write css");
-            assert!(root.join(".leptos-ui/lock").exists());
+            assert!(root.join("src/components/ui/_kit_state/lock").exists());
         }
 
         assert_eq!(
             fs::read_to_string(root.join("styles/app.css")).expect("read css"),
             ":root {}\n"
         );
-        assert!(!root.join(".leptos-ui/lock").exists());
+        assert!(!root.join("src/components/ui/_kit_state/lock").exists());
     }
 
     fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {

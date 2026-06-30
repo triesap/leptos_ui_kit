@@ -42,7 +42,7 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert!(project.join("src/components/ui/button.rs").is_file());
     assert!(
         project
-            .join(".leptos-ui/baselines/builtin-button/button.rs")
+            .join("src/components/ui/_kit_state/baselines/builtin-button/button.rs")
             .is_file()
     );
     assert!(
@@ -52,19 +52,19 @@ fn homepage_fixture_cli_workflow_smoke() {
     );
     assert!(
         project
-            .join(".leptos-ui/baselines/builtin-collapsible/collapsible/root.rs")
+            .join("src/components/ui/_kit_state/baselines/builtin-collapsible/collapsible/root.rs")
             .is_file()
     );
     assert!(project.join("src/components/ui/dialog/mod.rs").is_file());
     assert!(
         project
-            .join(".leptos-ui/baselines/builtin-dialog/dialog/content.rs")
+            .join("src/components/ui/_kit_state/baselines/builtin-dialog/dialog/content.rs")
             .is_file()
     );
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());
     assert!(
         project
-            .join(".leptos-ui/baselines/builtin-tabs/tabs/root.rs")
+            .join("src/components/ui/_kit_state/baselines/builtin-tabs/tabs/root.rs")
             .is_file()
     );
 }

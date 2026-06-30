@@ -12,12 +12,12 @@ use std::{
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
     InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync,
-    extract_managed_css_block, hash_content_bytes, parse_install_state_str, plan_add, plan_init,
-    plan_sync,
+    extract_managed_css_block, hash_content_bytes, install_state_path, install_state_path_from_dir,
+    parse_install_state_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, DependencyRequirement, DependencyStatus, InfoOutput,
-    ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
+    CargoPlanEntry, ComponentsConfig, DEFAULT_STATE_DIR, DependencyRequirement, DependencyStatus,
+    InfoOutput, ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
     load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
 };
 use serde::Serialize;
@@ -552,7 +552,10 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     let command_output = InfoCommandOutput {
         info: output.clone(),
         registry_available: load_built_in_registry_item("button").is_ok(),
-        installed_state: read_installed_state(&output.detected.project_root),
+        installed_state: read_installed_state(
+            &output.detected.project_root,
+            output.components_config.as_ref(),
+        ),
     };
 
     if json {
@@ -806,12 +809,15 @@ fn state_checks(
     components_config: Option<&ComponentsConfig>,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let state_path = cwd.join(".leptos-ui/state.json");
+    let state_logical_path = components_config
+        .map(install_state_path)
+        .unwrap_or_else(|| install_state_path_from_dir(DEFAULT_STATE_DIR));
+    let state_path = cwd.join(&state_logical_path);
     if !state_path.is_file() {
         checks.push(strict_check(
             strict,
             "state",
-            ".leptos-ui/state.json is missing",
+            format!("{state_logical_path} is missing"),
         ));
         return checks;
     }
@@ -826,7 +832,8 @@ fn state_checks(
             return checks;
         }
     };
-    let state = match parse_install_state_str(&state_input) {
+    let state = match parse_install_state_str_at_path(&state_input, Path::new(&state_logical_path))
+    {
         Ok(state) => state,
         Err(error) => {
             checks.push(
@@ -840,7 +847,12 @@ fn state_checks(
     checks.push(DoctorCheck::pass("state", "install state is valid"));
     checks.push(compare_config_hash(cwd, strict, &state));
     if let Some(config) = components_config {
-        checks.extend(compare_desired_items(config, &state, strict));
+        checks.extend(compare_desired_items(
+            config,
+            &state,
+            strict,
+            &state_logical_path,
+        ));
     }
     for item in state.items.values() {
         checks.push(compare_item_content_hash(item));
@@ -867,7 +879,12 @@ fn state_checks(
             ));
         }
     }
-    checks.extend(git_metadata_checks(cwd, strict, &state));
+    checks.extend(git_metadata_checks(
+        cwd,
+        strict,
+        &state,
+        &state_logical_path,
+    ));
 
     checks
 }
@@ -902,7 +919,7 @@ fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
     }
 
     if cargo_plan.is_empty() {
-        if let Some(state) = read_installed_state(cwd) {
+        if let Some(state) = read_installed_state(cwd, info.components_config.as_ref()) {
             for item in state.items.values() {
                 if let Ok(registry_item) = load_built_in_registry_item(&item.name) {
                     merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
@@ -984,6 +1001,7 @@ fn compare_desired_items(
     config: &ComponentsConfig,
     state: &InstallState,
     strict: bool,
+    state_logical_path: &str,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let desired_ids = config
@@ -1018,7 +1036,7 @@ fn compare_desired_items(
                     "desired_item",
                     format!("installed item {installed_id} is not declared in components.json"),
                 )
-                .with_path(".leptos-ui/state.json"),
+                .with_path(state_logical_path),
             );
         }
     }
@@ -1026,12 +1044,17 @@ fn compare_desired_items(
     checks
 }
 
-fn git_metadata_checks(cwd: &Path, strict: bool, state: &InstallState) -> Vec<DoctorCheck> {
+fn git_metadata_checks(
+    cwd: &Path,
+    strict: bool,
+    state: &InstallState,
+    state_logical_path: &str,
+) -> Vec<DoctorCheck> {
     if !is_git_worktree(cwd) {
         return Vec::new();
     }
 
-    let mut paths = BTreeSet::from([".leptos-ui/state.json".to_owned()]);
+    let mut paths = BTreeSet::from([state_logical_path.to_owned()]);
     for item in state.items.values() {
         for file in &item.files {
             paths.insert(file.baseline_path.clone());
@@ -1336,10 +1359,16 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
         .collect()
 }
 
-fn read_installed_state(project_root: &Path) -> Option<InstallState> {
-    let path = project_root.join(".leptos-ui/state.json");
+fn read_installed_state(
+    project_root: &Path,
+    components_config: Option<&ComponentsConfig>,
+) -> Option<InstallState> {
+    let state_logical_path = components_config
+        .map(install_state_path)
+        .unwrap_or_else(|| install_state_path_from_dir(DEFAULT_STATE_DIR));
+    let path = project_root.join(&state_logical_path);
     let input = fs::read_to_string(path).ok()?;
-    parse_install_state_str(&input).ok()
+    parse_install_state_str_at_path(&input, Path::new(&state_logical_path)).ok()
 }
 
 fn usage() -> String {
@@ -1478,7 +1507,10 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
 
         assert!(root.join("components.json").is_file());
-        assert!(root.join(".leptos-ui/state.json").is_file());
+        assert!(
+            root.join("src/components/ui/_kit_state/state.json")
+                .is_file()
+        );
     }
 
     #[test]
@@ -1516,7 +1548,9 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
-        assert!(output.contains("\"path\": \".leptos-ui/baselines/builtin-button/button.rs\""));
+        assert!(output.contains(
+            "\"path\": \"src/components/ui/_kit_state/baselines/builtin-button/button.rs\""
+        ));
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -1535,7 +1569,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
         assert!(root.join("src/components/ui/button.rs").is_file());
         assert!(
-            root.join(".leptos-ui/baselines/builtin-button/button.css")
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css")
                 .is_file()
         );
 
@@ -1703,7 +1737,8 @@ leptos_router = "0.9.0-alpha"
         let root = dir.path();
         create_doctor_project(root);
         init_git(root);
-        fs::write(root.join(".gitignore"), "/.leptos-ui/\n").expect("write gitignore");
+        fs::write(root.join(".gitignore"), "/src/components/ui/_kit_state/\n")
+            .expect("write gitignore");
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
@@ -1713,7 +1748,9 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.git_metadata\""));
-        assert!(output.contains("installer metadata .leptos-ui/state.json is ignored by Git"));
+        assert!(output.contains(
+            "installer metadata src/components/ui/_kit_state/state.json is ignored by Git"
+        ));
     }
 
     #[test]
@@ -1742,7 +1779,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
-        let state_path = root.join(".leptos-ui/state.json");
+        let state_path = root.join("src/components/ui/_kit_state/state.json");
         let mut state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
                 .expect("parse state");
@@ -1793,9 +1830,10 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
         let css_path = root.join("styles/app.css");
-        let baseline =
-            fs::read_to_string(root.join(".leptos-ui/baselines/builtin-button/button.css"))
-                .expect("read baseline");
+        let baseline = fs::read_to_string(
+            root.join("src/components/ui/_kit_state/baselines/builtin-button/button.css"),
+        )
+        .expect("read baseline");
         let mut css = fs::read_to_string(&css_path).expect("read css");
         css.push('\n');
         css.push_str(&baseline);
