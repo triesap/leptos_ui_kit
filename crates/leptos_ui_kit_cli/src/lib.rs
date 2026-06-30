@@ -183,6 +183,19 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         return Err(usage());
     };
 
+    if command == "--help" || command == "-h" {
+        println!("{}", help_text());
+        return Ok(());
+    }
+    if command == "--version" || command == "-V" {
+        println!("leptos_ui_kit {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args[1..].iter().any(|arg| is_help_arg(arg)) {
+        println!("{}", command_help(command)?);
+        return Ok(());
+    }
+
     match command {
         "add" => run_add(&args[1..], &cwd),
         "doctor" => run_doctor(&args[1..], &cwd),
@@ -193,6 +206,11 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "view" => run_view(&args[1..], &cwd),
         _ => Err(usage()),
     }
+}
+
+fn is_help_arg(arg: &OsString) -> bool {
+    arg.to_str()
+        .is_some_and(|value| value == "--help" || value == "-h")
 }
 
 fn parse_common_args(
@@ -1461,6 +1479,73 @@ fn usage() -> String {
         .to_owned()
 }
 
+fn help_text() -> String {
+    [
+        "leptos_ui_kit",
+        "",
+        "usage: leptos_ui_kit <command> [options]",
+        "",
+        "commands:",
+        "  info                 inspect a supported Trunk CSR Leptos app",
+        "  init                 create components.json and kit-managed app files",
+        "  view <item>          show a registry item",
+        "  add <item>           add a registry item to the app",
+        "  sync                 reconcile installed items with components.json",
+        "  migrate state-dir    move installer state to a new configured directory",
+        "  doctor               validate generated source, CSS, state, and dependencies",
+        "",
+        "global options:",
+        "  --cwd <path>         run against a different project root",
+        "  --quiet              accepted for script compatibility",
+        "  --verbose            accepted for script compatibility",
+        "  --help               print help",
+        "  --version            print version",
+    ]
+    .join("\n")
+}
+
+fn command_help(command: &str) -> Result<String, String> {
+    let lines = match command {
+        "add" => vec![
+            "usage: leptos_ui_kit add <item> [--dry-run] [--json]",
+            "",
+            "Adds a built-in registry item and updates components.json, generated source, CSS, state, and baselines.",
+        ],
+        "doctor" => vec![
+            "usage: leptos_ui_kit doctor [--strict] [--check] [--trunk-build] [--json]",
+            "",
+            "Validates project shape, dependencies, desired state, generated files, managed CSS, and installer metadata.",
+        ],
+        "info" => vec![
+            "usage: leptos_ui_kit info [path] [--json]",
+            "",
+            "Inspects a supported single-crate Trunk CSR Leptos app.",
+        ],
+        "init" => vec![
+            "usage: leptos_ui_kit init [--dry-run] [--json]",
+            "",
+            "Creates components.json and the minimal app-owned source, CSS, and installer state files.",
+        ],
+        "migrate" => vec![
+            "usage: leptos_ui_kit migrate state-dir <path> [--dry-run] [--json]",
+            "",
+            "Moves installer state and baselines to a new configured state.dir.",
+        ],
+        "sync" => vec![
+            "usage: leptos_ui_kit sync [--dry-run] [--json]",
+            "",
+            "Reconciles installed source, CSS, state, and baselines with components.json.",
+        ],
+        "view" => vec![
+            "usage: leptos_ui_kit view <item> [--source] [--json]",
+            "",
+            "Shows a built-in registry item and optionally its source files.",
+        ],
+        _ => return Err(usage()),
+    };
+    Ok(lines.join("\n"))
+}
+
 fn current_dir() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -1993,6 +2078,17 @@ leptos_router = "0.9.0-alpha"
         .expect_err("tailwind flag should be unsupported");
 
         assert!(error.contains("unsupported flag for view"));
+    }
+
+    #[test]
+    fn help_and_version_flags_return_success() {
+        run(vec![OsString::from("--help")], Path::new(".")).expect("top-level help");
+        run(vec![OsString::from("--version")], Path::new(".")).expect("version");
+        run(
+            vec![OsString::from("migrate"), OsString::from("--help")],
+            Path::new("."),
+        )
+        .expect("command help");
     }
 
     #[test]
