@@ -11,17 +11,17 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, RegistryItem, SCHEMA_VERSION,
-    canonical_components_json, components_config_to_json, components_config_with_desired_item,
-    desired_builtin_button_item, desired_builtin_collapsible_item, desired_builtin_dialog_item,
-    desired_builtin_tabs_item, load_built_in_registry_item, parse_components_json_str,
-    read_built_in_registry_source,
+    CargoPlanEntry, ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, RegistryItem,
+    SCHEMA_VERSION, canonical_kit_json, desired_builtin_button_item,
+    desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_tabs_item,
+    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
+    parse_kit_json_str, read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const LOCK_FILE_NAME: &str = "components.lock.json";
-const WRITE_LOCK_FILE_NAME: &str = ".components.lock";
+pub const DEFAULT_KIT_LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+pub const DEFAULT_KIT_WRITE_LOCK_PATH: &str = "src/components/ui/_kit/.write.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -325,7 +325,7 @@ impl InstallLock {
     }
 
     pub fn validate(&self) -> Result<(), CodegenError> {
-        self.validate_at_path(Path::new(LOCK_FILE_NAME))
+        self.validate_at_path(Path::new(DEFAULT_KIT_LOCK_PATH))
     }
 
     pub fn validate_at_path(&self, path: &Path) -> Result<(), CodegenError> {
@@ -427,8 +427,8 @@ pub struct InstalledStyleBlock {
     pub generated_hash: String,
 }
 
-pub fn install_lock_path(_config: &ComponentsConfig) -> String {
-    LOCK_FILE_NAME.to_owned()
+pub fn install_lock_path(_config: &KitConfig) -> String {
+    DEFAULT_KIT_LOCK_PATH.to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,9 +465,9 @@ pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
     let mut files = Vec::new();
     let mut changes = Vec::new();
 
-    plan_components_json(project_root, &mut files, &mut changes)?;
-    let config_content = planned_or_existing_components_config_content(project_root, &files)?;
-    let config = parse_components_json_str(&config_content)?;
+    plan_kit_json(project_root, &mut files, &mut changes)?;
+    let config_content = planned_or_existing_kit_config_content(project_root, &files)?;
+    let config = parse_kit_json_str(&config_content)?;
     plan_stylesheet(project_root, &mut files, &mut changes, &config)?;
     plan_index_html(project_root, &mut files, &mut changes, &config)?;
     plan_component_modules(project_root, &mut files, &mut changes)?;
@@ -500,9 +500,8 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
     let init_plan = plan_init(project_root)?;
-    let config_content =
-        planned_or_existing_components_config_content(project_root, &init_plan.files)?;
-    let config = parse_components_json_str(&config_content)?;
+    let config_content = planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
+    let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
     let mut files = init_plan
         .files
@@ -515,13 +514,13 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
 
-    let config = components_config_with_desired_item(config, desired_item)?;
-    let config_content = components_config_to_json(&config)?;
+    let config = kit_config_with_desired_item(config, desired_item)?;
+    let config_content = kit_config_to_json(&config)?;
     upsert_planned_file(
         project_root,
         &mut files,
         &mut changes,
-        "components.json",
+        DEFAULT_KIT_CONFIG_PATH,
         config_content.clone(),
         ChangeKind::UpdateFile,
         Some(&item_id),
@@ -551,9 +550,8 @@ pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codege
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     let init_plan = plan_init(project_root)?;
-    let config_content =
-        planned_or_existing_components_config_content(project_root, &init_plan.files)?;
-    let config = parse_components_json_str(&config_content)?;
+    let config_content = planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
+    let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
     let files = init_plan
         .files
@@ -580,7 +578,7 @@ fn plan_sync_from_config(
     project_root: &Path,
     mut files: Vec<PlannedFile>,
     mut changes: Vec<ChangeRecord>,
-    config: ComponentsConfig,
+    config: KitConfig,
     config_content: String,
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
@@ -651,7 +649,7 @@ fn plan_built_in_item(
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     lock: &mut InstallLock,
-    config: &ComponentsConfig,
+    config: &KitConfig,
     item: &leptos_ui_kit_registry::ResolvedRegistryItem,
 ) -> Result<String, CodegenError> {
     let item_id = built_in_item_id(&item.item.name);
@@ -885,7 +883,13 @@ pub struct WriteLock {
 
 impl WriteLock {
     pub fn acquire(project_root: &Path) -> Result<Self, CodegenError> {
-        let lock_path = project_root.join(WRITE_LOCK_FILE_NAME);
+        let lock_path = project_root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| CodegenError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
 
         match OpenOptions::new()
             .create_new(true)
@@ -943,7 +947,7 @@ pub fn write_file_atomic(
 }
 
 pub fn parse_install_lock_str(input: &str) -> Result<InstallLock, CodegenError> {
-    parse_install_lock_str_at_path(input, Path::new(LOCK_FILE_NAME))
+    parse_install_lock_str_at_path(input, Path::new(DEFAULT_KIT_LOCK_PATH))
 }
 
 pub fn parse_install_lock_str_at_path(
@@ -960,7 +964,7 @@ pub fn parse_install_lock_str_at_path(
 }
 
 pub fn lock_to_json(lock: &InstallLock) -> Result<String, CodegenError> {
-    lock_to_json_at_path(lock, Path::new(LOCK_FILE_NAME))
+    lock_to_json_at_path(lock, Path::new(DEFAULT_KIT_LOCK_PATH))
 }
 
 pub fn lock_to_json_at_path(lock: &InstallLock, path: &Path) -> Result<String, CodegenError> {
@@ -1215,15 +1219,17 @@ fn planned_or_existing_content(
     read_optional_to_string(&project_root.join(logical_path))
 }
 
-fn planned_or_existing_components_config_content(
+fn planned_or_existing_kit_config_content(
     project_root: &Path,
     files: &[PlannedFile],
 ) -> Result<String, CodegenError> {
-    if let Some(content) = planned_or_existing_content(files, project_root, "components.json")? {
+    if let Some(content) =
+        planned_or_existing_content(files, project_root, DEFAULT_KIT_CONFIG_PATH)?
+    {
         return Ok(content);
     }
 
-    Ok(canonical_components_json()?)
+    Ok(canonical_kit_json()?)
 }
 
 fn lock_file_write_paths(changes: &[ChangeRecord]) -> Vec<&str> {
@@ -1250,7 +1256,7 @@ fn tracked_file_lock<'a>(
     item_id: &str,
     logical_path: &str,
 ) -> Result<&'a InstalledFile, CodegenError> {
-    let path = PathBuf::from(LOCK_FILE_NAME);
+    let path = PathBuf::from(DEFAULT_KIT_LOCK_PATH);
     let item = lock
         .items
         .get(item_id)
@@ -1282,7 +1288,7 @@ fn tracked_style_generated_hash(
         );
     }
 
-    let path = PathBuf::from(LOCK_FILE_NAME);
+    let path = PathBuf::from(DEFAULT_KIT_LOCK_PATH);
     let item = lock
         .items
         .get(item_id)
@@ -1410,7 +1416,7 @@ fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        "components.json" | "components.lock.json" | "index.html" | "src/components/mod.rs"
+        DEFAULT_KIT_CONFIG_PATH | DEFAULT_KIT_LOCK_PATH | "index.html" | "src/components/mod.rs"
     ) || is_allowed_stylesheet_path(path)
         || path.starts_with("src/components/ui/")
 }
@@ -1419,23 +1425,23 @@ fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
 }
 
-fn plan_components_json(
+fn plan_kit_json(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
 ) -> Result<(), CodegenError> {
-    let path = project_root.join("components.json");
+    let path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
     if path.is_file() {
-        parse_components_json_str(&read_to_string(&path)?)?;
+        parse_kit_json_str(&read_to_string(&path)?)?;
         return Ok(());
     }
 
     push_file_plan(
         files,
         changes,
-        "components.json",
+        DEFAULT_KIT_CONFIG_PATH,
         PlannedFileAction::Create,
-        canonical_components_json()?,
+        canonical_kit_json()?,
         ChangeKind::CreateFile,
     );
     Ok(())
@@ -1445,7 +1451,7 @@ fn plan_stylesheet(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    config: &ComponentsConfig,
+    config: &KitConfig,
 ) -> Result<(), CodegenError> {
     let css_path = config.styles.css.as_str();
     let path = project_root.join(css_path);
@@ -1468,7 +1474,7 @@ fn plan_index_html(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    config: &ComponentsConfig,
+    config: &KitConfig,
 ) -> Result<(), CodegenError> {
     let path = project_root.join("index.html");
     let html = read_to_string(&path)?;
@@ -1753,8 +1759,8 @@ fn plan_empty_state(
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
 ) -> Result<(), CodegenError> {
-    let config_content = planned_or_existing_components_config_content(project_root, files)?;
-    let config = parse_components_json_str(&config_content)?;
+    let config_content = planned_or_existing_kit_config_content(project_root, files)?;
+    let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
     let path = project_root.join(&state_path);
     if path.is_file() {
@@ -1818,7 +1824,7 @@ mod tests {
             CommandEnvelope::new("add", CommandStatus::Planned, DemoData { value: "ok" })
                 .with_diagnostics(vec![
                     Diagnostic::new(DiagnosticLevel::Warning, "demo.warning", "heads up")
-                        .with_path("components.json")
+                        .with_path(DEFAULT_KIT_CONFIG_PATH)
                         .with_suggestion("Run leptos_ui_kit init."),
                 ])
                 .with_changes(vec![
@@ -1850,7 +1856,11 @@ mod tests {
         let plan = plan_init(root).expect("plan init");
 
         assert_eq!(plan.files.len(), 6);
-        assert!(plan.files.iter().any(|file| file.path == "components.json"));
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == DEFAULT_KIT_CONFIG_PATH)
+        );
         assert!(plan.files.iter().any(|file| file.path == "styles/kit.css"));
         assert!(plan.files.iter().any(|file| file.path == "index.html"));
         assert!(
@@ -1861,16 +1871,16 @@ mod tests {
         assert!(
             plan.files
                 .iter()
-                .any(|file| file.path == "components.lock.json")
+                .any(|file| file.path == DEFAULT_KIT_LOCK_PATH)
         );
-        assert!(!root.join("components.json").exists());
+        assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
     }
 
     #[test]
     fn init_plan_rejects_invalid_existing_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
-        fs::write(root.join("components.json"), "{\"tailwind\":true}\n").expect("write config");
+        write_kit_config(root, "{\"tailwind\":true}\n");
         fs::write(
             root.join("index.html"),
             "<html><head></head><body></body></html>\n",
@@ -1887,13 +1897,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
-        let config = canonical_components_json()
-            .expect("canonical config")
-            .replace(
-                "\"css\": \"styles/kit.css\"",
-                "\"css\": \"styles/custom.css\"",
-            );
-        fs::write(root.join("components.json"), config).expect("write config");
+        let config = canonical_kit_json().expect("canonical config").replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/custom.css\"",
+        );
+        write_kit_config(root, config);
         fs::write(
             root.join("index.html"),
             "<html><head></head><body></body></html>\n",
@@ -1930,12 +1938,12 @@ mod tests {
         let plan = apply_init(root).expect("apply init");
 
         assert!(!plan.is_empty());
-        assert!(root.join("components.json").is_file());
+        assert!(root.join(DEFAULT_KIT_CONFIG_PATH).is_file());
         assert!(root.join("styles/kit.css").is_file());
         assert!(root.join("src/components/mod.rs").is_file());
         assert!(root.join("src/components/ui/mod.rs").is_file());
-        assert!(root.join("components.lock.json").is_file());
-        assert!(!root.join(".components.lock").exists());
+        assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
+        assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
         assert!(
             fs::read_to_string(root.join("index.html"))
                 .expect("read index")
@@ -2072,10 +2080,10 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
-        assert!(paths.contains(&"components.lock.json"));
+        assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
         assert_eq!(plan.cargo_plan.len(), 2);
         assert!(!root.join("src/components/ui/button.rs").exists());
-        assert!(root.join("components.lock.json").is_file());
+        assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
     }
 
     #[test]
@@ -2083,13 +2091,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
-        let config = canonical_components_json()
-            .expect("canonical config")
-            .replace(
-                "\"css\": \"styles/kit.css\"",
-                "\"css\": \"styles/custom.css\"",
-            );
-        fs::write(root.join("components.json"), config).expect("write config");
+        let config = canonical_kit_json().expect("canonical config").replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/custom.css\"",
+        );
+        write_kit_config(root, config);
         fs::write(
             root.join("index.html"),
             "<html><head></head><body></body></html>\n",
@@ -2125,8 +2131,8 @@ mod tests {
         let mut files = Vec::new();
         let mut changes = Vec::new();
         let mut lock = InstallLock::empty(hash_bytes(b"components"));
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
         let item = nested_registry_item();
@@ -2182,18 +2188,18 @@ mod tests {
                 .contains("/* leptos-ui-kit:start button */")
         );
         let lock = parse_install_lock_str_at_path(
-            &fs::read_to_string(root.join("components.lock.json")).expect("read lock"),
-            Path::new("components.lock.json"),
+            &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read lock"),
+            Path::new(DEFAULT_KIT_LOCK_PATH),
         )
         .expect("parse lock");
         assert!(lock.items.contains_key("builtin:button"));
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].item_name(), "button");
-        assert!(!root.join(".components.lock").exists());
+        assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
     }
 
     #[test]
@@ -2219,7 +2225,7 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
-        assert!(paths.contains(&"components.lock.json"));
+        assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
     }
@@ -2300,18 +2306,20 @@ mod tests {
         assert!(matches!(error, CodegenError::UnsafePatch { .. }));
     }
 
+    fn write_kit_config(root: &Path, config: impl AsRef<[u8]>) {
+        let path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        fs::create_dir_all(path.parent().expect("kit config parent")).expect("create kit dir");
+        fs::write(path, config).expect("write config");
+    }
+
     fn write_desired_button_config(root: &Path) {
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
-        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+        let config = kit_config_with_desired_item(config, desired_builtin_button_item())
             .expect("add desired item");
-        fs::write(
-            root.join("components.json"),
-            components_config_to_json(&config).expect("serialize config"),
-        )
-        .expect("write config");
+        write_kit_config(root, kit_config_to_json(&config).expect("serialize config"));
     }
 
     #[test]
@@ -2446,13 +2454,13 @@ mod tests {
     #[test]
     fn path_safety_accepts_mvp_paths() {
         let paths = vec![
-            "components.json".to_owned(),
+            DEFAULT_KIT_CONFIG_PATH.to_owned(),
             "index.html".to_owned(),
             "styles/kit.css".to_owned(),
             "src/components/mod.rs".to_owned(),
             "src/components/ui/button.rs".to_owned(),
             "src/components/ui/nested/root.rs".to_owned(),
-            "components.lock.json".to_owned(),
+            DEFAULT_KIT_LOCK_PATH.to_owned(),
         ];
 
         validate_planned_write_paths(&paths).expect("paths should pass");
@@ -2521,14 +2529,14 @@ mod tests {
         {
             let _lock = WriteLock::acquire(root).expect("lock");
             write_file_atomic(root, "styles/kit.css", b":root {}\n").expect("write css");
-            assert!(root.join(".components.lock").exists());
+            assert!(root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
         }
 
         assert_eq!(
             fs::read_to_string(root.join("styles/kit.css")).expect("read css"),
             ":root {}\n"
         );
-        assert!(!root.join(".components.lock").exists());
+        assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
     }
 
     fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {

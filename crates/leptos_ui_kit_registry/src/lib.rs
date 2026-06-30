@@ -7,15 +7,15 @@ mod detect;
 mod item;
 
 pub use config::{
-    COMPONENTS_SCHEMA_URL, ComponentsConfig, ConfigError, DEFAULT_CSS_PATH, DesiredItemConfig,
-    DesiredItemName, InstallConfig, InstallRoots, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION,
-    LeptosConfig, NormalizeOptions, NormalizedProjectConfig, ProjectConfig, ProjectKind,
-    RegistryConfig, RegistrySource, RenderMode, SCHEMA_VERSION, StylesConfig, StylesMode,
-    TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig, WorkspaceMode,
-    canonical_components_config, canonical_components_json, canonical_tool_config,
-    components_config_to_json, components_config_with_desired_item, desired_builtin_button_item,
-    desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_tabs_item,
-    normalize_single_crate_project, parse_components_json_str,
+    ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_KIT_DIR, DEFAULT_UI_DIR,
+    DesiredItemConfig, DesiredItemName, InstallConfig, InstallRoots, KIT_SCHEMA_URL, KitConfig,
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, LeptosConfig, NormalizeOptions, NormalizedProjectConfig,
+    ProjectConfig, ProjectKind, RegistryConfig, RegistrySource, RenderMode, SCHEMA_VERSION,
+    StylesConfig, StylesMode, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
+    ToolSourceConfig, WorkspaceMode, canonical_kit_config, canonical_kit_json,
+    canonical_tool_config, desired_builtin_button_item, desired_builtin_collapsible_item,
+    desired_builtin_dialog_item, desired_builtin_tabs_item, kit_config_to_json,
+    kit_config_with_desired_item, normalize_single_crate_project, parse_kit_json_str,
 };
 pub use detect::{
     DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,

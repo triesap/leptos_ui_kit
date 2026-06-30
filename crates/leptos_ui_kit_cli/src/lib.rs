@@ -10,15 +10,16 @@ use std::{
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallLock,
-    InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync,
-    extract_managed_css_block, hash_content_bytes, install_lock_path,
+    AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
+    InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add,
+    apply_init, apply_sync, extract_managed_css_block, hash_content_bytes, install_lock_path,
     parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, DEFAULT_CSS_PATH, DependencyRequirement, DependencyStatus,
-    InfoOutput, ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
-    load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
+    CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DependencyRequirement,
+    DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem, build_info_output,
+    detect_cargo_plan_requirements, load_built_in_registry_item, load_registry_item,
+    read_built_in_registry_source,
 };
 use serde::Serialize;
 
@@ -572,7 +573,7 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
         registry_available: load_built_in_registry_item("button").is_ok(),
         installed_lock: read_installed_lock(
             &output.detected.project_root,
-            output.components_config.as_ref(),
+            output.kit_config.as_ref(),
         ),
     };
 
@@ -673,13 +674,13 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 "project",
                 "supported Trunk CSR project detected",
             ));
-            if info.components_config.is_some() {
-                checks.push(DoctorCheck::pass("config", "components.json is valid"));
+            if info.kit_config.is_some() {
+                checks.push(DoctorCheck::pass("config", "kit.json is valid"));
             } else {
                 checks.push(strict_check(
                     strict,
                     "config",
-                    "components.json is missing; run leptos_ui_kit init",
+                    "kit.json is missing; run leptos_ui_kit init",
                 ));
             }
 
@@ -698,7 +699,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 info.detected.dependency_plan.leptos_router.status,
             );
 
-            checks.extend(lock_checks(cwd, strict, info.components_config.as_ref()));
+            checks.extend(lock_checks(cwd, strict, info.kit_config.as_ref()));
             checks.extend(stylesheet_checks(cwd, strict, &info));
             checks.extend(registry_dependency_checks(cwd, strict, &info));
         }
@@ -822,15 +823,11 @@ fn strict_check(strict: bool, name: impl Into<String>, message: impl Into<String
     }
 }
 
-fn lock_checks(
-    cwd: &Path,
-    strict: bool,
-    components_config: Option<&ComponentsConfig>,
-) -> Vec<DoctorCheck> {
+fn lock_checks(cwd: &Path, strict: bool, kit_config: Option<&KitConfig>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let lock_logical_path = components_config
+    let lock_logical_path = kit_config
         .map(install_lock_path)
-        .unwrap_or_else(|| "components.lock.json".to_owned());
+        .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned());
     let lock_path = cwd.join(&lock_logical_path);
     if !lock_path.is_file() {
         checks.push(strict_check(
@@ -864,7 +861,7 @@ fn lock_checks(
 
     checks.push(DoctorCheck::pass("lock", "install lock is valid"));
     checks.push(compare_config_hash(cwd, strict, &lock));
-    if let Some(config) = components_config {
+    if let Some(config) = kit_config {
         checks.extend(compare_desired_items(
             config,
             &lock,
@@ -901,7 +898,7 @@ fn lock_checks(
 fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let css_logical_path = info
-        .components_config
+        .kit_config
         .as_ref()
         .map(|config| config.styles.css.as_str())
         .unwrap_or(DEFAULT_CSS_PATH);
@@ -982,7 +979,7 @@ fn registry_dependency_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Ve
 fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
     let mut cargo_plan = Vec::new();
 
-    if let Some(config) = info.components_config.as_ref() {
+    if let Some(config) = info.kit_config.as_ref() {
         for item in &config.items {
             if let Ok(registry_item) = load_built_in_registry_item(item.item_name()) {
                 merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
@@ -991,7 +988,7 @@ fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
     }
 
     if cargo_plan.is_empty() {
-        if let Some(lock) = read_installed_lock(cwd, info.components_config.as_ref()) {
+        if let Some(lock) = read_installed_lock(cwd, info.kit_config.as_ref()) {
             for item in lock.items.values() {
                 if let Ok(registry_item) = load_built_in_registry_item(&item.name) {
                     merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
@@ -1052,16 +1049,16 @@ fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) 
 }
 
 fn compare_config_hash(cwd: &Path, strict: bool, lock: &InstallLock) -> DoctorCheck {
-    let path = cwd.join("components.json");
+    let path = cwd.join(DEFAULT_KIT_CONFIG_PATH);
     match fs::read(&path) {
         Ok(content) if hash_content_bytes(&content) == lock.project.config_hash => {
-            DoctorCheck::pass("config_hash", "components.json hash matches install lock")
+            DoctorCheck::pass("config_hash", "kit.json hash matches install lock")
                 .with_path(path.display().to_string())
         }
         Ok(_) => strict_check(
             strict,
             "config_hash",
-            "components.json hash differs from install lock",
+            "kit.json hash differs from install lock",
         )
         .with_path(path.display().to_string()),
         Err(error) => DoctorCheck::fail("config_hash", format!("failed to read config: {error}"))
@@ -1070,7 +1067,7 @@ fn compare_config_hash(cwd: &Path, strict: bool, lock: &InstallLock) -> DoctorCh
 }
 
 fn compare_desired_items(
-    config: &ComponentsConfig,
+    config: &KitConfig,
     lock: &InstallLock,
     strict: bool,
     lock_logical_path: &str,
@@ -1095,7 +1092,7 @@ fn compare_desired_items(
                     "desired_item",
                     format!("desired item {desired_id} is not installed"),
                 )
-                .with_path("components.json"),
+                .with_path(DEFAULT_KIT_CONFIG_PATH),
             );
         }
     }
@@ -1106,7 +1103,7 @@ fn compare_desired_items(
                 strict_check(
                     strict,
                     "desired_item",
-                    format!("installed item {installed_id} is not declared in components.json"),
+                    format!("installed item {installed_id} is not declared in kit.json"),
                 )
                 .with_path(lock_logical_path),
             );
@@ -1376,13 +1373,10 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
         .collect()
 }
 
-fn read_installed_lock(
-    project_root: &Path,
-    components_config: Option<&ComponentsConfig>,
-) -> Option<InstallLock> {
-    let state_logical_path = components_config
+fn read_installed_lock(project_root: &Path, kit_config: Option<&KitConfig>) -> Option<InstallLock> {
+    let state_logical_path = kit_config
         .map(install_lock_path)
-        .unwrap_or_else(|| "components.lock.json".to_owned());
+        .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned());
     let path = project_root.join(&state_logical_path);
     let input = fs::read_to_string(path).ok()?;
     parse_install_lock_str_at_path(&input, Path::new(&state_logical_path)).ok()
@@ -1401,10 +1395,10 @@ fn help_text() -> String {
         "",
         "commands:",
         "  info                 inspect a supported Trunk CSR Leptos app",
-        "  init                 create components.json and kit-managed app files",
+        "  init                 create src/components/ui/_kit/kit.json and kit-managed app files",
         "  view <item>          show a registry item",
         "  add <item>           add a registry item to the app",
-        "  sync                 reconcile installed items with components.json",
+        "  sync                 reconcile installed items with src/components/ui/_kit/kit.json",
         "  doctor               validate generated source, CSS, lock metadata, and dependencies",
         "",
         "global options:",
@@ -1422,7 +1416,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "add" => vec![
             "usage: leptos_ui_kit add <item> [--dry-run] [--json]",
             "",
-            "Adds a built-in registry item and updates components.json, components.lock.json, generated source, and CSS.",
+            "Adds a built-in registry item and updates src/components/ui/_kit/kit.json, src/components/ui/_kit/kit.lock.json, generated source, and CSS.",
         ],
         "doctor" => vec![
             "usage: leptos_ui_kit doctor [--strict] [--check] [--trunk-build] [--json]",
@@ -1437,12 +1431,12 @@ fn command_help(command: &str) -> Result<String, String> {
         "init" => vec![
             "usage: leptos_ui_kit init [--dry-run] [--json]",
             "",
-            "Creates components.json, components.lock.json, and the minimal app-owned source and CSS files.",
+            "Creates src/components/ui/_kit/kit.json, src/components/ui/_kit/kit.lock.json, and the minimal app-owned source and CSS files.",
         ],
         "sync" => vec![
             "usage: leptos_ui_kit sync [--dry-run] [--json]",
             "",
-            "Reconciles installed source, CSS, and components.lock.json with components.json.",
+            "Reconciles installed source, CSS, and src/components/ui/_kit/kit.lock.json with src/components/ui/_kit/kit.json.",
         ],
         "view" => vec![
             "usage: leptos_ui_kit view <item> [--source] [--json]",
@@ -1465,8 +1459,8 @@ mod tests {
 
     use leptos_ui_kit_codegen::plan_init;
     use leptos_ui_kit_registry::{
-        components_config_to_json, components_config_with_desired_item,
-        desired_builtin_button_item, parse_components_json_str,
+        desired_builtin_button_item, kit_config_to_json, kit_config_with_desired_item,
+        parse_kit_json_str,
     };
     use tempfile::tempdir;
 
@@ -1568,8 +1562,8 @@ leptos_router = "0.9.0-alpha"
         .expect("render");
         assert!(output.contains("\"command\": \"init\""));
         assert!(output.contains("\"status\": \"planned\""));
-        assert!(output.contains("\"path\": \"components.json\""));
-        assert!(!root.join("components.json").exists());
+        assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.json\""));
+        assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
     }
 
     #[test]
@@ -1585,8 +1579,8 @@ leptos_router = "0.9.0-alpha"
 
         run(vec![OsString::from("init")], root).expect("run init");
 
-        assert!(root.join("components.json").is_file());
-        assert!(root.join("components.lock.json").is_file());
+        assert!(root.join(DEFAULT_KIT_CONFIG_PATH).is_file());
+        assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
     }
 
     #[test]
@@ -1624,7 +1618,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
-        assert!(output.contains("\"path\": \"components.lock.json\""));
+        assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.lock.json\""));
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -1642,7 +1636,7 @@ leptos_router = "0.9.0-alpha"
 
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
         assert!(root.join("src/components/ui/button.rs").is_file());
-        assert!(root.join("components.lock.json").is_file());
+        assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
 
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run second add");
         let output = render_add_plan(
@@ -1797,9 +1791,7 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.desired_item\""));
-        assert!(
-            output.contains("installed item builtin:button is not declared in components.json")
-        );
+        assert!(output.contains("installed item builtin:button is not declared in kit.json"));
     }
 
     #[test]
@@ -1808,7 +1800,11 @@ leptos_router = "0.9.0-alpha"
         let root = dir.path();
         create_doctor_project(root);
         init_git(root);
-        fs::write(root.join(".gitignore"), "/components.lock.json\n").expect("write gitignore");
+        fs::write(
+            root.join(".gitignore"),
+            "/src/components/ui/_kit/kit.lock.json\n",
+        )
+        .expect("write gitignore");
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
@@ -1818,7 +1814,11 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.git_metadata\""));
-        assert!(output.contains("installer metadata components.lock.json is ignored by Git"));
+        assert!(
+            output.contains(
+                "installer metadata src/components/ui/_kit/kit.lock.json is ignored by Git"
+            )
+        );
     }
 
     #[test]
@@ -1847,7 +1847,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
-        let lock_path = root.join("components.lock.json");
+        let lock_path = root.join(DEFAULT_KIT_LOCK_PATH);
         let mut lock: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&lock_path).expect("read lock"))
                 .expect("parse lock");
@@ -2083,28 +2083,28 @@ leptos_router = "0.9.0-alpha"
     }
 
     fn write_desired_button_config(root: &Path) {
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
-        let config = components_config_with_desired_item(config, desired_builtin_button_item())
+        let config = kit_config_with_desired_item(config, desired_builtin_button_item())
             .expect("add desired item");
         fs::write(
-            root.join("components.json"),
-            components_config_to_json(&config).expect("serialize config"),
+            root.join(DEFAULT_KIT_CONFIG_PATH),
+            kit_config_to_json(&config).expect("serialize config"),
         )
         .expect("write config");
     }
 
     fn write_empty_items_config(root: &Path) {
-        let mut config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
+        let mut config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
         config.items.clear();
         fs::write(
-            root.join("components.json"),
-            components_config_to_json(&config).expect("serialize config"),
+            root.join(DEFAULT_KIT_CONFIG_PATH),
+            kit_config_to_json(&config).expect("serialize config"),
         )
         .expect("write config");
     }

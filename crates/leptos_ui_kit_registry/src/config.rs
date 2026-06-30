@@ -7,13 +7,16 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: &str = "0.9.0-alpha";
-pub const COMPONENTS_SCHEMA_URL: &str =
-    "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/components.schema.json";
+pub const KIT_SCHEMA_URL: &str =
+    "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/kit.schema.json";
 pub const LEPTOS_VERSION: &str = "0.9.0-alpha";
 pub const LEPTOS_ROUTER_VERSION: &str = "0.9.0-alpha";
 pub const TOOL_PACKAGE: &str = "leptos_ui_kit_cli";
 pub const TOOL_BINARY: &str = "leptos_ui_kit";
 pub const TOOL_GIT_URL: &str = "https://github.com/triesap/leptos_ui_kit";
+pub const DEFAULT_UI_DIR: &str = "src/components/ui";
+pub const DEFAULT_KIT_DIR: &str = "src/components/ui/_kit";
+pub const DEFAULT_KIT_CONFIG_PATH: &str = "src/components/ui/_kit/kit.json";
 pub const DEFAULT_CSS_PATH: &str = "styles/kit.css";
 
 #[derive(Debug)]
@@ -50,35 +53,35 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Parse(error) => write!(f, "failed to parse components.json: {error}"),
-            Self::Serialize(error) => write!(f, "failed to serialize components.json: {error}"),
+            Self::Parse(error) => write!(f, "failed to parse kit.json: {error}"),
+            Self::Serialize(error) => write!(f, "failed to serialize kit.json: {error}"),
             Self::InvalidValue {
                 field,
                 expected,
                 actual,
             } => write!(
                 f,
-                "invalid components.json value for {field}: expected {expected}, got {actual}"
+                "invalid kit.json value for {field}: expected {expected}, got {actual}"
             ),
             Self::PathMustBeRelative { field, value } => {
-                write!(f, "components.json path {field} must be relative: {value}")
+                write!(f, "kit.json path {field} must be relative: {value}")
             }
             Self::PathTraversal { field, value } => {
                 write!(
                     f,
-                    "components.json path {field} must not traverse parent segments: {value}"
+                    "kit.json path {field} must not traverse parent segments: {value}"
                 )
             }
             Self::UnsafePathSegment { field, value } => {
                 write!(
                     f,
-                    "components.json path {field} contains an unsafe segment: {value}"
+                    "kit.json path {field} contains an unsafe segment: {value}"
                 )
             }
             Self::PathOverlap { field, value } => {
                 write!(
                     f,
-                    "components.json path {field} overlaps a reserved target: {value}"
+                    "kit.json path {field} overlaps a reserved target: {value}"
                 )
             }
             Self::MissingToolProvenance { package, binary } => {
@@ -101,7 +104,7 @@ impl From<serde_json::Error> for ConfigError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ComponentsConfig {
+pub struct KitConfig {
     #[serde(rename = "$schema")]
     pub schema: String,
     pub schema_version: String,
@@ -114,9 +117,9 @@ pub struct ComponentsConfig {
     pub items: Vec<DesiredItemConfig>,
 }
 
-impl ComponentsConfig {
+impl KitConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        expect_string("$schema", COMPONENTS_SCHEMA_URL, &self.schema)?;
+        expect_string("$schema", KIT_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
         self.tool.validate()?;
         self.project.validate()?;
@@ -364,10 +367,10 @@ pub fn canonical_tool_config() -> Result<ToolConfig, ConfigError> {
     Ok(tool)
 }
 
-pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
+pub fn canonical_kit_config() -> Result<KitConfig, ConfigError> {
     let tool = canonical_tool_config()?;
-    let config = ComponentsConfig {
-        schema: COMPONENTS_SCHEMA_URL.to_owned(),
+    let config = KitConfig {
+        schema: KIT_SCHEMA_URL.to_owned(),
         schema_version: SCHEMA_VERSION.to_owned(),
         tool,
         project: ProjectConfig {
@@ -382,7 +385,7 @@ pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
             render_mode: RenderMode::Csr,
         },
         install: InstallConfig {
-            ui_dir: "src/components/ui".to_owned(),
+            ui_dir: DEFAULT_UI_DIR.to_owned(),
             ui_mod: "src/components/ui/mod.rs".to_owned(),
             components_mod: "src/components/mod.rs".to_owned(),
         },
@@ -399,10 +402,10 @@ pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
     Ok(config)
 }
 
-pub fn components_config_with_desired_item(
-    mut config: ComponentsConfig,
+pub fn kit_config_with_desired_item(
+    mut config: KitConfig,
     item: DesiredItemConfig,
-) -> Result<ComponentsConfig, ConfigError> {
+) -> Result<KitConfig, ConfigError> {
     if !config
         .items
         .iter()
@@ -469,25 +472,25 @@ fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), ConfigError> {
     }
 }
 
-pub fn canonical_components_json() -> Result<String, ConfigError> {
-    components_config_to_json(&canonical_components_config()?)
+pub fn canonical_kit_json() -> Result<String, ConfigError> {
+    kit_config_to_json(&canonical_kit_config()?)
 }
 
-pub fn components_config_to_json(config: &ComponentsConfig) -> Result<String, ConfigError> {
+pub fn kit_config_to_json(config: &KitConfig) -> Result<String, ConfigError> {
     config.validate()?;
     let mut output = serde_json::to_string_pretty(config).map_err(ConfigError::Serialize)?;
     output.push('\n');
     Ok(output)
 }
 
-pub fn parse_components_json_str(input: &str) -> Result<ComponentsConfig, ConfigError> {
-    let config: ComponentsConfig = serde_json::from_str(input)?;
+pub fn parse_kit_json_str(input: &str) -> Result<KitConfig, ConfigError> {
+    let config: KitConfig = serde_json::from_str(input)?;
     config.validate()?;
     Ok(config)
 }
 
 pub fn normalize_single_crate_project(
-    config: &ComponentsConfig,
+    config: &KitConfig,
     options: &NormalizeOptions,
 ) -> Result<NormalizedProjectConfig, ConfigError> {
     config.validate()?;
@@ -640,12 +643,12 @@ mod tests {
     use super::*;
 
     fn valid_config_json() -> String {
-        canonical_components_json().expect("serialize config")
+        canonical_kit_json().expect("serialize config")
     }
 
     #[test]
-    fn parses_canonical_components_json() {
-        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+    fn parses_canonical_kit_json() {
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse config");
 
         assert_eq!(config.schema_version, SCHEMA_VERSION);
         assert_eq!(config.tool.package, TOOL_PACKAGE);
@@ -661,8 +664,8 @@ mod tests {
 
     #[test]
     fn canonical_json_is_deterministic() {
-        let first = canonical_components_json().expect("serialize first");
-        let second = canonical_components_json().expect("serialize second");
+        let first = canonical_kit_json().expect("serialize first");
+        let second = canonical_kit_json().expect("serialize second");
 
         assert_eq!(first, second);
         assert!(first.ends_with('\n'));
@@ -676,9 +679,9 @@ mod tests {
 
     #[test]
     fn records_desired_builtin_button_item() {
-        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
-        let config = components_config_with_desired_item(config, desired_builtin_button_item())
-            .expect("add item");
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        let config =
+            kit_config_with_desired_item(config, desired_builtin_button_item()).expect("add item");
 
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].name, DesiredItemName::Button);
@@ -687,11 +690,11 @@ mod tests {
 
     #[test]
     fn desired_item_add_is_idempotent() {
-        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
-        let config = components_config_with_desired_item(config, desired_builtin_button_item())
-            .expect("add item");
-        let config = components_config_with_desired_item(config, desired_builtin_button_item())
-            .expect("add item");
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        let config =
+            kit_config_with_desired_item(config, desired_builtin_button_item()).expect("add item");
+        let config =
+            kit_config_with_desired_item(config, desired_builtin_button_item()).expect("add item");
 
         assert_eq!(config.items.len(), 1);
     }
@@ -700,7 +703,7 @@ mod tests {
     fn rejects_invalid_tool_rev() {
         let input = valid_config_json().replace("\"rev\": \"", "\"rev\": \"not-a-rev");
 
-        let error = parse_components_json_str(&input).expect_err("rev should fail");
+        let error = parse_kit_json_str(&input).expect_err("rev should fail");
 
         assert!(
             matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.rev")
@@ -714,7 +717,7 @@ mod tests {
             "\"url\": \"https://example.com/leptos_ui_kit\"",
         );
 
-        let error = parse_components_json_str(&input).expect_err("url should fail");
+        let error = parse_kit_json_str(&input).expect_err("url should fail");
 
         assert!(
             matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.url")
@@ -728,7 +731,7 @@ mod tests {
             r#""items": [{"name":"card","source":"builtin"}]"#,
         );
 
-        let error = parse_components_json_str(&input).expect_err("item should fail");
+        let error = parse_kit_json_str(&input).expect_err("item should fail");
 
         assert!(matches!(error, ConfigError::Parse(_)));
     }
@@ -740,7 +743,7 @@ mod tests {
             r#""items": [{"name":"button","source":"builtin"},{"name":"button","source":"builtin"}]"#,
         );
 
-        let error = parse_components_json_str(&input).expect_err("duplicate should fail");
+        let error = parse_kit_json_str(&input).expect_err("duplicate should fail");
 
         assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "items"));
     }
@@ -752,7 +755,7 @@ mod tests {
             "\"items\": [],\n  \"tailwind\": { \"css\": \"input.css\" }",
         );
 
-        let error = parse_components_json_str(&input).expect_err("unknown field should fail");
+        let error = parse_kit_json_str(&input).expect_err("unknown field should fail");
 
         assert!(matches!(error, ConfigError::Parse(_)));
     }
@@ -765,7 +768,7 @@ mod tests {
                 &format!("\"items\": [],\n  \"{field}\": true"),
             );
 
-            let error = parse_components_json_str(&input).expect_err("legacy field should fail");
+            let error = parse_kit_json_str(&input).expect_err("legacy field should fail");
 
             assert!(matches!(error, ConfigError::Parse(_)), "{field}");
         }
@@ -779,7 +782,7 @@ mod tests {
                 &format!("\"css\": \"styles/kit.css\",\n    \"{field}\": \"luk\""),
             );
 
-            let error = parse_components_json_str(&input).expect_err("prefix field should fail");
+            let error = parse_kit_json_str(&input).expect_err("prefix field should fail");
 
             assert!(matches!(error, ConfigError::Parse(_)), "{field}");
         }
@@ -790,7 +793,7 @@ mod tests {
         let input =
             valid_config_json().replace("\"renderMode\": \"csr\"", "\"renderMode\": \"hydrate\"");
 
-        let error = parse_components_json_str(&input).expect_err("hydrate should fail");
+        let error = parse_kit_json_str(&input).expect_err("hydrate should fail");
 
         assert!(matches!(error, ConfigError::Parse(_)));
     }
@@ -800,7 +803,7 @@ mod tests {
         let input =
             valid_config_json().replace("\"version\": \"0.9.0-alpha\"", "\"version\": \"0.8.17\"");
 
-        let error = parse_components_json_str(&input).expect_err("version should fail");
+        let error = parse_kit_json_str(&input).expect_err("version should fail");
 
         assert!(
             matches!(error, ConfigError::InvalidValue { field, .. } if field == "leptos.version")
@@ -814,7 +817,7 @@ mod tests {
             "\"css\": \"styles/generated.css\"",
         );
 
-        let config = parse_components_json_str(&input).expect("parse config");
+        let config = parse_kit_json_str(&input).expect("parse config");
 
         assert_eq!(config.styles.css, "styles/generated.css");
     }
@@ -824,7 +827,7 @@ mod tests {
         let input =
             valid_config_json().replace("\"css\": \"styles/kit.css\"", "\"css\": \"src/app.css\"");
 
-        let error = parse_components_json_str(&input).expect_err("css path should fail");
+        let error = parse_kit_json_str(&input).expect_err("css path should fail");
 
         assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "styles.css"));
     }
@@ -834,7 +837,7 @@ mod tests {
         let input = valid_config_json()
             .replace("\"css\": \"styles/kit.css\"", "\"css\": \"styles/kit.txt\"");
 
-        let error = parse_components_json_str(&input).expect_err("css path should fail");
+        let error = parse_kit_json_str(&input).expect_err("css path should fail");
 
         assert!(matches!(error, ConfigError::InvalidValue { field, .. } if field == "styles.css"));
     }
@@ -846,7 +849,7 @@ mod tests {
             "\"css\": \"styles/.kit.css\"",
         );
 
-        let error = parse_components_json_str(&input).expect_err("css path should fail");
+        let error = parse_kit_json_str(&input).expect_err("css path should fail");
 
         assert!(
             matches!(error, ConfigError::UnsafePathSegment { field, .. } if field == "styles.css")
@@ -858,14 +861,14 @@ mod tests {
         let input =
             valid_config_json().replace("\"css\": \"styles/kit.css\"", "\"css\": \"../app.css\"");
 
-        let error = parse_components_json_str(&input).expect_err("traversal should fail");
+        let error = parse_kit_json_str(&input).expect_err("traversal should fail");
 
         assert!(matches!(error, ConfigError::PathTraversal { field, .. } if field == "styles.css"));
     }
 
     #[test]
     fn normalizes_canonical_install_roots() {
-        let config = parse_components_json_str(&valid_config_json()).expect("parse config");
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse config");
         let normalized = normalize_single_crate_project(
             &config,
             &NormalizeOptions {

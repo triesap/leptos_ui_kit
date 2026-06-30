@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
 
 use crate::{
-    CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ComponentsConfig, ConfigError,
-    DEFAULT_CSS_PATH, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions,
+    CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
+    DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions,
     NormalizedProjectConfig, RenderMode, WorkspaceMode, normalize_single_crate_project,
-    parse_components_json_str,
+    parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -63,7 +63,7 @@ pub struct DetectedProject {
     pub css_file_path: PathBuf,
     pub render_mode: Option<RenderMode>,
     pub dependency_plan: DependencyPlan,
-    pub components_config_path: Option<PathBuf>,
+    pub kit_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +130,7 @@ pub enum DependencyStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfoOutput {
     pub detected: DetectedProject,
-    pub components_config: Option<ComponentsConfig>,
+    pub kit_config: Option<KitConfig>,
     pub normalized_config: Option<NormalizedProjectConfig>,
 }
 
@@ -167,16 +167,14 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         return Err(DetectionError::MissingIndexHtml(index_html_path));
     }
 
-    let components_config_path = project_root.join("components.json");
-    let components_config_path = components_config_path
-        .is_file()
-        .then_some(components_config_path);
-    let components_config = match components_config_path.as_ref() {
-        Some(path) => Some(parse_components_json_str(&read_to_string(path)?)?),
+    let kit_config_path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
+    let kit_config_path = kit_config_path.is_file().then_some(kit_config_path);
+    let kit_config = match kit_config_path.as_ref() {
+        Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
         None => None,
     };
     let css_file_path = project_root.join(
-        components_config
+        kit_config
             .as_ref()
             .map(|config| config.styles.css.as_str())
             .unwrap_or(DEFAULT_CSS_PATH),
@@ -194,7 +192,7 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         css_file_path,
         render_mode,
         dependency_plan,
-        components_config_path,
+        kit_config_path,
     })
 }
 
@@ -224,12 +222,12 @@ fn detect_workspace_mode(manifest: &TomlValue) -> Result<WorkspaceMode, Detectio
 pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionError> {
     let detected = detect_single_crate_project(project_root)?;
 
-    let components_config = match detected.components_config_path.as_ref() {
-        Some(path) => Some(parse_components_json_str(&read_to_string(path)?)?),
+    let kit_config = match detected.kit_config_path.as_ref() {
+        Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
         None => None,
     };
 
-    let normalized_config = match components_config.as_ref() {
+    let normalized_config = match kit_config.as_ref() {
         Some(config) => Some(normalize_single_crate_project(
             config,
             &NormalizeOptions {
@@ -241,7 +239,7 @@ pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionErr
 
     Ok(InfoOutput {
         detected,
-        components_config,
+        kit_config,
         normalized_config,
     })
 }
@@ -406,7 +404,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use crate::canonical_components_json;
+    use crate::canonical_kit_json;
     use tempfile::tempdir;
 
     fn write_homepage_fixture(root: &Path, features: &str) {
@@ -442,6 +440,12 @@ leptos_router = "0.9.0-alpha"
         .expect("write html");
     }
 
+    fn write_kit_config(root: &Path, config: impl AsRef<[u8]>) {
+        let path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        fs::create_dir_all(path.parent().expect("kit config parent")).expect("create kit dir");
+        fs::write(path, config).expect("write kit.json");
+    }
+
     #[test]
     fn detects_homepage_trunk_csr_project_shape() {
         let dir = tempdir().expect("tempdir");
@@ -463,7 +467,7 @@ leptos_router = "0.9.0-alpha"
             detected.dependency_plan.leptos_router.status,
             DependencyStatus::Satisfied
         );
-        assert_eq!(detected.components_config_path, None);
+        assert_eq!(detected.kit_config_path, None);
     }
 
     #[test]
@@ -632,19 +636,15 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
-    fn info_output_normalizes_components_config_when_present() {
+    fn info_output_normalizes_kit_config_when_present() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write_homepage_fixture(root, "\"csr\"");
-        fs::write(
-            root.join("components.json"),
-            canonical_components_json().expect("canonical config"),
-        )
-        .expect("write components.json");
+        write_kit_config(root, canonical_kit_json().expect("canonical config"));
 
         let info = build_info_output(root).expect("build info output");
 
-        assert!(info.components_config.is_some());
+        assert!(info.kit_config.is_some());
         let normalized = info.normalized_config.expect("normalized config");
         assert_eq!(normalized.render_mode, RenderMode::Csr);
         assert_eq!(
@@ -658,13 +658,11 @@ leptos_router = "0.9.0-alpha"
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write_homepage_fixture(root, "\"csr\"");
-        let config = canonical_components_json()
-            .expect("canonical config")
-            .replace(
-                "\"css\": \"styles/kit.css\"",
-                "\"css\": \"styles/custom.css\"",
-            );
-        fs::write(root.join("components.json"), config).expect("write components.json");
+        let config = canonical_kit_json().expect("canonical config").replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/custom.css\"",
+        );
+        write_kit_config(root, config);
 
         let info = build_info_output(root).expect("build info output");
 

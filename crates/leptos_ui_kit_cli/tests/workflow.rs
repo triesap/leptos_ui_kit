@@ -58,8 +58,12 @@ fn homepage_fixture_cli_workflow_smoke() {
     );
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());
     assert!(project.join("src/components/ui/tabs/root.rs").is_file());
-    assert!(project.join("components.lock.json").is_file());
-    assert!(!project.join("src/components/ui/_kit").exists());
+    assert!(project.join("src/components/ui/_kit/kit.json").is_file());
+    assert!(
+        project
+            .join("src/components/ui/_kit/kit.lock.json")
+            .is_file()
+    );
 }
 
 fn assert_cargo_check(project: &Path) {

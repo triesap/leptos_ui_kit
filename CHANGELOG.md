@@ -18,10 +18,11 @@ Semantic Versioning.
 - Add `ButtonType`, reactive `disabled`, and app class passthrough to the
   generated `Button`.
 - Expand generated button CSS tokens for app-owned theming.
-- Tighten `.leptos-ui` state hash validation and exact managed CSS block
-  doctor checks.
-- Add desired-state `components.json` items, `sync`, strict doctor checks for
-  desired/install drift, and the `cargo leptos_ui_kit` subcommand entrypoint.
+- Add `src/components/ui/_kit/kit.lock.json` hash validation and exact managed
+  CSS block doctor checks.
+- Add desired-state `src/components/ui/_kit/kit.json` items, `sync`, strict
+  doctor checks for desired/install drift, and the `cargo leptos_ui_kit`
+  subcommand entrypoint.
 - Add a Radroots-shaped workflow fixture that compiles the generated `Button`
   in a wasm Trunk CSR app.
 - Add dependency-plan metadata for pinned git/rev primitive dependencies without
@@ -33,13 +34,10 @@ Semantic Versioning.
 - Extend the workflow fixture to install Button, Collapsible, Tabs, and Dialog
   together, run `sync`, pass strict doctor, and compile for
   `wasm32-unknown-unknown`.
-- Change the canonical installer state directory to
-  `src/components/ui/_kit`, with strict `components.json` `state.dir`
-  validation and configurable init support.
+- Change canonical kit metadata to `src/components/ui/_kit/kit.json` and
+  `src/components/ui/_kit/kit.lock.json`.
 - Change the generated stylesheet default to `styles/kit.css`, allow
-  `components.json` to choose another safe CSS file under `styles/`, and emit
-  generated selectors and variables with the `kit` prefix.
-- Add `leptos_ui_kit migrate state-dir <path>` for explicit state and baseline
-  migrations.
+  `src/components/ui/_kit/kit.json` to choose another safe CSS file under
+  `styles/`, and emit generated selectors and variables with the `kit` prefix.
 - Add top-level and command-specific help plus `--version` output.
 - Keep generated `Button` option enums warning-clean for consumer binary apps.
