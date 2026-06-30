@@ -3,7 +3,7 @@
 //! Code generation and install-planning layer.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt, fs,
     fs::OpenOptions,
     io::Write,
@@ -11,18 +11,17 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, ConfigError, DEFAULT_STATE_DIR, RegistryError, RegistryItem,
-    SCHEMA_VERSION, canonical_components_json, components_config_to_json,
-    components_config_with_desired_item, desired_builtin_button_item,
-    desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_tabs_item,
-    load_built_in_registry_item, parse_components_json_str, read_built_in_registry_source,
+    CargoPlanEntry, ComponentsConfig, ConfigError, RegistryError, RegistryItem, SCHEMA_VERSION,
+    canonical_components_json, components_config_to_json, components_config_with_desired_item,
+    desired_builtin_button_item, desired_builtin_collapsible_item, desired_builtin_dialog_item,
+    desired_builtin_tabs_item, load_built_in_registry_item, parse_components_json_str,
+    read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const STATE_FILE_NAME: &str = "state.json";
-const STATE_LOCK_FILE_NAME: &str = "lock";
-const BASELINES_DIR_NAME: &str = "baselines";
+const LOCK_FILE_NAME: &str = "components.lock.json";
+const WRITE_LOCK_FILE_NAME: &str = ".components.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,8 +159,7 @@ pub enum ChangeKind {
     DeleteFile,
     CreateDir,
     UpdateCssBlock,
-    WriteState,
-    WriteBaseline,
+    WriteLockFile,
 }
 
 #[derive(Debug)]
@@ -172,12 +170,12 @@ pub enum CodegenError {
     },
     Config(ConfigError),
     Registry(RegistryError),
-    StateParse {
+    LockParse {
         path: PathBuf,
         source: serde_json::Error,
     },
-    StateSerialize(serde_json::Error),
-    InvalidState {
+    LockSerialize(serde_json::Error),
+    InvalidLock {
         path: PathBuf,
         reason: String,
     },
@@ -199,11 +197,11 @@ impl fmt::Display for CodegenError {
             Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
             Self::Config(error) => write!(f, "{error}"),
             Self::Registry(error) => write!(f, "{error}"),
-            Self::StateParse { path, source } => {
+            Self::LockParse { path, source } => {
                 write!(f, "failed to parse {}: {source}", path.display())
             }
-            Self::StateSerialize(error) => write!(f, "failed to serialize state: {error}"),
-            Self::InvalidState { path, reason } => {
+            Self::LockSerialize(error) => write!(f, "failed to serialize lock: {error}"),
+            Self::InvalidLock { path, reason } => {
                 write!(f, "invalid {}: {reason}", path.display())
             }
             Self::UnsafePatch { path, reason } => {
@@ -257,7 +255,7 @@ pub struct AddPlan {
     pub files: Vec<PlannedFile>,
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
-    pub state: InstallState,
+    pub lock: InstallLock,
 }
 
 impl AddPlan {
@@ -275,30 +273,12 @@ pub struct SyncPlan {
     pub files: Vec<PlannedFile>,
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
-    pub state: InstallState,
+    pub lock: InstallLock,
 }
 
 impl SyncPlan {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MigrateStateDirPlan {
-    pub project_root: PathBuf,
-    pub source_dir: String,
-    pub target_dir: String,
-    pub files: Vec<PlannedFile>,
-    pub delete_paths: Vec<String>,
-    pub changes: Vec<ChangeRecord>,
-    pub state: InstallState,
-}
-
-impl MigrateStateDirPlan {
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.delete_paths.is_empty()
     }
 }
 
@@ -319,21 +299,21 @@ pub enum PlannedFileAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InstallState {
+pub struct InstallLock {
     pub schema_version: String,
     pub kit_version: String,
-    pub project: InstallStateProject,
+    pub project: InstallLockProject,
     pub items: BTreeMap<String, InstalledItem>,
     pub files_by_path: BTreeMap<String, String>,
     pub style_blocks_by_id: BTreeMap<String, String>,
 }
 
-impl InstallState {
+impl InstallLock {
     pub fn empty(config_hash: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
             kit_version: SCHEMA_VERSION.to_owned(),
-            project: InstallStateProject {
+            project: InstallLockProject {
                 config_hash,
                 crate_root: ".".to_owned(),
                 kind: "single-crate-trunk-csr".to_owned(),
@@ -345,52 +325,52 @@ impl InstallState {
     }
 
     pub fn validate(&self) -> Result<(), CodegenError> {
-        self.validate_at_path(Path::new(STATE_FILE_NAME))
+        self.validate_at_path(Path::new(LOCK_FILE_NAME))
     }
 
     pub fn validate_at_path(&self, path: &Path) -> Result<(), CodegenError> {
         if self.schema_version != SCHEMA_VERSION {
-            return invalid_state(path, format!("schemaVersion must be {SCHEMA_VERSION}"));
+            return invalid_lock(path, format!("schemaVersion must be {SCHEMA_VERSION}"));
         }
         if self.project.crate_root != "." {
-            return invalid_state(path, "project.crateRoot must be .");
+            return invalid_lock(path, "project.crateRoot must be .");
         }
         if self.project.kind != "single-crate-trunk-csr" {
-            return invalid_state(path, "project.kind must be single-crate-trunk-csr");
+            return invalid_lock(path, "project.kind must be single-crate-trunk-csr");
         }
-        validate_state_hash(path, "project.configHash", &self.project.config_hash)?;
+        validate_lock_hash(path, "project.configHash", &self.project.config_hash)?;
 
         for (key, item) in &self.items {
             if key != &item.id {
-                return invalid_state(path, format!("item key {key} does not match item id"));
+                return invalid_lock(path, format!("item key {key} does not match item id"));
             }
             if item.source != "builtin" {
-                return invalid_state(path, "only builtin item state is supported");
+                return invalid_lock(path, "only builtin item lock entries are supported");
             }
             if item.version != SCHEMA_VERSION {
-                return invalid_state(path, format!("item version must be {SCHEMA_VERSION}"));
+                return invalid_lock(path, format!("item version must be {SCHEMA_VERSION}"));
             }
-            validate_state_hash(path, "items[].contentHash", &item.content_hash)?;
+            validate_lock_hash(path, "items[].contentHash", &item.content_hash)?;
             for file in &item.files {
-                validate_state_hash(path, "items[].files[].baselineHash", &file.baseline_hash)?;
-                validate_state_hash(
+                validate_lock_hash(path, "items[].files[].generatedHash", &file.generated_hash)?;
+                validate_lock_hash(
                     path,
                     "items[].files[].localHashAtInstall",
                     &file.local_hash_at_install,
                 )?;
             }
             for block in &item.style_blocks {
-                validate_state_hash(
+                validate_lock_hash(
                     path,
-                    "items[].styleBlocks[].baselineHash",
-                    &block.baseline_hash,
+                    "items[].styleBlocks[].generatedHash",
+                    &block.generated_hash,
                 )?;
             }
         }
 
         for (file_path, item_id) in &self.files_by_path {
             if !self.items.contains_key(item_id) {
-                return invalid_state(
+                return invalid_lock(
                     path,
                     format!("filesByPath entry {file_path} references missing item {item_id}"),
                 );
@@ -399,7 +379,7 @@ impl InstallState {
 
         for (block_id, item_id) in &self.style_blocks_by_id {
             if !self.items.contains_key(item_id) {
-                return invalid_state(
+                return invalid_lock(
                     path,
                     format!("styleBlocksById entry {block_id} references missing item {item_id}"),
                 );
@@ -412,7 +392,7 @@ impl InstallState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InstallStateProject {
+pub struct InstallLockProject {
     pub config_hash: String,
     pub crate_root: String,
     pub kind: String,
@@ -435,8 +415,7 @@ pub struct InstalledItem {
 pub struct InstalledFile {
     pub path: String,
     pub kind: String,
-    pub baseline_path: String,
-    pub baseline_hash: String,
+    pub generated_hash: String,
     pub local_hash_at_install: String,
 }
 
@@ -445,31 +424,11 @@ pub struct InstalledFile {
 pub struct InstalledStyleBlock {
     pub css_path: String,
     pub block_id: String,
-    pub baseline_path: String,
-    pub baseline_hash: String,
+    pub generated_hash: String,
 }
 
-pub fn install_state_path(config: &ComponentsConfig) -> String {
-    state_dir_child_path(&config.state.dir, STATE_FILE_NAME)
-}
-
-pub fn install_state_path_from_dir(state_dir: &str) -> String {
-    state_dir_child_path(state_dir, STATE_FILE_NAME)
-}
-
-fn state_baseline_path(config: &ComponentsConfig, safe_item_id: &str, target_path: &str) -> String {
-    state_dir_child_path(
-        &config.state.dir,
-        &format!("{BASELINES_DIR_NAME}/{safe_item_id}/{target_path}"),
-    )
-}
-
-fn state_dir_child_path(state_dir: &str, child_path: &str) -> String {
-    format!("{}/{child_path}", state_dir.trim_end_matches('/'))
-}
-
-fn state_dir_from_state_path(state_path: &str) -> &str {
-    state_path.rsplit_once('/').map_or("", |(dir, _)| dir)
+pub fn install_lock_path(_config: &ComponentsConfig) -> String {
+    LOCK_FILE_NAME.to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,17 +462,10 @@ impl UiModuleExport {
 }
 
 pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
-    plan_init_with_state_dir(project_root, None)
-}
-
-pub fn plan_init_with_state_dir(
-    project_root: &Path,
-    state_dir: Option<&str>,
-) -> Result<InitPlan, CodegenError> {
     let mut files = Vec::new();
     let mut changes = Vec::new();
 
-    plan_components_json(project_root, &mut files, &mut changes, state_dir)?;
+    plan_components_json(project_root, &mut files, &mut changes)?;
     let config_content = planned_or_existing_components_config_content(project_root, &files)?;
     let config = parse_components_json_str(&config_content)?;
     plan_stylesheet(project_root, &mut files, &mut changes, &config)?;
@@ -529,14 +481,7 @@ pub fn plan_init_with_state_dir(
 }
 
 pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
-    apply_init_with_state_dir(project_root, None)
-}
-
-pub fn apply_init_with_state_dir(
-    project_root: &Path,
-    state_dir: Option<&str>,
-) -> Result<InitPlan, CodegenError> {
-    let plan = plan_init_with_state_dir(project_root, state_dir)?;
+    let plan = plan_init(project_root)?;
     apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
@@ -558,7 +503,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     let config_content =
         planned_or_existing_components_config_content(project_root, &init_plan.files)?;
     let config = parse_components_json_str(&config_content)?;
-    let state_path = install_state_path(&config);
+    let state_path = install_lock_path(&config);
     let mut files = init_plan
         .files
         .into_iter()
@@ -593,7 +538,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         files: sync.files,
         changes: sync.changes,
         diagnostics: sync.diagnostics,
-        state: sync.state,
+        lock: sync.lock,
     })
 }
 
@@ -609,7 +554,7 @@ pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     let config_content =
         planned_or_existing_components_config_content(project_root, &init_plan.files)?;
     let config = parse_components_json_str(&config_content)?;
-    let state_path = install_state_path(&config);
+    let state_path = install_lock_path(&config);
     let files = init_plan
         .files
         .into_iter()
@@ -631,151 +576,6 @@ pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     Ok(plan)
 }
 
-pub fn plan_migrate_state_dir(
-    project_root: &Path,
-    target_dir: &str,
-) -> Result<MigrateStateDirPlan, CodegenError> {
-    let config_path = project_root.join("components.json");
-    let config_content = read_to_string(&config_path)?;
-    let mut config = parse_components_json_str(&config_content)?;
-    let source_dir = config.state.dir.clone();
-
-    if source_dir == target_dir {
-        let state_path = install_state_path(&config);
-        let state = load_or_empty_state(
-            project_root,
-            &state_path,
-            hash_bytes(config_content.as_bytes()),
-        )?;
-        return Ok(MigrateStateDirPlan {
-            project_root: project_root.to_path_buf(),
-            source_dir,
-            target_dir: target_dir.to_owned(),
-            files: Vec::new(),
-            delete_paths: Vec::new(),
-            changes: Vec::new(),
-            state,
-        });
-    }
-
-    let source_state_path = install_state_path(&config);
-    let mut state = load_existing_state(project_root, &source_state_path)?;
-    validate_state_baselines(project_root, &state)?;
-
-    config.state.dir = target_dir.to_owned();
-    let target_state_path = install_state_path(&config);
-    let config_content = components_config_to_json(&config)?;
-    validate_state_dir_migration_target(project_root, &source_dir, target_dir)?;
-
-    let mut files = Vec::new();
-    let mut changes = Vec::new();
-    let mut delete_paths = Vec::new();
-
-    migrate_state_baseline_paths(&mut state, &source_dir, target_dir)?;
-    state.project.config_hash = hash_bytes(config_content.as_bytes());
-    let state_json = state_to_json_at_path(&state, Path::new(&target_state_path))?;
-
-    upsert_planned_file(
-        project_root,
-        &mut files,
-        &mut changes,
-        "components.json",
-        config_content,
-        ChangeKind::UpdateFile,
-        None,
-    )?;
-    plan_migrated_baseline_writes(
-        project_root,
-        &state,
-        &source_dir,
-        target_dir,
-        &mut files,
-        &mut changes,
-    )?;
-    upsert_planned_file(
-        project_root,
-        &mut files,
-        &mut changes,
-        &target_state_path,
-        state_json,
-        ChangeKind::WriteState,
-        None,
-    )?;
-
-    for path in migrated_source_paths(&state, &source_dir, target_dir)? {
-        delete_paths.push(path.clone());
-        changes.push(ChangeRecord::new(ChangeKind::DeleteFile, path, true));
-    }
-    delete_paths.push(source_state_path.clone());
-    changes.push(ChangeRecord::new(
-        ChangeKind::DeleteFile,
-        source_state_path,
-        true,
-    ));
-
-    let paths = files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    validate_planned_write_paths_for_state_dir(&paths, target_dir)?;
-
-    Ok(MigrateStateDirPlan {
-        project_root: project_root.to_path_buf(),
-        source_dir,
-        target_dir: target_dir.to_owned(),
-        files,
-        delete_paths,
-        changes,
-        state,
-    })
-}
-
-pub fn apply_migrate_state_dir(
-    project_root: &Path,
-    target_dir: &str,
-) -> Result<MigrateStateDirPlan, CodegenError> {
-    let plan = plan_migrate_state_dir(project_root, target_dir)?;
-    if plan.is_empty() {
-        return Ok(plan);
-    }
-
-    let _lock = WriteLock::acquire_at(project_root, &plan.source_dir)?;
-    let target_state_path = install_state_path_from_dir(&plan.target_dir);
-
-    for file in plan
-        .files
-        .iter()
-        .filter(|file| file.path.as_str() != target_state_path)
-    {
-        write_file_atomic_with_state_dir(
-            project_root,
-            &file.path,
-            file.content.as_bytes(),
-            &plan.target_dir,
-        )?;
-    }
-
-    if let Some(state_file) = plan
-        .files
-        .iter()
-        .find(|file| file.path.as_str() == target_state_path)
-    {
-        write_file_atomic_with_state_dir(
-            project_root,
-            &state_file.path,
-            state_file.content.as_bytes(),
-            &plan.target_dir,
-        )?;
-    }
-
-    for path in &plan.delete_paths {
-        remove_file_if_exists(&project_root.join(path))?;
-    }
-    cleanup_state_dir(project_root, &plan.source_dir)?;
-
-    Ok(plan)
-}
-
 fn plan_sync_from_config(
     project_root: &Path,
     mut files: Vec<PlannedFile>,
@@ -785,9 +585,9 @@ fn plan_sync_from_config(
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
     let config_hash = hash_bytes(config_content.as_bytes());
-    let state_path = install_state_path(&config);
-    let mut state = load_or_empty_state(project_root, &state_path, config_hash.clone())?;
-    state.project.config_hash = config_hash;
+    let lock_path = install_lock_path(&config);
+    let mut lock = load_or_empty_lock(project_root, &lock_path, config_hash.clone())?;
+    lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
     let mut cargo_plan = Vec::new();
 
@@ -797,7 +597,7 @@ fn plan_sync_from_config(
             project_root,
             &mut files,
             &mut changes,
-            &mut state,
+            &mut lock,
             &config,
             &item,
         )?;
@@ -805,15 +605,15 @@ fn plan_sync_from_config(
         merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
     }
 
-    state.validate_at_path(Path::new(&state_path))?;
-    let state_json = state_to_json_at_path(&state, Path::new(&state_path))?;
+    lock.validate_at_path(Path::new(&lock_path))?;
+    let lock_json = lock_to_json_at_path(&lock, Path::new(&lock_path))?;
     upsert_planned_file(
         project_root,
         &mut files,
         &mut changes,
-        &state_path,
-        state_json,
-        ChangeKind::WriteState,
+        &lock_path,
+        lock_json,
+        ChangeKind::WriteLockFile,
         None,
     )?;
 
@@ -821,7 +621,7 @@ fn plan_sync_from_config(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    validate_planned_write_paths_for_state_dir(&paths, &config.state.dir)?;
+    validate_planned_write_paths(&paths)?;
 
     Ok(SyncPlan {
         project_root: project_root.to_path_buf(),
@@ -830,7 +630,7 @@ fn plan_sync_from_config(
         files,
         changes,
         diagnostics,
-        state,
+        lock,
     })
 }
 
@@ -850,48 +650,36 @@ fn plan_built_in_item(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    state: &mut InstallState,
+    lock: &mut InstallLock,
     config: &ComponentsConfig,
     item: &leptos_ui_kit_registry::ResolvedRegistryItem,
 ) -> Result<String, CodegenError> {
     let item_id = built_in_item_id(&item.item.name);
-    let safe_item_id = safe_item_id(&item_id);
     let mut installed_files = Vec::new();
     let mut installed_style_blocks = Vec::new();
 
     for ui_file in &item.targets.ui_files {
         let generated = read_built_in_registry_source(&ui_file.source)?;
         let logical_path = format!("src/components/ui/{}", ui_file.path);
-        let baseline_path = state_baseline_path(config, &safe_item_id, &ui_file.path);
         let generated_hash = hash_bytes(generated.as_bytes());
 
         plan_generated_source_file(
             project_root,
             files,
             changes,
-            state,
+            lock,
             &item_id,
             &logical_path,
             &generated,
-        )?;
-        upsert_planned_file(
-            project_root,
-            files,
-            changes,
-            &baseline_path,
-            generated.clone(),
-            ChangeKind::WriteBaseline,
-            Some(&item_id),
         )?;
 
         installed_files.push(InstalledFile {
             path: logical_path.clone(),
             kind: "rust".to_owned(),
-            baseline_path,
-            baseline_hash: generated_hash.clone(),
+            generated_hash: generated_hash.clone(),
             local_hash_at_install: generated_hash,
         });
-        state.files_by_path.insert(logical_path, item_id.clone());
+        lock.files_by_path.insert(logical_path, item_id.clone());
     }
 
     let components_mod = planned_or_existing_content(files, project_root, "src/components/mod.rs")?;
@@ -921,13 +709,16 @@ fn plan_built_in_item(
     for style in &item.targets.style_blocks {
         let generated = read_built_in_registry_source(&style.source)?;
         let css_path = config.styles.css.as_str();
-        let baseline_path =
-            state_baseline_path(config, &safe_item_id, &format!("{}.css", style.id));
-        let baseline = tracked_style_baseline(project_root, state, &item_id, &style.id)?;
+        let generated_hash = hash_bytes(generated.as_bytes());
+        let tracked_hash = tracked_style_generated_hash(lock, &item_id, &style.id)?;
         let existing_css =
             planned_or_existing_content(files, project_root, css_path)?.unwrap_or_default();
-        let patched_css =
-            patch_css_block(&existing_css, &style.id, &generated, baseline.as_deref())?;
+        let patched_css = patch_css_block(
+            &existing_css,
+            &style.id,
+            &generated,
+            tracked_hash.as_deref(),
+        )?;
 
         upsert_planned_file(
             project_root,
@@ -938,28 +729,17 @@ fn plan_built_in_item(
             ChangeKind::UpdateCssBlock,
             Some(&item_id),
         )?;
-        upsert_planned_file(
-            project_root,
-            files,
-            changes,
-            &baseline_path,
-            generated.clone(),
-            ChangeKind::WriteBaseline,
-            Some(&item_id),
-        )?;
 
         installed_style_blocks.push(InstalledStyleBlock {
             css_path: css_path.to_owned(),
             block_id: style.id.clone(),
-            baseline_path,
-            baseline_hash: hash_bytes(generated.as_bytes()),
+            generated_hash,
         });
-        state
-            .style_blocks_by_id
+        lock.style_blocks_by_id
             .insert(style.id.clone(), item_id.clone());
     }
 
-    state.items.insert(
+    lock.items.insert(
         item_id.clone(),
         InstalledItem {
             id: item_id.clone(),
@@ -983,39 +763,25 @@ fn apply_planned_files(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    let state_paths = state_write_paths(changes);
-    let state_dir = state_paths
-        .first()
-        .map(|path| state_dir_from_state_path(path))
-        .unwrap_or(DEFAULT_STATE_DIR);
-    validate_planned_write_paths_for_state_dir(&paths, state_dir)?;
+    let lock_paths = lock_file_write_paths(changes);
+    validate_planned_write_paths(&paths)?;
 
     if files.is_empty() {
         return Ok(());
     }
 
-    let _lock = WriteLock::acquire_at(project_root, state_dir)?;
+    let _lock = WriteLock::acquire(project_root)?;
 
     for file in files
         .iter()
-        .filter(|file| !state_paths.contains(&file.path.as_str()))
+        .filter(|file| !lock_paths.contains(&file.path.as_str()))
     {
-        write_file_atomic_with_state_dir(
-            project_root,
-            &file.path,
-            file.content.as_bytes(),
-            state_dir,
-        )?;
+        write_file_atomic(project_root, &file.path, file.content.as_bytes())?;
     }
 
-    for state_path in state_paths {
-        if let Some(state_file) = files.iter().find(|file| file.path == state_path) {
-            write_file_atomic_with_state_dir(
-                project_root,
-                &state_file.path,
-                state_file.content.as_bytes(),
-                state_dir,
-            )?;
+    for lock_path in lock_paths {
+        if let Some(lock_file) = files.iter().find(|file| file.path == lock_path) {
+            write_file_atomic(project_root, &lock_file.path, lock_file.content.as_bytes())?;
         }
     }
 
@@ -1023,16 +789,9 @@ fn apply_planned_files(
 }
 
 pub fn validate_planned_write_paths(paths: &[String]) -> Result<(), CodegenError> {
-    validate_planned_write_paths_for_state_dir(paths, DEFAULT_STATE_DIR)
-}
-
-fn validate_planned_write_paths_for_state_dir(
-    paths: &[String],
-    state_dir: &str,
-) -> Result<(), CodegenError> {
     let mut seen = std::collections::BTreeSet::new();
     for path in paths {
-        validate_logical_write_path_with_state_dir(path, state_dir)?;
+        validate_logical_write_path(path)?;
         let folded = path.to_ascii_lowercase();
         if !seen.insert(folded) {
             return Err(CodegenError::DuplicatePath(path.clone()));
@@ -1045,15 +804,7 @@ pub fn validate_project_write_path(
     project_root: &Path,
     logical_path: &str,
 ) -> Result<PathBuf, CodegenError> {
-    validate_project_write_path_with_state_dir(project_root, logical_path, DEFAULT_STATE_DIR)
-}
-
-fn validate_project_write_path_with_state_dir(
-    project_root: &Path,
-    logical_path: &str,
-    state_dir: &str,
-) -> Result<PathBuf, CodegenError> {
-    validate_logical_write_path_with_state_dir(logical_path, state_dir)?;
+    validate_logical_write_path(logical_path)?;
     let root = project_root
         .canonicalize()
         .map_err(|source| CodegenError::Io {
@@ -1084,13 +835,6 @@ fn validate_project_write_path_with_state_dir(
 }
 
 pub fn validate_logical_write_path(path: &str) -> Result<(), CodegenError> {
-    validate_logical_write_path_with_state_dir(path, DEFAULT_STATE_DIR)
-}
-
-fn validate_logical_write_path_with_state_dir(
-    path: &str,
-    state_dir: &str,
-) -> Result<(), CodegenError> {
     if path.is_empty() {
         return unsafe_path(path, "path is empty");
     }
@@ -1117,11 +861,7 @@ fn validate_logical_write_path_with_state_dir(
             return unsafe_path(path, "parent traversal is rejected");
         }
         if component.starts_with('.') {
-            let allowed_internal = is_allowed_state_dir_path(path, state_dir)
-                || (component == ".leptos-ui" && components.peek().is_some());
-            if !allowed_internal {
-                return unsafe_path(path, "hidden paths are rejected except .leptos-ui");
-            }
+            return unsafe_path(path, "hidden paths are rejected");
         }
         if !component
             .bytes()
@@ -1131,7 +871,7 @@ fn validate_logical_write_path_with_state_dir(
         }
     }
 
-    if is_allowed_write_path(path) || is_allowed_state_dir_path(path, state_dir) {
+    if is_allowed_write_path(path) {
         Ok(())
     } else {
         unsafe_path(path, "path is outside the MVP write allow-list")
@@ -1145,16 +885,7 @@ pub struct WriteLock {
 
 impl WriteLock {
     pub fn acquire(project_root: &Path) -> Result<Self, CodegenError> {
-        Self::acquire_at(project_root, DEFAULT_STATE_DIR)
-    }
-
-    pub fn acquire_at(project_root: &Path, state_dir: &str) -> Result<Self, CodegenError> {
-        let lock_path = project_root.join(state_dir_child_path(state_dir, STATE_LOCK_FILE_NAME));
-        let lock_dir = project_root.join(state_dir);
-        fs::create_dir_all(&lock_dir).map_err(|source| CodegenError::Io {
-            path: lock_dir,
-            source,
-        })?;
+        let lock_path = project_root.join(WRITE_LOCK_FILE_NAME);
 
         match OpenOptions::new()
             .create_new(true)
@@ -1191,17 +922,7 @@ pub fn write_file_atomic(
     logical_path: &str,
     content: &[u8],
 ) -> Result<(), CodegenError> {
-    write_file_atomic_with_state_dir(project_root, logical_path, content, DEFAULT_STATE_DIR)
-}
-
-fn write_file_atomic_with_state_dir(
-    project_root: &Path,
-    logical_path: &str,
-    content: &[u8],
-    state_dir: &str,
-) -> Result<(), CodegenError> {
-    let full_path =
-        validate_project_write_path_with_state_dir(project_root, logical_path, state_dir)?;
+    let full_path = validate_project_write_path(project_root, logical_path)?;
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).map_err(|source| CodegenError::Io {
             path: parent.to_path_buf(),
@@ -1221,30 +942,30 @@ fn write_file_atomic_with_state_dir(
     Ok(())
 }
 
-pub fn parse_install_state_str(input: &str) -> Result<InstallState, CodegenError> {
-    parse_install_state_str_at_path(input, Path::new(STATE_FILE_NAME))
+pub fn parse_install_lock_str(input: &str) -> Result<InstallLock, CodegenError> {
+    parse_install_lock_str_at_path(input, Path::new(LOCK_FILE_NAME))
 }
 
-pub fn parse_install_state_str_at_path(
+pub fn parse_install_lock_str_at_path(
     input: &str,
     path: &Path,
-) -> Result<InstallState, CodegenError> {
-    let state: InstallState =
-        serde_json::from_str(input).map_err(|source| CodegenError::StateParse {
+) -> Result<InstallLock, CodegenError> {
+    let lock: InstallLock =
+        serde_json::from_str(input).map_err(|source| CodegenError::LockParse {
             path: path.to_path_buf(),
             source,
         })?;
-    state.validate_at_path(path)?;
-    Ok(state)
+    lock.validate_at_path(path)?;
+    Ok(lock)
 }
 
-pub fn state_to_json(state: &InstallState) -> Result<String, CodegenError> {
-    state_to_json_at_path(state, Path::new(STATE_FILE_NAME))
+pub fn lock_to_json(lock: &InstallLock) -> Result<String, CodegenError> {
+    lock_to_json_at_path(lock, Path::new(LOCK_FILE_NAME))
 }
 
-pub fn state_to_json_at_path(state: &InstallState, path: &Path) -> Result<String, CodegenError> {
-    state.validate_at_path(path)?;
-    let mut output = serde_json::to_string_pretty(state).map_err(CodegenError::StateSerialize)?;
+pub fn lock_to_json_at_path(lock: &InstallLock, path: &Path) -> Result<String, CodegenError> {
+    lock.validate_at_path(path)?;
+    let mut output = serde_json::to_string_pretty(lock).map_err(CodegenError::LockSerialize)?;
     output.push('\n');
     Ok(output)
 }
@@ -1253,7 +974,7 @@ pub fn patch_css_block(
     existing: &str,
     block_id: &str,
     block: &str,
-    tracked_baseline: Option<&str>,
+    tracked_generated_hash: Option<&str>,
 ) -> Result<String, CodegenError> {
     validate_css_block_id(block_id)?;
     let replacement = normalize_managed_css_block(block_id, block)?;
@@ -1266,8 +987,8 @@ pub fn patch_css_block(
                 return Ok(existing.to_owned());
             }
 
-            match tracked_baseline {
-                Some(baseline) if current == normalize_managed_css_block(block_id, baseline)? => {
+            match tracked_generated_hash {
+                Some(hash) if hash_bytes(current.as_bytes()) == hash => {
                     let mut output = String::with_capacity(
                         existing.len() + replacement.len().saturating_sub(current.len()),
                     );
@@ -1278,7 +999,7 @@ pub fn patch_css_block(
                 }
                 Some(_) => unsafe_patch(
                     "styles/kit.css",
-                    format!("managed CSS block {block_id} differs from its tracked baseline"),
+                    format!("managed CSS block {block_id} has local edits"),
                 ),
                 None => unsafe_patch(
                     "styles/kit.css",
@@ -1359,185 +1080,38 @@ pub fn patch_ui_mod(
     )
 }
 
-fn load_or_empty_state(
+fn load_or_empty_lock(
     project_root: &Path,
-    state_path: &str,
+    lock_path: &str,
     config_hash: String,
-) -> Result<InstallState, CodegenError> {
-    let path = project_root.join(state_path);
+) -> Result<InstallLock, CodegenError> {
+    let path = project_root.join(lock_path);
     if path.is_file() {
         let input = read_to_string(&path)?;
-        let mut state = serde_json::from_str::<InstallState>(&input).map_err(|source| {
-            CodegenError::StateParse {
+        let mut lock = serde_json::from_str::<InstallLock>(&input).map_err(|source| {
+            CodegenError::LockParse {
                 path: path.clone(),
                 source,
             }
         })?;
-        state.validate_at_path(Path::new(state_path))?;
-        state.project.config_hash = config_hash;
-        return Ok(state);
+        lock.validate_at_path(Path::new(lock_path))?;
+        lock.project.config_hash = config_hash;
+        return Ok(lock);
     }
 
-    Ok(InstallState::empty(config_hash))
-}
-
-fn load_existing_state(
-    project_root: &Path,
-    state_path: &str,
-) -> Result<InstallState, CodegenError> {
-    let path = project_root.join(state_path);
-    if !path.is_file() {
-        return invalid_state(Path::new(state_path), "state file is missing");
-    }
-    let input = read_to_string(&path)?;
-    parse_install_state_str_at_path(&input, Path::new(state_path))
-}
-
-fn validate_state_baselines(project_root: &Path, state: &InstallState) -> Result<(), CodegenError> {
-    for item in state.items.values() {
-        for file in &item.files {
-            let baseline = read_required_baseline(project_root, &file.baseline_path)?;
-            let baseline_hash = hash_bytes(baseline.as_bytes());
-            if baseline_hash != file.baseline_hash {
-                return invalid_state(
-                    Path::new(&file.baseline_path),
-                    "file baseline hash differs from state",
-                );
-            }
-        }
-        for block in &item.style_blocks {
-            let baseline = read_required_baseline(project_root, &block.baseline_path)?;
-            let baseline_hash = hash_bytes(baseline.as_bytes());
-            if baseline_hash != block.baseline_hash {
-                return invalid_state(
-                    Path::new(&block.baseline_path),
-                    "style baseline hash differs from state",
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_state_dir_migration_target(
-    project_root: &Path,
-    source_dir: &str,
-    target_dir: &str,
-) -> Result<(), CodegenError> {
-    if target_dir.starts_with(&format!("{source_dir}/"))
-        || source_dir.starts_with(&format!("{target_dir}/"))
-    {
-        return unsafe_patch(
-            target_dir,
-            "state directory migration target must not overlap the source directory",
-        );
-    }
-    if project_root.join(target_dir).exists() {
-        return unsafe_patch(
-            target_dir,
-            "state directory migration target already exists",
-        );
-    }
-    Ok(())
-}
-
-fn migrate_state_baseline_paths(
-    state: &mut InstallState,
-    source_dir: &str,
-    target_dir: &str,
-) -> Result<(), CodegenError> {
-    for item in state.items.values_mut() {
-        for file in &mut item.files {
-            file.baseline_path = migrate_state_path(&file.baseline_path, source_dir, target_dir)?;
-        }
-        for block in &mut item.style_blocks {
-            block.baseline_path = migrate_state_path(&block.baseline_path, source_dir, target_dir)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn plan_migrated_baseline_writes(
-    project_root: &Path,
-    state: &InstallState,
-    source_dir: &str,
-    target_dir: &str,
-    files: &mut Vec<PlannedFile>,
-    changes: &mut Vec<ChangeRecord>,
-) -> Result<(), CodegenError> {
-    let mut planned = BTreeSet::new();
-    for baseline_path in migrated_target_baseline_paths(state) {
-        if !planned.insert(baseline_path.clone()) {
-            continue;
-        }
-        let source_path = migrate_state_path(&baseline_path, target_dir, source_dir)?;
-        let content = read_to_string(&project_root.join(&source_path))?;
-        upsert_planned_file(
-            project_root,
-            files,
-            changes,
-            &baseline_path,
-            content,
-            ChangeKind::WriteBaseline,
-            None,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn migrated_source_paths(
-    state: &InstallState,
-    source_dir: &str,
-    target_dir: &str,
-) -> Result<Vec<String>, CodegenError> {
-    let mut paths = BTreeSet::new();
-    for target_path in migrated_target_baseline_paths(state) {
-        paths.insert(migrate_state_path(&target_path, target_dir, source_dir)?);
-    }
-    Ok(paths.into_iter().collect())
-}
-
-fn migrated_target_baseline_paths(state: &InstallState) -> Vec<String> {
-    let mut paths = Vec::new();
-    for item in state.items.values() {
-        for file in &item.files {
-            paths.push(file.baseline_path.clone());
-        }
-        for block in &item.style_blocks {
-            paths.push(block.baseline_path.clone());
-        }
-    }
-    paths
-}
-
-fn migrate_state_path(
-    path: &str,
-    source_dir: &str,
-    target_dir: &str,
-) -> Result<String, CodegenError> {
-    let prefix = format!("{source_dir}/");
-    let Some(suffix) = path.strip_prefix(&prefix) else {
-        return invalid_state(
-            Path::new(path),
-            format!("state path is not under configured directory {source_dir}"),
-        );
-    };
-    Ok(state_dir_child_path(target_dir, suffix))
+    Ok(InstallLock::empty(config_hash))
 }
 
 fn plan_generated_source_file(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    state: &InstallState,
+    lock: &InstallLock,
     item_id: &str,
     logical_path: &str,
     generated: &str,
 ) -> Result<(), CodegenError> {
-    if let Some(owner) = state.files_by_path.get(logical_path) {
+    if let Some(owner) = lock.files_by_path.get(logical_path) {
         if owner != item_id {
             return unsafe_patch(
                 logical_path,
@@ -1560,12 +1134,9 @@ fn plan_generated_source_file(
         if current == generated {
             return Ok(());
         }
-        let baseline = tracked_file_baseline(project_root, state, item_id, logical_path)?;
-        if current != baseline {
-            return unsafe_patch(
-                logical_path,
-                "tracked target has local edits that differ from its baseline",
-            );
+        let tracked = tracked_file_lock(lock, item_id, logical_path)?;
+        if hash_bytes(current.as_bytes()) != tracked.local_hash_at_install {
+            return unsafe_patch(logical_path, "tracked target has local edits");
         }
         return upsert_planned_file(
             project_root,
@@ -1579,7 +1150,7 @@ fn plan_generated_source_file(
     }
 
     if project_root.join(logical_path).is_file() {
-        return unsafe_patch(logical_path, "target exists but is not tracked in state");
+        return unsafe_patch(logical_path, "target exists but is not tracked in lock");
     }
 
     upsert_planned_file(
@@ -1655,10 +1226,10 @@ fn planned_or_existing_components_config_content(
     Ok(canonical_components_json()?)
 }
 
-fn state_write_paths(changes: &[ChangeRecord]) -> Vec<&str> {
+fn lock_file_write_paths(changes: &[ChangeRecord]) -> Vec<&str> {
     changes
         .iter()
-        .filter(|change| change.kind == ChangeKind::WriteState)
+        .filter(|change| change.kind == ChangeKind::WriteLockFile)
         .map(|change| change.path.as_str())
         .collect()
 }
@@ -1674,39 +1245,34 @@ fn read_optional_to_string(path: &Path) -> Result<Option<String>, CodegenError> 
     }
 }
 
-fn tracked_file_baseline(
-    project_root: &Path,
-    state: &InstallState,
+fn tracked_file_lock<'a>(
+    lock: &'a InstallLock,
     item_id: &str,
     logical_path: &str,
-) -> Result<String, CodegenError> {
-    let path = PathBuf::from(STATE_FILE_NAME);
-    let item = state
+) -> Result<&'a InstalledFile, CodegenError> {
+    let path = PathBuf::from(LOCK_FILE_NAME);
+    let item = lock
         .items
         .get(item_id)
-        .ok_or_else(|| CodegenError::InvalidState {
+        .ok_or_else(|| CodegenError::InvalidLock {
             path: path.clone(),
             reason: format!("missing item {item_id}"),
         })?;
-    let file = item
-        .files
+    item.files
         .iter()
         .find(|file| file.path == logical_path)
-        .ok_or_else(|| CodegenError::InvalidState {
+        .ok_or_else(|| CodegenError::InvalidLock {
             path: path.clone(),
-            reason: format!("missing file state for {logical_path}"),
-        })?;
-
-    read_required_baseline(project_root, &file.baseline_path)
+            reason: format!("missing file lock entry for {logical_path}"),
+        })
 }
 
-fn tracked_style_baseline(
-    project_root: &Path,
-    state: &InstallState,
+fn tracked_style_generated_hash(
+    lock: &InstallLock,
     item_id: &str,
     block_id: &str,
 ) -> Result<Option<String>, CodegenError> {
-    let Some(owner) = state.style_blocks_by_id.get(block_id) else {
+    let Some(owner) = lock.style_blocks_by_id.get(block_id) else {
         return Ok(None);
     };
     if owner != item_id {
@@ -1716,11 +1282,11 @@ fn tracked_style_baseline(
         );
     }
 
-    let path = PathBuf::from(STATE_FILE_NAME);
-    let item = state
+    let path = PathBuf::from(LOCK_FILE_NAME);
+    let item = lock
         .items
         .get(item_id)
-        .ok_or_else(|| CodegenError::InvalidState {
+        .ok_or_else(|| CodegenError::InvalidLock {
             path: path.clone(),
             reason: format!("missing item {item_id}"),
         })?;
@@ -1728,23 +1294,12 @@ fn tracked_style_baseline(
         .style_blocks
         .iter()
         .find(|block| block.block_id == block_id)
-        .ok_or_else(|| CodegenError::InvalidState {
+        .ok_or_else(|| CodegenError::InvalidLock {
             path: path.clone(),
-            reason: format!("missing style block state for {block_id}"),
+            reason: format!("missing style block lock entry for {block_id}"),
         })?;
 
-    Ok(Some(read_required_baseline(
-        project_root,
-        &block.baseline_path,
-    )?))
-}
-
-fn read_required_baseline(project_root: &Path, logical_path: &str) -> Result<String, CodegenError> {
-    let path = project_root.join(logical_path);
-    read_optional_to_string(&path)?.ok_or_else(|| CodegenError::InvalidState {
-        path,
-        reason: "tracked baseline is missing".to_owned(),
-    })
+    Ok(Some(block.generated_hash.clone()))
 }
 
 fn ui_exports_for_item(item: &RegistryItem) -> Result<Vec<UiModuleExport>, CodegenError> {
@@ -1800,10 +1355,6 @@ fn built_in_item_id(item_name: &str) -> String {
     format!("builtin:{item_name}")
 }
 
-fn safe_item_id(item_id: &str) -> String {
-    item_id.replace(':', "-")
-}
-
 fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1814,14 +1365,14 @@ pub fn hash_content_bytes(bytes: &[u8]) -> String {
     hash_bytes(bytes)
 }
 
-fn validate_state_hash(path: &Path, field: &'static str, value: &str) -> Result<(), CodegenError> {
+fn validate_lock_hash(path: &Path, field: &'static str, value: &str) -> Result<(), CodegenError> {
     if value
         .strip_prefix("sha256:")
         .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         Ok(())
     } else {
-        invalid_state(path, format!("{field} must be a sha256 hash"))
+        invalid_lock(path, format!("{field} must be a sha256 hash"))
     }
 }
 
@@ -1839,8 +1390,8 @@ fn unsafe_patch<T>(path: impl Into<PathBuf>, reason: impl Into<String>) -> Resul
     })
 }
 
-fn invalid_state<T>(path: &Path, reason: impl Into<String>) -> Result<T, CodegenError> {
-    Err(CodegenError::InvalidState {
+fn invalid_lock<T>(path: &Path, reason: impl Into<String>) -> Result<T, CodegenError> {
+    Err(CodegenError::InvalidLock {
         path: path.to_path_buf(),
         reason: reason.into(),
     })
@@ -1859,55 +1410,32 @@ fn nearest_existing_parent(path: &Path) -> Option<PathBuf> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        "components.json" | "index.html" | "src/components/mod.rs"
+        "components.json" | "components.lock.json" | "index.html" | "src/components/mod.rs"
     ) || is_allowed_stylesheet_path(path)
         || path.starts_with("src/components/ui/")
-        || path.starts_with(".leptos-ui/")
 }
 
 fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
 }
 
-fn is_allowed_state_dir_path(path: &str, state_dir: &str) -> bool {
-    path.strip_prefix(state_dir)
-        .is_some_and(|remaining| remaining.starts_with('/'))
-}
-
 fn plan_components_json(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    state_dir: Option<&str>,
 ) -> Result<(), CodegenError> {
     let path = project_root.join("components.json");
     if path.is_file() {
-        let config = parse_components_json_str(&read_to_string(&path)?)?;
-        if let Some(state_dir) = state_dir
-            && config.state.dir != state_dir
-        {
-            return unsafe_patch(
-                "components.json",
-                "components.json already exists; use migrate state-dir to move installer state",
-            );
-        }
+        parse_components_json_str(&read_to_string(&path)?)?;
         return Ok(());
     }
-
-    let content = if let Some(state_dir) = state_dir {
-        let mut config = parse_components_json_str(&canonical_components_json()?)?;
-        config.state.dir = state_dir.to_owned();
-        components_config_to_json(&config)?
-    } else {
-        canonical_components_json()?
-    };
 
     push_file_plan(
         files,
         changes,
         "components.json",
         PlannedFileAction::Create,
-        content,
+        canonical_components_json()?,
         ChangeKind::CreateFile,
     );
     Ok(())
@@ -2227,20 +1755,20 @@ fn plan_empty_state(
 ) -> Result<(), CodegenError> {
     let config_content = planned_or_existing_components_config_content(project_root, files)?;
     let config = parse_components_json_str(&config_content)?;
-    let state_path = install_state_path(&config);
+    let state_path = install_lock_path(&config);
     let path = project_root.join(&state_path);
     if path.is_file() {
         return Ok(());
     }
 
-    let content = empty_state_json(&config_content, &state_path)?;
+    let content = empty_lock_json(&config_content, &state_path)?;
     push_file_plan(
         files,
         changes,
         &state_path,
         PlannedFileAction::Create,
         content,
-        ChangeKind::WriteState,
+        ChangeKind::WriteLockFile,
     );
     Ok(())
 }
@@ -2261,9 +1789,9 @@ fn push_file_plan(
     changes.push(ChangeRecord::new(change_kind, path, true));
 }
 
-fn empty_state_json(config_content: &str, state_path: &str) -> Result<String, CodegenError> {
-    state_to_json_at_path(
-        &InstallState::empty(hash_bytes(config_content.as_bytes())),
+fn empty_lock_json(config_content: &str, state_path: &str) -> Result<String, CodegenError> {
+    lock_to_json_at_path(
+        &InstallLock::empty(hash_bytes(config_content.as_bytes())),
         Path::new(state_path),
     )
 }
@@ -2273,54 +1801,6 @@ fn read_to_string(path: &Path) -> Result<String, CodegenError> {
         path: path.to_path_buf(),
         source,
     })
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<(), CodegenError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(CodegenError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-fn cleanup_state_dir(project_root: &Path, state_dir: &str) -> Result<(), CodegenError> {
-    let path = project_root.join(state_dir);
-    if !path.exists() {
-        return Ok(());
-    }
-    if state_dir_contains_only_locks(&path)? {
-        fs::remove_dir_all(&path).map_err(|source| CodegenError::Io { path, source })?;
-    }
-    Ok(())
-}
-
-fn state_dir_contains_only_locks(path: &Path) -> Result<bool, CodegenError> {
-    for entry in fs::read_dir(path).map_err(|source| CodegenError::Io {
-        path: path.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| CodegenError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let entry_path = entry.path();
-        let file_type = entry.file_type().map_err(|source| CodegenError::Io {
-            path: entry_path.clone(),
-            source,
-        })?;
-        if file_type.is_dir() {
-            if !state_dir_contains_only_locks(&entry_path)? {
-                return Ok(false);
-            }
-        } else if entry.file_name().to_str() != Some(STATE_LOCK_FILE_NAME) {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -2381,7 +1861,7 @@ mod tests {
         assert!(
             plan.files
                 .iter()
-                .any(|file| file.path == "src/components/ui/_kit/state.json")
+                .any(|file| file.path == "components.lock.json")
         );
         assert!(!root.join("components.json").exists());
     }
@@ -2454,38 +1934,13 @@ mod tests {
         assert!(root.join("styles/kit.css").is_file());
         assert!(root.join("src/components/mod.rs").is_file());
         assert!(root.join("src/components/ui/mod.rs").is_file());
-        assert!(root.join("src/components/ui/_kit/state.json").is_file());
-        assert!(!root.join("src/components/ui/_kit/lock").exists());
+        assert!(root.join("components.lock.json").is_file());
+        assert!(!root.join(".components.lock").exists());
         assert!(
             fs::read_to_string(root.join("index.html"))
                 .expect("read index")
                 .contains("styles/kit.css")
         );
-    }
-
-    #[test]
-    fn init_state_dir_option_writes_custom_state_dir() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(
-            root.join("index.html"),
-            "<html><head></head><body></body></html>\n",
-        )
-        .expect("write index");
-
-        apply_init_with_state_dir(root, Some("src/components/ui/_custom_state"))
-            .expect("apply init");
-
-        assert!(
-            root.join("src/components/ui/_custom_state/state.json")
-                .is_file()
-        );
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
-        )
-        .expect("parse config");
-        assert_eq!(config.state.dir, "src/components/ui/_custom_state");
     }
 
     #[test]
@@ -2506,11 +1961,11 @@ mod tests {
     }
 
     #[test]
-    fn state_round_trips_deterministically() {
-        let state = InstallState::empty(hash_bytes(b"components"));
-        let first = state_to_json(&state).expect("serialize first");
-        let parsed = parse_install_state_str(&first).expect("parse state");
-        let second = state_to_json(&parsed).expect("serialize second");
+    fn lock_round_trips_deterministically() {
+        let lock = InstallLock::empty(hash_bytes(b"components"));
+        let first = lock_to_json(&lock).expect("serialize first");
+        let parsed = parse_install_lock_str(&first).expect("parse lock");
+        let second = lock_to_json(&parsed).expect("serialize second");
 
         assert_eq!(first, second);
         assert!(first.contains("\"schemaVersion\": \"0.9.0-alpha\""));
@@ -2519,17 +1974,17 @@ mod tests {
     }
 
     #[test]
-    fn state_rejects_malformed_hash_fields() {
-        let mut state = InstallState::empty("sha256:not-a-real-hash".to_owned());
+    fn lock_rejects_malformed_hash_fields() {
+        let mut lock = InstallLock::empty("sha256:not-a-real-hash".to_owned());
 
-        let error = state.validate().expect_err("config hash should fail");
+        let error = lock.validate().expect_err("config hash should fail");
 
         assert!(
-            matches!(error, CodegenError::InvalidState { reason, .. } if reason.contains("project.configHash"))
+            matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains("project.configHash"))
         );
 
-        state.project.config_hash = hash_bytes(b"components");
-        state.items.insert(
+        lock.project.config_hash = hash_bytes(b"components");
+        lock.items.insert(
             "builtin:button".to_owned(),
             InstalledItem {
                 id: "builtin:button".to_owned(),
@@ -2542,15 +1997,15 @@ mod tests {
             },
         );
 
-        let error = state.validate().expect_err("content hash should fail");
+        let error = lock.validate().expect_err("content hash should fail");
 
         assert!(
-            matches!(error, CodegenError::InvalidState { reason, .. } if reason.contains("items[].contentHash"))
+            matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains("items[].contentHash"))
         );
     }
 
     #[test]
-    fn add_plan_records_exact_baseline_bytes() {
+    fn add_plan_records_generated_hashes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
@@ -2569,26 +2024,22 @@ mod tests {
             .iter()
             .find(|file| file.path == "src/components/ui/button.rs")
             .expect("rust target");
-        let rust_baseline = plan
-            .files
-            .iter()
-            .find(|file| file.path == "src/components/ui/_kit/baselines/builtin-button/button.rs")
-            .expect("rust baseline");
-        let css_baseline = plan
-            .files
-            .iter()
-            .find(|file| file.path == "src/components/ui/_kit/baselines/builtin-button/button.css")
-            .expect("css baseline");
+        let installed_file = &plan.lock.items["builtin:button"].files[0];
+        let installed_block = &plan.lock.items["builtin:button"].style_blocks[0];
 
         assert_eq!(rust_target.content, source);
-        assert_eq!(rust_baseline.content, source);
-        assert_eq!(css_baseline.content, css);
+        assert_eq!(installed_file.generated_hash, hash_bytes(source.as_bytes()));
         assert_eq!(
-            plan.state.files_by_path.get("src/components/ui/button.rs"),
+            installed_file.local_hash_at_install,
+            hash_bytes(source.as_bytes())
+        );
+        assert_eq!(installed_block.generated_hash, hash_bytes(css.as_bytes()));
+        assert_eq!(
+            plan.lock.files_by_path.get("src/components/ui/button.rs"),
             Some(&"builtin:button".to_owned())
         );
         assert_eq!(
-            plan.state.style_blocks_by_id.get("button"),
+            plan.lock.style_blocks_by_id.get("button"),
             Some(&"builtin:button".to_owned())
         );
         assert_eq!(plan.cargo_plan.len(), 2);
@@ -2621,16 +2072,10 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
-        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
+        assert!(paths.contains(&"components.lock.json"));
         assert_eq!(plan.cargo_plan.len(), 2);
         assert!(!root.join("src/components/ui/button.rs").exists());
-        assert!(
-            !root
-                .join("src/components/ui/_kit/baselines/builtin-button/button.rs")
-                .exists()
-        );
+        assert!(root.join("components.lock.json").is_file());
     }
 
     #[test]
@@ -2661,7 +2106,7 @@ mod tests {
         );
         assert!(!plan.files.iter().any(|file| file.path == "styles/kit.css"));
         assert_eq!(
-            plan.state.items["builtin:button"].style_blocks[0].css_path,
+            plan.lock.items["builtin:button"].style_blocks[0].css_path,
             "styles/custom.css"
         );
     }
@@ -2679,16 +2124,15 @@ mod tests {
         apply_init(root).expect("init");
         let mut files = Vec::new();
         let mut changes = Vec::new();
-        let mut state = InstallState::empty(hash_bytes(b"components"));
+        let mut lock = InstallLock::empty(hash_bytes(b"components"));
         let config = parse_components_json_str(
             &fs::read_to_string(root.join("components.json")).expect("read config"),
         )
         .expect("parse config");
         let item = nested_registry_item();
 
-        let item_id =
-            plan_built_in_item(root, &mut files, &mut changes, &mut state, &config, &item)
-                .expect("plan item");
+        let item_id = plan_built_in_item(root, &mut files, &mut changes, &mut lock, &config, &item)
+            .expect("plan item");
         let paths = files
             .iter()
             .map(|file| file.path.as_str())
@@ -2700,20 +2144,19 @@ mod tests {
 
         assert_eq!(item_id, "builtin:nested");
         assert!(paths.contains(&"src/components/ui/nested/root.rs"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-nested/nested/root.rs"));
         assert!(
             ui_mod
                 .content
                 .contains("pub use nested::root::{NestedButton};")
         );
         assert_eq!(
-            state.files_by_path.get("src/components/ui/nested/root.rs"),
+            lock.files_by_path.get("src/components/ui/nested/root.rs"),
             Some(&"builtin:nested".to_owned())
         );
     }
 
     #[test]
-    fn add_write_installs_button_state_and_baselines() {
+    fn add_write_installs_button_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
@@ -2738,28 +2181,19 @@ mod tests {
                 .expect("read css")
                 .contains("/* leptos-ui-kit:start button */")
         );
-        assert!(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
-                .is_file()
-        );
-        assert!(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.css")
-                .is_file()
-        );
-        let state = parse_install_state_str_at_path(
-            &fs::read_to_string(root.join("src/components/ui/_kit/state.json"))
-                .expect("read state"),
-            Path::new("src/components/ui/_kit/state.json"),
+        let lock = parse_install_lock_str_at_path(
+            &fs::read_to_string(root.join("components.lock.json")).expect("read lock"),
+            Path::new("components.lock.json"),
         )
-        .expect("parse state");
-        assert!(state.items.contains_key("builtin:button"));
+        .expect("parse lock");
+        assert!(lock.items.contains_key("builtin:button"));
         let config = parse_components_json_str(
             &fs::read_to_string(root.join("components.json")).expect("read config"),
         )
         .expect("parse config");
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].item_name(), "button");
-        assert!(!root.join("src/components/ui/_kit/lock").exists());
+        assert!(!root.join(".components.lock").exists());
     }
 
     #[test]
@@ -2785,9 +2219,7 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/button.rs"));
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
-        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
+        assert!(paths.contains(&"components.lock.json"));
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
     }
@@ -2811,65 +2243,6 @@ mod tests {
         assert!(!first.is_empty());
         assert!(second.is_empty());
         assert!(root.join("src/components/ui/button.rs").is_file());
-    }
-
-    #[test]
-    fn migrate_state_dir_moves_legacy_state_and_baselines() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(
-            root.join("index.html"),
-            "<html><head></head><body></body></html>\n",
-        )
-        .expect("write index");
-        write_legacy_state_config(root);
-        apply_init(root).expect("init");
-        apply_add(root, "button").expect("add");
-
-        let plan = plan_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("plan migrate");
-        let paths = plan
-            .files
-            .iter()
-            .map(|file| file.path.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(paths.contains(&"components.json"));
-        assert!(paths.contains(&"src/components/ui/_kit/state.json"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.rs"));
-        assert!(paths.contains(&"src/components/ui/_kit/baselines/builtin-button/button.css"));
-
-        let applied = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("apply migrate");
-
-        assert!(!applied.is_empty());
-        assert!(root.join("src/components/ui/_kit/state.json").is_file());
-        assert!(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
-                .is_file()
-        );
-        assert!(!root.join(".leptos-ui").exists());
-
-        let config = parse_components_json_str(
-            &fs::read_to_string(root.join("components.json")).expect("read config"),
-        )
-        .expect("parse config");
-        assert_eq!(config.state.dir, DEFAULT_STATE_DIR);
-
-        let state = parse_install_state_str_at_path(
-            &fs::read_to_string(root.join("src/components/ui/_kit/state.json"))
-                .expect("read state"),
-            Path::new("src/components/ui/_kit/state.json"),
-        )
-        .expect("parse state");
-        let installed = state.items.get("builtin:button").expect("button state");
-        assert!(
-            installed.files[0]
-                .baseline_path
-                .starts_with("src/components/ui/_kit/baselines/")
-        );
-
-        let second = apply_migrate_state_dir(root, DEFAULT_STATE_DIR).expect("second migrate");
-        assert!(second.is_empty());
     }
 
     #[test]
@@ -2941,18 +2314,6 @@ mod tests {
         .expect("write config");
     }
 
-    fn write_legacy_state_config(root: &Path) {
-        let mut config =
-            parse_components_json_str(&canonical_components_json().expect("canonical config"))
-                .expect("parse config");
-        config.state.dir = ".leptos-ui".to_owned();
-        fs::write(
-            root.join("components.json"),
-            components_config_to_json(&config).expect("serialize config"),
-        )
-        .expect("write config");
-    }
-
     #[test]
     fn css_patcher_appends_managed_block() {
         let existing = ":root {\n  color-scheme: light;\n}\n";
@@ -2978,13 +2339,14 @@ mod tests {
     }
 
     #[test]
-    fn css_patcher_replaces_tracked_baseline() {
-        let baseline = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+    fn css_patcher_replaces_tracked_generated_block() {
+        let previous = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
         let next = "/* leptos-ui-kit:start button */\n.kit-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
-        let existing = format!("/* app */\n{baseline}.other {{}}\n");
+        let existing = format!("/* app */\n{previous}.other {{}}\n");
 
+        let previous_hash = hash_bytes(previous.as_bytes());
         let patched =
-            patch_css_block(&existing, "button", next, Some(baseline)).expect("patch css");
+            patch_css_block(&existing, "button", next, Some(&previous_hash)).expect("patch css");
 
         assert!(patched.contains("color: blue"));
         assert!(!patched.contains("color: red"));
@@ -3009,12 +2371,13 @@ mod tests {
 
     #[test]
     fn css_patcher_rejects_edited_tracked_block() {
-        let baseline = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
+        let previous = "/* leptos-ui-kit:start button */\n.kit-button { color: red; }\n/* leptos-ui-kit:end button */\n";
         let edited = "/* leptos-ui-kit:start button */\n.kit-button { color: green; }\n/* leptos-ui-kit:end button */\n";
         let next = "/* leptos-ui-kit:start button */\n.kit-button { color: blue; }\n/* leptos-ui-kit:end button */\n";
 
-        let error =
-            patch_css_block(edited, "button", next, Some(baseline)).expect_err("should conflict");
+        let previous_hash = hash_bytes(previous.as_bytes());
+        let error = patch_css_block(edited, "button", next, Some(&previous_hash))
+            .expect_err("should conflict");
 
         assert!(matches!(error, CodegenError::UnsafePatch { .. }));
     }
@@ -3089,7 +2452,7 @@ mod tests {
             "src/components/mod.rs".to_owned(),
             "src/components/ui/button.rs".to_owned(),
             "src/components/ui/nested/root.rs".to_owned(),
-            "src/components/ui/_kit/state.json".to_owned(),
+            "components.lock.json".to_owned(),
         ];
 
         validate_planned_write_paths(&paths).expect("paths should pass");
@@ -3158,14 +2521,14 @@ mod tests {
         {
             let _lock = WriteLock::acquire(root).expect("lock");
             write_file_atomic(root, "styles/kit.css", b":root {}\n").expect("write css");
-            assert!(root.join("src/components/ui/_kit/lock").exists());
+            assert!(root.join(".components.lock").exists());
         }
 
         assert_eq!(
             fs::read_to_string(root.join("styles/kit.css")).expect("read css"),
             ":root {}\n"
         );
-        assert!(!root.join("src/components/ui/_kit/lock").exists());
+        assert!(!root.join(".components.lock").exists());
     }
 
     fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {

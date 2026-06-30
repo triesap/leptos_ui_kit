@@ -13,8 +13,7 @@
     "install",
     "styles",
     "registry",
-    "items",
-    "state"
+    "items"
   ],
   "properties": {
     "$schema": {
@@ -176,29 +175,6 @@
           },
           "source": {
             "const": "builtin"
-          }
-        }
-      }
-    },
-    "state": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "dir"
-      ],
-      "properties": {
-        "dir": {
-          "type": "string",
-          "default": "src/components/ui/_kit",
-          "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\.(?:rs|css|html)$)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
-          "not": {
-            "enum": [
-              "components.json",
-              "index.html",
-              "styles/kit.css",
-              "src/components/mod.rs",
-              "src/components/ui/mod.rs"
-            ]
           }
         }
       }

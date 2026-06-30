@@ -15,7 +15,6 @@ pub const TOOL_PACKAGE: &str = "leptos_ui_kit_cli";
 pub const TOOL_BINARY: &str = "leptos_ui_kit";
 pub const TOOL_GIT_URL: &str = "https://github.com/triesap/leptos_ui_kit";
 pub const DEFAULT_CSS_PATH: &str = "styles/kit.css";
-pub const DEFAULT_STATE_DIR: &str = "src/components/ui/_kit";
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -113,7 +112,6 @@ pub struct ComponentsConfig {
     pub styles: StylesConfig,
     pub registry: RegistryConfig,
     pub items: Vec<DesiredItemConfig>,
-    pub state: StateConfig,
 }
 
 impl ComponentsConfig {
@@ -127,8 +125,6 @@ impl ComponentsConfig {
         self.styles.validate()?;
         self.registry.validate()?;
         validate_desired_items(&self.items)?;
-        self.state.validate()?;
-        validate_state_dir_target(self)?;
         Ok(())
     }
 }
@@ -315,18 +311,6 @@ impl DesiredItemName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StateConfig {
-    pub dir: String,
-}
-
-impl StateConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        validate_safe_relative_dir("state.dir", &self.dir)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspaceMode {
@@ -340,7 +324,6 @@ pub struct InstallRoots {
     pub ui_mod: PathBuf,
     pub components_mod: PathBuf,
     pub css_file: PathBuf,
-    pub state_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,9 +394,6 @@ pub fn canonical_components_config() -> Result<ComponentsConfig, ConfigError> {
             source: RegistrySource::Builtin,
         },
         items: Vec::new(),
-        state: StateConfig {
-            dir: DEFAULT_STATE_DIR.to_owned(),
-        },
     };
     config.validate()?;
     Ok(config)
@@ -543,7 +523,6 @@ pub fn normalize_single_crate_project(
                 "install.componentsMod",
             )?,
             css_file: join_checked(&project_root, &config.styles.css, "styles.css")?,
-            state_dir: join_checked(&project_root, &config.state.dir, "state.dir")?,
         },
     })
 }
@@ -592,17 +571,6 @@ fn validate_relative_path(field: &'static str, value: &str) -> Result<(), Config
         });
     }
 
-    Ok(())
-}
-
-fn validate_safe_relative_dir(field: &'static str, value: &str) -> Result<(), ConfigError> {
-    validate_safe_relative_path(field, value)?;
-    if value.ends_with(".rs") || value.ends_with(".css") || value.ends_with(".html") {
-        return Err(ConfigError::PathOverlap {
-            field,
-            value: value.to_owned(),
-        });
-    }
     Ok(())
 }
 
@@ -658,34 +626,6 @@ fn validate_safe_relative_path(field: &'static str, value: &str) -> Result<(), C
     Ok(())
 }
 
-fn validate_state_dir_target(config: &ComponentsConfig) -> Result<(), ConfigError> {
-    let reserved = [
-        "components.json",
-        config.project.index_html.as_str(),
-        config.install.ui_mod.as_str(),
-        config.install.components_mod.as_str(),
-        config.styles.css.as_str(),
-    ];
-
-    if reserved.contains(&config.state.dir.as_str())
-        || is_path_equal_or_child(&config.styles.css, &config.state.dir)
-    {
-        return Err(ConfigError::PathOverlap {
-            field: "state.dir",
-            value: config.state.dir.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-fn is_path_equal_or_child(path: &str, parent: &str) -> bool {
-    path == parent
-        || path
-            .strip_prefix(parent)
-            .is_some_and(|remaining| remaining.starts_with('/'))
-}
-
 fn join_checked(
     project_root: &Path,
     relative: &str,
@@ -730,7 +670,6 @@ mod tests {
         assert!(first.contains("\"package\": \"leptos_ui_kit_cli\""));
         assert!(first.contains("\"binary\": \"leptos_ui_kit\""));
         assert!(first.contains("\"items\": []"));
-        assert!(first.contains("\"dir\": \"src/components/ui/_kit\""));
         assert!(!first.contains("classPrefix"));
         assert!(!first.contains("cssVariablePrefix"));
     }
@@ -809,8 +748,8 @@ mod tests {
     #[test]
     fn rejects_unknown_top_level_field() {
         let input = valid_config_json().replace(
-            "\"state\": {",
-            "\"tailwind\": { \"css\": \"input.css\" },\n  \"state\": {",
+            "\"items\": []",
+            "\"items\": [],\n  \"tailwind\": { \"css\": \"input.css\" }",
         );
 
         let error = parse_components_json_str(&input).expect_err("unknown field should fail");
@@ -822,8 +761,8 @@ mod tests {
     fn rejects_forbidden_legacy_fields() {
         for field in ["tailwind", "aliases", "rsc", "tsx"] {
             let input = valid_config_json().replace(
-                "\"state\": {",
-                &format!("\"{field}\": true,\n  \"state\": {{"),
+                "\"items\": []",
+                &format!("\"items\": [],\n  \"{field}\": true"),
             );
 
             let error = parse_components_json_str(&input).expect_err("legacy field should fail");
@@ -925,93 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_explicit_safe_state_dir() {
-        let input = valid_config_json().replace(
-            "\"dir\": \"src/components/ui/_kit\"",
-            "\"dir\": \"src/components/ui/_state_v2\"",
-        );
-
-        let config = parse_components_json_str(&input).expect("parse config");
-
-        assert_eq!(config.state.dir, "src/components/ui/_state_v2");
-    }
-
-    #[test]
-    fn accepts_explicit_hidden_state_dir() {
-        let input = valid_config_json().replace(
-            "\"dir\": \"src/components/ui/_kit\"",
-            "\"dir\": \".leptos-ui\"",
-        );
-
-        let config = parse_components_json_str(&input).expect("parse config");
-
-        assert_eq!(config.state.dir, ".leptos-ui");
-    }
-
-    #[test]
-    fn rejects_unsafe_state_dirs() {
-        for value in [
-            "",
-            "../.leptos-ui",
-            "/tmp/leptos-ui",
-            "src/components/ui/state dir",
-            "src/components/ui/state\\dir",
-            "src/components/ui//state",
-        ] {
-            let quoted = serde_json::to_string(value).expect("quote value");
-            let input = valid_config_json().replace(
-                "\"dir\": \"src/components/ui/_kit\"",
-                &format!("\"dir\": {quoted}"),
-            );
-
-            let error = parse_components_json_str(&input).expect_err("state dir should fail");
-
-            assert!(
-                matches!(
-                    error,
-                    ConfigError::PathMustBeRelative {
-                        field: "state.dir",
-                        ..
-                    } | ConfigError::PathTraversal {
-                        field: "state.dir",
-                        ..
-                    } | ConfigError::UnsafePathSegment {
-                        field: "state.dir",
-                        ..
-                    }
-                ),
-                "{value}: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_reserved_state_dir_targets() {
-        for value in [
-            "components.json",
-            "index.html",
-            "styles/kit.css",
-            "src/components/mod.rs",
-            "src/components/ui/mod.rs",
-        ] {
-            let input = valid_config_json().replace(
-                "\"dir\": \"src/components/ui/_kit\"",
-                &format!("\"dir\": \"{value}\""),
-            );
-
-            let error = parse_components_json_str(&input).expect_err("state target should fail");
-
-            assert!(matches!(
-                error,
-                ConfigError::PathOverlap {
-                    field: "state.dir",
-                    ..
-                }
-            ));
-        }
-    }
-
-    #[test]
     fn normalizes_canonical_install_roots() {
         let config = parse_components_json_str(&valid_config_json()).expect("parse config");
         let normalized = normalize_single_crate_project(
@@ -1031,10 +883,6 @@ mod tests {
         assert_eq!(
             normalized.install_roots.css_file,
             PathBuf::from("/workspace/demo/styles/kit.css")
-        );
-        assert_eq!(
-            normalized.install_roots.state_dir,
-            PathBuf::from("/workspace/demo/src/components/ui/_kit")
         );
     }
 }

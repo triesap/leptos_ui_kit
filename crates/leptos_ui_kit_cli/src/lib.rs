@@ -10,18 +10,15 @@ use std::{
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallState,
-    InstalledFile, InstalledItem, InstalledStyleBlock, MigrateStateDirPlan, SyncPlan, apply_add,
-    apply_init_with_state_dir, apply_migrate_state_dir, apply_sync, extract_managed_css_block,
-    hash_content_bytes, install_state_path, install_state_path_from_dir,
-    parse_install_state_str_at_path, plan_add, plan_init_with_state_dir, plan_migrate_state_dir,
-    plan_sync,
+    AddPlan, CommandEnvelope, CommandStatus, Diagnostic, DiagnosticLevel, InitPlan, InstallLock,
+    InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync,
+    extract_managed_css_block, hash_content_bytes, install_lock_path,
+    parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, ComponentsConfig, DEFAULT_CSS_PATH, DEFAULT_STATE_DIR, DependencyRequirement,
-    DependencyStatus, InfoOutput, ResolvedRegistryItem, build_info_output,
-    detect_cargo_plan_requirements, load_built_in_registry_item, load_registry_item,
-    read_built_in_registry_source,
+    CargoPlanEntry, ComponentsConfig, DEFAULT_CSS_PATH, DependencyRequirement, DependencyStatus,
+    InfoOutput, ResolvedRegistryItem, build_info_output, detect_cargo_plan_requirements,
+    load_built_in_registry_item, load_registry_item, read_built_in_registry_source,
 };
 use serde::Serialize;
 
@@ -31,7 +28,7 @@ struct InfoCommandOutput {
     #[serde(flatten)]
     info: InfoOutput,
     registry_available: bool,
-    installed_state: Option<InstallState>,
+    installed_lock: Option<InstallLock>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,7 +200,6 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "doctor" => run_doctor(&args[1..], &cwd),
         "info" => run_info(&args[1..], &cwd),
         "init" => run_init(&args[1..], &cwd),
-        "migrate" => run_migrate(&args[1..], &cwd),
         "sync" => run_sync(&args[1..], &cwd),
         "view" => run_view(&args[1..], &cwd),
         _ => Err(usage()),
@@ -363,10 +359,8 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
 fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     let mut json = false;
     let mut dry_run = false;
-    let mut state_dir: Option<String> = None;
-    let mut iter = args.iter();
 
-    while let Some(arg) = iter.next() {
+    for arg in args {
         let Some(value) = arg.to_str() else {
             return Err("non-utf8 arguments are not supported".to_owned());
         };
@@ -374,15 +368,6 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
         match value {
             "--json" => json = true,
             "--dry-run" => dry_run = true,
-            "--state-dir" => {
-                let Some(path) = iter.next() else {
-                    return Err("--state-dir requires a path".to_owned());
-                };
-                let Some(path) = path.to_str() else {
-                    return Err("non-utf8 arguments are not supported".to_owned());
-                };
-                state_dir = Some(path.to_owned());
-            }
             value if value.starts_with('-') => {
                 return Err(format!("unsupported flag for init: {value}"));
             }
@@ -391,10 +376,10 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     }
 
     let plan = if dry_run {
-        plan_init_with_state_dir(cwd, state_dir.as_deref())
+        plan_init(cwd)
             .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?
     } else {
-        apply_init_with_state_dir(cwd, state_dir.as_deref())
+        apply_init(cwd)
             .map_err(|error| format!("failed to initialize {}: {error}", cwd.display()))?
     };
 
@@ -407,59 +392,6 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
     };
 
     println!("{}", render_init_plan(&plan, json, status)?);
-
-    Ok(())
-}
-
-fn run_migrate(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
-    let mut dry_run = false;
-    let mut positional = Vec::new();
-
-    for arg in args {
-        let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
-        };
-
-        match value {
-            "--json" => json = true,
-            "--dry-run" => dry_run = true,
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for migrate: {value}"));
-            }
-            value => positional.push(value.to_owned()),
-        }
-    }
-
-    if positional.len() != 2 || positional.first().map(String::as_str) != Some("state-dir") {
-        return Err("migrate accepts exactly: migrate state-dir <path>".to_owned());
-    }
-
-    let target_dir = positional[1].clone();
-    let plan = if dry_run {
-        plan_migrate_state_dir(cwd, &target_dir).map_err(|error| {
-            format!(
-                "failed to plan state directory migration for {}: {error}",
-                cwd.display()
-            )
-        })?
-    } else {
-        apply_migrate_state_dir(cwd, &target_dir).map_err(|error| {
-            format!(
-                "failed to migrate state directory for {}: {error}",
-                cwd.display()
-            )
-        })?
-    };
-    let status = if dry_run {
-        CommandStatus::Planned
-    } else if plan.is_empty() {
-        CommandStatus::NoChange
-    } else {
-        CommandStatus::Success
-    };
-
-    println!("{}", render_migrate_state_dir_plan(&plan, json, status)?);
 
     Ok(())
 }
@@ -634,41 +566,11 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
     Ok(output)
 }
 
-fn render_migrate_state_dir_plan(
-    plan: &MigrateStateDirPlan,
-    json: bool,
-    status: CommandStatus,
-) -> Result<String, String> {
-    if json {
-        return serde_json::to_string_pretty(
-            &CommandEnvelope::new("migrate state-dir", status, plan)
-                .with_changes(plan.changes.clone()),
-        )
-        .map_err(|error| format!("failed to serialize migrate plan: {error}"));
-    }
-
-    if plan.is_empty() {
-        return Ok(format!(
-            "migrate state-dir: no changes planned for {}",
-            plan.target_dir
-        ));
-    }
-
-    let mut output = format!(
-        "migrate state-dir {} -> {} planned changes:",
-        plan.source_dir, plan.target_dir
-    );
-    for change in &plan.changes {
-        output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
-    }
-    Ok(output)
-}
-
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
     let command_output = InfoCommandOutput {
         info: output.clone(),
         registry_available: load_built_in_registry_item("button").is_ok(),
-        installed_state: read_installed_state(
+        installed_lock: read_installed_lock(
             &output.detected.project_root,
             output.components_config.as_ref(),
         ),
@@ -680,7 +582,7 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     }
 
     Ok(format!(
-        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_state: {}",
+        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
         output.detected.project_root.display(),
         output.detected.workspace_mode,
         output.detected.source_root.display(),
@@ -692,7 +594,7 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
             .map(|value| format!("{value:?}"))
             .unwrap_or_else(|| "unknown".to_owned()),
         command_output.registry_available,
-        command_output.installed_state.is_some()
+        command_output.installed_lock.is_some()
     ))
 }
 
@@ -796,7 +698,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 info.detected.dependency_plan.leptos_router.status,
             );
 
-            checks.extend(state_checks(cwd, strict, info.components_config.as_ref()));
+            checks.extend(lock_checks(cwd, strict, info.components_config.as_ref()));
             checks.extend(stylesheet_checks(cwd, strict, &info));
             checks.extend(registry_dependency_checks(cwd, strict, &info));
         }
@@ -920,88 +822,78 @@ fn strict_check(strict: bool, name: impl Into<String>, message: impl Into<String
     }
 }
 
-fn state_checks(
+fn lock_checks(
     cwd: &Path,
     strict: bool,
     components_config: Option<&ComponentsConfig>,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let state_logical_path = components_config
-        .map(install_state_path)
-        .unwrap_or_else(|| install_state_path_from_dir(DEFAULT_STATE_DIR));
-    let state_path = cwd.join(&state_logical_path);
-    if !state_path.is_file() {
+    let lock_logical_path = components_config
+        .map(install_lock_path)
+        .unwrap_or_else(|| "components.lock.json".to_owned());
+    let lock_path = cwd.join(&lock_logical_path);
+    if !lock_path.is_file() {
         checks.push(strict_check(
             strict,
-            "state",
-            format!("{state_logical_path} is missing"),
+            "lock",
+            format!("{lock_logical_path} is missing"),
         ));
         return checks;
     }
 
-    let state_input = match fs::read_to_string(&state_path) {
+    let lock_input = match fs::read_to_string(&lock_path) {
         Ok(input) => input,
         Err(error) => {
             checks.push(
-                DoctorCheck::fail("state", format!("failed to read state: {error}"))
-                    .with_path(state_path.display().to_string()),
+                DoctorCheck::fail("lock", format!("failed to read lock: {error}"))
+                    .with_path(lock_path.display().to_string()),
             );
             return checks;
         }
     };
-    let state = match parse_install_state_str_at_path(&state_input, Path::new(&state_logical_path))
-    {
-        Ok(state) => state,
+    let lock = match parse_install_lock_str_at_path(&lock_input, Path::new(&lock_logical_path)) {
+        Ok(lock) => lock,
         Err(error) => {
             checks.push(
-                DoctorCheck::fail("state", error.to_string())
-                    .with_path(state_path.display().to_string()),
+                DoctorCheck::fail("lock", error.to_string())
+                    .with_path(lock_path.display().to_string()),
             );
             return checks;
         }
     };
 
-    checks.push(DoctorCheck::pass("state", "install state is valid"));
-    checks.push(compare_config_hash(cwd, strict, &state));
+    checks.push(DoctorCheck::pass("lock", "install lock is valid"));
+    checks.push(compare_config_hash(cwd, strict, &lock));
     if let Some(config) = components_config {
         checks.extend(compare_desired_items(
             config,
-            &state,
+            &lock,
             strict,
-            &state_logical_path,
+            &lock_logical_path,
         ));
     }
-    for item in state.items.values() {
+    for item in lock.items.values() {
         checks.push(compare_item_content_hash(item));
         for file in &item.files {
             let source_path = cwd.join(&file.path);
-            let baseline_path = cwd.join(&file.baseline_path);
-            checks.extend(compare_file_to_baseline(
+            checks.extend(compare_file_to_lock(
                 "installed_file",
                 file,
                 &source_path,
-                &baseline_path,
                 strict,
             ));
         }
         for block in &item.style_blocks {
             let css_path = cwd.join(&block.css_path);
-            let baseline_path = cwd.join(&block.baseline_path);
-            checks.extend(compare_css_block_to_baseline(
+            checks.extend(compare_css_block_to_lock(
                 block,
                 &css_path,
                 &block.block_id,
-                &baseline_path,
                 strict,
             ));
         }
     }
-    checks.extend(git_metadata_checks(
-        cwd,
-        strict,
-        &state,
-        &state_logical_path,
-    ));
+    checks.extend(git_metadata_checks(cwd, strict, &lock_logical_path));
 
     checks
 }
@@ -1099,8 +991,8 @@ fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
     }
 
     if cargo_plan.is_empty() {
-        if let Some(state) = read_installed_state(cwd, info.components_config.as_ref()) {
-            for item in state.items.values() {
+        if let Some(lock) = read_installed_lock(cwd, info.components_config.as_ref()) {
+            for item in lock.items.values() {
                 if let Ok(registry_item) = load_built_in_registry_item(&item.name) {
                     merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
                 }
@@ -1159,17 +1051,17 @@ fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) 
     }
 }
 
-fn compare_config_hash(cwd: &Path, strict: bool, state: &InstallState) -> DoctorCheck {
+fn compare_config_hash(cwd: &Path, strict: bool, lock: &InstallLock) -> DoctorCheck {
     let path = cwd.join("components.json");
     match fs::read(&path) {
-        Ok(content) if hash_content_bytes(&content) == state.project.config_hash => {
-            DoctorCheck::pass("config_hash", "components.json hash matches install state")
+        Ok(content) if hash_content_bytes(&content) == lock.project.config_hash => {
+            DoctorCheck::pass("config_hash", "components.json hash matches install lock")
                 .with_path(path.display().to_string())
         }
         Ok(_) => strict_check(
             strict,
             "config_hash",
-            "components.json hash differs from install state",
+            "components.json hash differs from install lock",
         )
         .with_path(path.display().to_string()),
         Err(error) => DoctorCheck::fail("config_hash", format!("failed to read config: {error}"))
@@ -1179,9 +1071,9 @@ fn compare_config_hash(cwd: &Path, strict: bool, state: &InstallState) -> Doctor
 
 fn compare_desired_items(
     config: &ComponentsConfig,
-    state: &InstallState,
+    lock: &InstallLock,
     strict: bool,
-    state_logical_path: &str,
+    lock_logical_path: &str,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let desired_ids = config
@@ -1191,7 +1083,7 @@ fn compare_desired_items(
         .collect::<BTreeSet<_>>();
 
     for desired_id in &desired_ids {
-        if state.items.contains_key(desired_id) {
+        if lock.items.contains_key(desired_id) {
             checks.push(DoctorCheck::pass(
                 "desired_item",
                 format!("desired item {desired_id} is installed"),
@@ -1208,7 +1100,7 @@ fn compare_desired_items(
         }
     }
 
-    for installed_id in state.items.keys() {
+    for installed_id in lock.items.keys() {
         if !desired_ids.contains(installed_id) {
             checks.push(
                 strict_check(
@@ -1216,7 +1108,7 @@ fn compare_desired_items(
                     "desired_item",
                     format!("installed item {installed_id} is not declared in components.json"),
                 )
-                .with_path(state_logical_path),
+                .with_path(lock_logical_path),
             );
         }
     }
@@ -1224,26 +1116,12 @@ fn compare_desired_items(
     checks
 }
 
-fn git_metadata_checks(
-    cwd: &Path,
-    strict: bool,
-    state: &InstallState,
-    state_logical_path: &str,
-) -> Vec<DoctorCheck> {
+fn git_metadata_checks(cwd: &Path, strict: bool, state_logical_path: &str) -> Vec<DoctorCheck> {
     if !is_git_worktree(cwd) {
         return Vec::new();
     }
 
-    let mut paths = BTreeSet::from([state_logical_path.to_owned()]);
-    for item in state.items.values() {
-        for file in &item.files {
-            paths.insert(file.baseline_path.clone());
-        }
-        for block in &item.style_blocks {
-            paths.insert(block.baseline_path.clone());
-        }
-    }
-
+    let paths = BTreeSet::from([state_logical_path.to_owned()]);
     let mut ignored = Vec::new();
     for path in paths {
         match git_check_ignore(cwd, &path) {
@@ -1327,12 +1205,11 @@ fn compare_item_content_hash(item: &InstalledItem) -> DoctorCheck {
     }
 }
 
-fn compare_file_to_baseline(
+fn compare_file_to_lock(
     name: &str,
     file: &InstalledFile,
     source_path: &Path,
-    baseline_path: &Path,
-    strict: bool,
+    _strict: bool,
 ) -> Vec<DoctorCheck> {
     let source = match fs::read_to_string(source_path) {
         Ok(source) => source,
@@ -1343,28 +1220,18 @@ fn compare_file_to_baseline(
             ];
         }
     };
-    let baseline = match fs::read_to_string(baseline_path) {
-        Ok(baseline) => baseline,
-        Err(error) => {
-            return vec![
-                DoctorCheck::fail(name, format!("failed to read baseline: {error}"))
-                    .with_path(baseline_path.display().to_string()),
-            ];
-        }
-    };
     let source_hash = hash_content_bytes(source.as_bytes());
-    let baseline_hash = hash_content_bytes(baseline.as_bytes());
     let mut checks = Vec::new();
 
-    if baseline_hash == file.baseline_hash {
+    if source_hash == file.generated_hash {
         checks.push(
-            DoctorCheck::pass("baseline_hash", "file baseline hash matches state")
-                .with_path(baseline_path.display().to_string()),
+            DoctorCheck::pass(name, "installed file matches generated source")
+                .with_path(source_path.display().to_string()),
         );
     } else {
         checks.push(
-            DoctorCheck::fail("baseline_hash", "file baseline hash differs from state")
-                .with_path(baseline_path.display().to_string()),
+            DoctorCheck::warning(name, "installed file has local edits")
+                .with_path(source_path.display().to_string()),
         );
     }
 
@@ -1372,37 +1239,27 @@ fn compare_file_to_baseline(
         checks.push(
             DoctorCheck::pass(
                 "installed_file_hash",
-                "installed file hash matches install state",
+                "installed file hash matches install lock",
             )
             .with_path(source_path.display().to_string()),
         );
     } else {
         checks.push(
-            strict_check(
-                strict,
+            DoctorCheck::warning(
                 "installed_file_hash",
-                "installed file hash differs from install state",
+                "installed file hash differs from lock",
             )
             .with_path(source_path.display().to_string()),
         );
     }
 
-    checks.push(if source == baseline {
-        DoctorCheck::pass(name, "installed file matches baseline")
-            .with_path(source_path.display().to_string())
-    } else {
-        strict_check(strict, name, "installed file differs from baseline")
-            .with_path(source_path.display().to_string())
-    });
-
     checks
 }
 
-fn compare_css_block_to_baseline(
+fn compare_css_block_to_lock(
     block: &InstalledStyleBlock,
     css_path: &Path,
     block_id: &str,
-    baseline_path: &Path,
     strict: bool,
 ) -> Vec<DoctorCheck> {
     let css = match fs::read_to_string(css_path) {
@@ -1414,49 +1271,29 @@ fn compare_css_block_to_baseline(
             ];
         }
     };
-    let baseline = match fs::read_to_string(baseline_path) {
-        Ok(baseline) => baseline,
-        Err(error) => {
-            return vec![
-                DoctorCheck::fail(
-                    "style_block",
-                    format!("failed to read CSS baseline: {error}"),
-                )
-                .with_path(baseline_path.display().to_string()),
-            ];
-        }
-    };
-    let baseline_hash = hash_content_bytes(baseline.as_bytes());
     let mut checks = Vec::new();
 
-    if baseline_hash == block.baseline_hash {
-        checks.push(
-            DoctorCheck::pass("style_block_hash", "CSS baseline hash matches state")
-                .with_path(baseline_path.display().to_string()),
-        );
-    } else {
-        checks.push(
-            DoctorCheck::fail("style_block_hash", "CSS baseline hash differs from state")
-                .with_path(baseline_path.display().to_string()),
-        );
-    }
-
     match extract_managed_css_block(&css, block_id) {
-        Ok(Some(current)) if current == baseline => checks.push(
-            DoctorCheck::pass(
-                "style_block",
-                format!("managed CSS block {block_id} matches baseline"),
-            )
-            .with_path(css_path.display().to_string()),
-        ),
-        Ok(Some(_)) => checks.push(
-            strict_check(
-                strict,
-                "style_block",
-                format!("managed CSS block {block_id} differs from baseline"),
-            )
-            .with_path(css_path.display().to_string()),
-        ),
+        Ok(Some(current)) => {
+            let current_hash = hash_content_bytes(current.as_bytes());
+            if current_hash == block.generated_hash {
+                checks.push(
+                    DoctorCheck::pass(
+                        "style_block",
+                        format!("managed CSS block {block_id} matches generated source"),
+                    )
+                    .with_path(css_path.display().to_string()),
+                );
+            } else {
+                checks.push(
+                    DoctorCheck::warning(
+                        "style_block",
+                        format!("managed CSS block {block_id} has local edits"),
+                    )
+                    .with_path(css_path.display().to_string()),
+                );
+            }
+        }
         Ok(None) => checks.push(
             strict_check(
                 strict,
@@ -1539,20 +1376,20 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
         .collect()
 }
 
-fn read_installed_state(
+fn read_installed_lock(
     project_root: &Path,
     components_config: Option<&ComponentsConfig>,
-) -> Option<InstallState> {
+) -> Option<InstallLock> {
     let state_logical_path = components_config
-        .map(install_state_path)
-        .unwrap_or_else(|| install_state_path_from_dir(DEFAULT_STATE_DIR));
+        .map(install_lock_path)
+        .unwrap_or_else(|| "components.lock.json".to_owned());
     let path = project_root.join(&state_logical_path);
     let input = fs::read_to_string(path).ok()?;
-    parse_install_state_str_at_path(&input, Path::new(&state_logical_path)).ok()
+    parse_install_lock_str_at_path(&input, Path::new(&state_logical_path)).ok()
 }
 
 fn usage() -> String {
-    "usage: leptos_ui_kit <add|doctor|info|init|migrate|sync|view> [--json] [--dry-run] [path-or-source]"
+    "usage: leptos_ui_kit <add|doctor|info|init|sync|view> [--json] [--dry-run] [path-or-source]"
         .to_owned()
 }
 
@@ -1568,8 +1405,7 @@ fn help_text() -> String {
         "  view <item>          show a registry item",
         "  add <item>           add a registry item to the app",
         "  sync                 reconcile installed items with components.json",
-        "  migrate state-dir    move installer state to a new configured directory",
-        "  doctor               validate generated source, CSS, state, and dependencies",
+        "  doctor               validate generated source, CSS, lock metadata, and dependencies",
         "",
         "global options:",
         "  --cwd <path>         run against a different project root",
@@ -1586,7 +1422,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "add" => vec![
             "usage: leptos_ui_kit add <item> [--dry-run] [--json]",
             "",
-            "Adds a built-in registry item and updates components.json, generated source, CSS, state, and baselines.",
+            "Adds a built-in registry item and updates components.json, components.lock.json, generated source, and CSS.",
         ],
         "doctor" => vec![
             "usage: leptos_ui_kit doctor [--strict] [--check] [--trunk-build] [--json]",
@@ -1599,19 +1435,14 @@ fn command_help(command: &str) -> Result<String, String> {
             "Inspects a supported single-crate Trunk CSR Leptos app.",
         ],
         "init" => vec![
-            "usage: leptos_ui_kit init [--state-dir <path>] [--dry-run] [--json]",
+            "usage: leptos_ui_kit init [--dry-run] [--json]",
             "",
-            "Creates components.json and the minimal app-owned source, CSS, and installer state files.",
-        ],
-        "migrate" => vec![
-            "usage: leptos_ui_kit migrate state-dir <path> [--dry-run] [--json]",
-            "",
-            "Moves installer state and baselines to a new configured state.dir.",
+            "Creates components.json, components.lock.json, and the minimal app-owned source and CSS files.",
         ],
         "sync" => vec![
             "usage: leptos_ui_kit sync [--dry-run] [--json]",
             "",
-            "Reconciles installed source, CSS, state, and baselines with components.json.",
+            "Reconciles installed source, CSS, and components.lock.json with components.json.",
         ],
         "view" => vec![
             "usage: leptos_ui_kit view <item> [--source] [--json]",
@@ -1634,7 +1465,7 @@ mod tests {
 
     use leptos_ui_kit_codegen::plan_init;
     use leptos_ui_kit_registry::{
-        canonical_components_json, components_config_to_json, components_config_with_desired_item,
+        components_config_to_json, components_config_with_desired_item,
         desired_builtin_button_item, parse_components_json_str,
     };
     use tempfile::tempdir;
@@ -1755,34 +1586,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
 
         assert!(root.join("components.json").is_file());
-        assert!(root.join("src/components/ui/_kit/state.json").is_file());
-    }
-
-    #[test]
-    fn init_state_dir_option_creates_configured_state() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
-        fs::create_dir(root.join("src")).expect("create src");
-        fs::write(
-            root.join("index.html"),
-            "<html><head></head><body></body></html>\n",
-        )
-        .expect("write index");
-
-        run(
-            vec![
-                OsString::from("init"),
-                OsString::from("--state-dir"),
-                OsString::from("src/components/ui/_custom_state"),
-            ],
-            root,
-        )
-        .expect("run init");
-
-        assert!(
-            root.join("src/components/ui/_custom_state/state.json")
-                .is_file()
-        );
+        assert!(root.join("components.lock.json").is_file());
     }
 
     #[test]
@@ -1820,11 +1624,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
-        assert!(
-            output.contains(
-                "\"path\": \"src/components/ui/_kit/baselines/builtin-button/button.rs\""
-            )
-        );
+        assert!(output.contains("\"path\": \"components.lock.json\""));
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -1842,10 +1642,7 @@ leptos_router = "0.9.0-alpha"
 
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
         assert!(root.join("src/components/ui/button.rs").is_file());
-        assert!(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.css")
-                .is_file()
-        );
+        assert!(root.join("components.lock.json").is_file());
 
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run second add");
         let output = render_add_plan(
@@ -2011,7 +1808,7 @@ leptos_router = "0.9.0-alpha"
         let root = dir.path();
         create_doctor_project(root);
         init_git(root);
-        fs::write(root.join(".gitignore"), "/src/components/ui/_kit/\n").expect("write gitignore");
+        fs::write(root.join(".gitignore"), "/components.lock.json\n").expect("write gitignore");
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
@@ -2021,14 +1818,11 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.git_metadata\""));
-        assert!(
-            output
-                .contains("installer metadata src/components/ui/_kit/state.json is ignored by Git")
-        );
+        assert!(output.contains("installer metadata components.lock.json is ignored by Git"));
     }
 
     #[test]
-    fn doctor_reports_state_hash_mismatches() {
+    fn doctor_reports_lock_hash_mismatches_as_warnings() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::write(
@@ -2053,28 +1847,28 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
-        let state_path = root.join("src/components/ui/_kit/state.json");
-        let mut state: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
-                .expect("parse state");
-        state["items"]["builtin:button"]["files"][0]["baselineHash"] =
+        let lock_path = root.join("components.lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&lock_path).expect("read lock"))
+                .expect("parse lock");
+        lock["items"]["builtin:button"]["files"][0]["generatedHash"] =
             serde_json::Value::String(format!("sha256:{}", "0".repeat(64)));
         fs::write(
-            &state_path,
+            &lock_path,
             format!(
                 "{}\n",
-                serde_json::to_string_pretty(&state).expect("serialize state")
+                serde_json::to_string_pretty(&lock).expect("serialize lock")
             ),
         )
-        .expect("write state");
+        .expect("write lock");
 
         let doctor = build_doctor_output(root, true, false, false);
         let output =
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
-        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert!(output.contains("\"code\": \"doctor.baseline_hash\""));
-        assert!(output.contains("file baseline hash differs from state"));
+        assert_eq!(doctor_status(&doctor), CommandStatus::Warning);
+        assert!(output.contains("\"code\": \"doctor.installed_file\""));
+        assert!(output.contains("installed file has local edits"));
     }
 
     #[test]
@@ -2104,13 +1898,12 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
 
         let css_path = root.join("styles/kit.css");
-        let baseline = fs::read_to_string(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.css"),
-        )
-        .expect("read baseline");
         let mut css = fs::read_to_string(&css_path).expect("read css");
+        let block = extract_managed_css_block(&css, "button")
+            .expect("extract block")
+            .expect("button block");
         css.push('\n');
-        css.push_str(&baseline);
+        css.push_str(&block);
         fs::write(&css_path, css).expect("write css");
 
         let doctor = build_doctor_output(root, true, false, false);
@@ -2120,50 +1913,6 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.style_block\""));
         assert!(output.contains("managed CSS block button markers are ambiguous"));
-    }
-
-    #[test]
-    fn migrate_state_dir_command_moves_legacy_metadata() {
-        let dir = tempdir().expect("tempdir");
-        let root = dir.path();
-        create_doctor_project(root);
-        write_legacy_state_config(root);
-        run(vec![OsString::from("init")], root).expect("run init");
-        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
-
-        run(
-            vec![
-                OsString::from("migrate"),
-                OsString::from("state-dir"),
-                OsString::from(DEFAULT_STATE_DIR),
-                OsString::from("--dry-run"),
-                OsString::from("--json"),
-            ],
-            root,
-        )
-        .expect("run migrate dry-run");
-        assert!(root.join(".leptos-ui/state.json").is_file());
-
-        run(
-            vec![
-                OsString::from("migrate"),
-                OsString::from("state-dir"),
-                OsString::from(DEFAULT_STATE_DIR),
-            ],
-            root,
-        )
-        .expect("run migrate");
-
-        assert!(root.join("src/components/ui/_kit/state.json").is_file());
-        assert!(
-            root.join("src/components/ui/_kit/baselines/builtin-button/button.rs")
-                .is_file()
-        );
-        assert!(!root.join(".leptos-ui").exists());
-        assert_eq!(
-            build_doctor_output(root, true, false, false).has_failures(),
-            false
-        );
     }
 
     #[test]
@@ -2186,7 +1935,7 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("--help")], Path::new(".")).expect("top-level help");
         run(vec![OsString::from("--version")], Path::new(".")).expect("version");
         run(
-            vec![OsString::from("migrate"), OsString::from("--help")],
+            vec![OsString::from("sync"), OsString::from("--help")],
             Path::new("."),
         )
         .expect("command help");
@@ -2248,7 +1997,7 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(exit_code_for_error("doctor checks failed"), 3);
         assert_eq!(
             exit_code_for_error(
-                "cannot safely patch src/components/ui/button.rs: target exists but is not tracked in state"
+                "cannot safely patch src/components/ui/button.rs: target exists but is not tracked in lock"
             ),
             10
         );
@@ -2331,18 +2080,6 @@ leptos_router = "0.9.0-alpha"
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    fn write_legacy_state_config(root: &Path) {
-        let mut config =
-            parse_components_json_str(&canonical_components_json().expect("canonical config"))
-                .expect("parse config");
-        config.state.dir = ".leptos-ui".to_owned();
-        fs::write(
-            root.join("components.json"),
-            components_config_to_json(&config).expect("serialize config"),
-        )
-        .expect("write config");
     }
 
     fn write_desired_button_config(root: &Path) {

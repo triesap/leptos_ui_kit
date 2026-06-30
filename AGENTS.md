@@ -28,8 +28,8 @@ root. Multi-member workspace installs remain out of scope.
 
 Generated components are app-owned source. Consumers should install the CLI
 from a pinned Git revision and commit generated files, `components.json`, and
-the configured state/baseline directory; they should not add this crate family
-to an app as the way to access generated components.
+`components.lock.json`; they should not add this crate family to an app as the
+way to access generated components.
 
 ## Repository Map
 
@@ -40,8 +40,7 @@ to an app as the way to access generated components.
   detection, registry metadata, schema URL constants, dependency plans, and
   built-in registry item loading.
 - `crates/leptos_ui_kit_codegen` owns dry-run planning, write transactions,
-  path safety, CSS/module patching, install state, baselines, and command
-  envelope types.
+  path safety, CSS/module patching, lock metadata, and command envelope types.
 - `crates/leptos_ui_kit_cli` owns the `leptos_ui_kit` binary, the
   `cargo leptos_ui_kit` subcommand entrypoint, and command output.
 - `crates/leptos_ui_kit_registry/registry` contains packaged built-in registry
@@ -86,7 +85,6 @@ leptos_ui_kit init
 leptos_ui_kit view button
 leptos_ui_kit add button
 leptos_ui_kit sync
-leptos_ui_kit migrate state-dir src/components/ui/_kit
 leptos_ui_kit doctor --strict
 cargo leptos_ui_kit doctor --strict
 ```
@@ -113,12 +111,14 @@ unless the domain exists and the user has approved the migration.
 The config model is strict. Unknown fields should fail. Legacy shadcn/Tailwind
 fields should fail.
 
-`components.json` declares desired registry items, the pinned tool source, and
-`state.dir`. The default state directory is `src/components/ui/_kit`.
-That directory records installer state and baselines. Strict doctor checks
-should fail when desired items are not installed, installed items are not
-declared, config hashes drift, generated baselines drift, or installer metadata
-is ignored by Git.
+`components.json` declares desired registry items, the pinned tool source, app
+source targets, and stylesheet target. `components.lock.json` records installed
+item hashes and generated hashes. Strict doctor checks should fail when desired
+items are not installed, installed items are not declared, config hashes drift,
+lock metadata is invalid, managed CSS markers are missing or ambiguous, or
+installer metadata is ignored by Git. Local edits to generated app-owned source
+and managed CSS blocks should be reported without being treated as strict
+failures.
 `styles.css` defaults to `styles/kit.css` and may be changed to another safe
 CSS file under `styles/`.
 
@@ -141,9 +141,9 @@ Generated components should:
 - keep CSS in managed blocks delimited by `leptos-ui-kit:start` and
   `leptos-ui-kit:end`
 
-If a generated file or managed CSS block is tracked in the configured
-`state.dir` state file,
-local edits must be detected through baselines instead of overwritten silently.
+If a generated file or managed CSS block is tracked in `components.lock.json`,
+local edits must be detected through generated hashes instead of overwritten
+silently.
 
 ## File And Docs Policy
 

@@ -42,31 +42,24 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert!(project.join("src/components/ui/button.rs").is_file());
     assert!(
         project
-            .join("src/components/ui/_kit/baselines/builtin-button/button.rs")
-            .is_file()
-    );
-    assert!(
-        project
             .join("src/components/ui/collapsible/mod.rs")
             .is_file()
     );
     assert!(
         project
-            .join("src/components/ui/_kit/baselines/builtin-collapsible/collapsible/root.rs")
+            .join("src/components/ui/collapsible/root.rs")
             .is_file()
     );
     assert!(project.join("src/components/ui/dialog/mod.rs").is_file());
     assert!(
         project
-            .join("src/components/ui/_kit/baselines/builtin-dialog/dialog/content.rs")
+            .join("src/components/ui/dialog/content.rs")
             .is_file()
     );
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());
-    assert!(
-        project
-            .join("src/components/ui/_kit/baselines/builtin-tabs/tabs/root.rs")
-            .is_file()
-    );
+    assert!(project.join("src/components/ui/tabs/root.rs").is_file());
+    assert!(project.join("components.lock.json").is_file());
+    assert!(!project.join("src/components/ui/_kit").exists());
 }
 
 fn assert_cargo_check(project: &Path) {
