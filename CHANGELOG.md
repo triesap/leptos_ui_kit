@@ -33,3 +33,10 @@ Semantic Versioning.
 - Extend the workflow fixture to install Button, Collapsible, Tabs, and Dialog
   together, run `sync`, pass strict doctor, and compile for
   `wasm32-unknown-unknown`.
+- Change the canonical installer state directory to
+  `src/components/ui/_kit_state`, with strict `components.json` `state.dir`
+  validation and configurable init support.
+- Add `leptos_ui_kit migrate state-dir <path>` for explicit state and baseline
+  migrations.
+- Add top-level and command-specific help plus `--version` output.
+- Keep generated `Button` option enums warning-clean for consumer binary apps.
