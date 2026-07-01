@@ -17,6 +17,7 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "67117663f968a01d738dfbe22e03557a70681047", features = ["leptos"] }
 
 [lints]
 workspace = true
