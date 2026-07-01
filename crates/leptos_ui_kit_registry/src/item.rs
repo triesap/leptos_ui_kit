@@ -1277,6 +1277,8 @@ mod tests {
             .expect("read field message source");
         let required_source = fs::read_to_string(root.join("ui/field/required.rs"))
             .expect("read field required source");
+        let surface_source = fs::read_to_string(root.join("ui/field/surface.rs"))
+            .expect("read field surface source");
         let input_source =
             fs::read_to_string(root.join("ui/field/text_input.rs")).expect("read input source");
         let textarea_source =
@@ -1296,6 +1298,8 @@ mod tests {
         assert!(message_source.contains("id=message_id"));
         assert!(required_source.contains("pub fn FieldRequired"));
         assert!(required_source.contains("aria-hidden=\"true\""));
+        assert!(surface_source.contains("pub fn FieldSurface"));
+        assert!(surface_source.contains("data-invalid"));
         assert!(input_source.contains("pub fn TextInput"));
         assert!(input_source.contains("TextInputType"));
         assert!(textarea_source.contains("pub fn TextArea"));
@@ -1303,6 +1307,7 @@ mod tests {
         assert!(select_source.contains("pub fn SelectIcon"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
+        assert!(css.contains(".kit-field-surface"));
         assert!(css.contains(".kit-field-control"));
         assert!(css.contains(".kit-native-select"));
         assert!(css.contains(".kit-select-icon"));
@@ -1322,6 +1327,7 @@ mod tests {
                 "FieldMessage",
                 "FieldRequired",
                 "FieldRoot",
+                "FieldSurface",
                 "NativeSelect",
                 "SelectIcon",
                 "TextArea",

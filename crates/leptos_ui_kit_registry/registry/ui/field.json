@@ -39,6 +39,7 @@
           "FieldMessage",
           "FieldRequired",
           "FieldRoot",
+          "FieldSurface",
           "NativeSelect",
           "SelectIcon",
           "TextArea",
@@ -52,6 +53,14 @@
       "target": {
         "kind": "ui",
         "path": "field/root.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/surface.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/surface.rs",
         "exports": []
       }
     },

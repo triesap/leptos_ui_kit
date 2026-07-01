@@ -27,6 +27,12 @@
   --kit-field-message-line-height: 1.35;
   --kit-field-message-invalid-color: #dc2626;
   --kit-field-required-color: #dc2626;
+  --kit-field-surface-background: var(--kit-field-control-background);
+  --kit-field-surface-border-color: transparent;
+  --kit-field-surface-border-width: 0;
+  --kit-field-surface-radius: var(--kit-field-control-radius);
+  --kit-field-surface-padding-block: var(--kit-field-control-padding-block);
+  --kit-field-surface-padding-inline: var(--kit-field-control-padding-inline);
   --kit-select-icon-color: currentColor;
   --kit-select-icon-inline-end: var(--kit-field-control-padding-inline);
   --kit-select-icon-size: 1rem;
@@ -41,6 +47,20 @@
 
 .kit-field[data-disabled] {
   opacity: var(--kit-field-disabled-opacity);
+}
+
+.kit-field-surface {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--kit-field-gap);
+  min-inline-size: 0;
+  border: var(--kit-field-surface-border-width) solid var(--kit-field-surface-border-color);
+  border-radius: var(--kit-field-surface-radius);
+  padding:
+    var(--kit-field-surface-padding-block)
+    var(--kit-field-surface-padding-inline);
+  background: var(--kit-field-surface-background);
+  position: relative;
 }
 
 .kit-field-label {
