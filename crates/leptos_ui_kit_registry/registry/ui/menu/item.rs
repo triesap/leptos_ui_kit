@@ -1,12 +1,11 @@
 use leptos::ev::{FocusEvent, KeyboardEvent};
 use leptos::html;
 use leptos::prelude::*;
-use web_ui_primitives::leptos::{
-    attrs::{MenuItemAttrs, MenuItemKind as AttrsMenuItemKind, menu_item_attrs},
-    use_dom_bindings,
+use web_ui_primitives::leptos::attrs::{
+    MenuItemAttrs, MenuItemKind as AttrsMenuItemKind, menu_item_attrs,
 };
 
-use super::root::{MenuContext, class_with_base};
+use super::root::{MenuContext, attr_bool, attr_string, class_with_base, data_attr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuItemKind {
@@ -49,8 +48,7 @@ pub fn MenuItem(
             MenuItemAttrs::new().kind(kind.as_attrs_kind()),
         )
     });
-    let bindings = use_dom_bindings::<html::Button>(attrs, Vec::new());
-    let node_ref = bindings.node_ref();
+    let node_ref = NodeRef::<html::Button>::new();
     context.register_item(index, node_ref, label.unwrap_or_default());
 
     let click_context = context.clone();
@@ -121,6 +119,14 @@ pub fn MenuItem(
             node_ref=node_ref
             class=class_with_base("kit-menu-item", &class)
             type="button"
+            role=move || attr_string(&attrs.get(), "role").unwrap_or_else(|| "menuitem".to_owned())
+            tabindex=move || attr_string(&attrs.get(), "tabindex").unwrap_or_else(|| "-1".to_owned())
+            disabled=move || attr_bool(&attrs.get(), "disabled")
+            aria-checked=move || attr_string(&attrs.get(), "aria-checked")
+            aria-disabled=move || attr_string(&attrs.get(), "aria-disabled")
+            data-state=move || attr_string(&attrs.get(), "data-state")
+            data-highlighted=move || data_attr(attr_bool(&attrs.get(), "data-highlighted"))
+            data-disabled=move || data_attr(attr_bool(&attrs.get(), "data-disabled"))
             on:click=on_click
             on:focus=on_focus
             on:keydown=on_keydown

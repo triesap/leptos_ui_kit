@@ -1,12 +1,8 @@
 use leptos::ev::PointerEvent;
-use leptos::html;
 use leptos::prelude::*;
-use web_ui_primitives::leptos::{
-    attrs::{MenuTriggerAttrs, menu_trigger_attrs},
-    use_dom_bindings,
-};
+use web_ui_primitives::leptos::attrs::{MenuTriggerAttrs, menu_trigger_attrs};
 
-use super::root::{MenuContext, class_with_base};
+use super::root::{MenuContext, attr_string, class_with_base};
 
 #[component]
 pub fn MenuTrigger(
@@ -26,8 +22,6 @@ pub fn MenuTrigger(
             MenuTriggerAttrs::new().controls_id(attrs_controls_id.as_str()),
         )
     });
-    let bindings = use_dom_bindings::<html::Button>(attrs, Vec::new());
-    let node_ref = bindings.node_ref();
     let suppress_click = RwSignal::new(false);
 
     let pointer_context = context.clone();
@@ -55,10 +49,13 @@ pub fn MenuTrigger(
     view! {
         <button
             id=trigger_id
-            node_ref=node_ref
             class=class_with_base("kit-menu-trigger", &class)
             type="button"
             disabled=move || disabled.get()
+            aria-haspopup=move || attr_string(&attrs.get(), "aria-haspopup").unwrap_or_else(|| "menu".to_owned())
+            aria-expanded=move || attr_string(&attrs.get(), "aria-expanded").unwrap_or_else(|| "false".to_owned())
+            aria-controls=move || attr_string(&attrs.get(), "aria-controls")
+            data-state=move || attr_string(&attrs.get(), "data-state").unwrap_or_else(|| "closed".to_owned())
             on:pointerdown=on_pointerdown
             on:click=on_click
         >

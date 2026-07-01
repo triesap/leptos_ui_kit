@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::core::{Direction, MenuLoop, MenuModel};
+use web_ui_primitives::leptos::{DomAttribute, DomAttributeValue};
 
 static NEXT_MENU_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -149,6 +150,33 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
     } else {
         format!("{base} {class}")
     }
+}
+
+pub(crate) fn attr_string(attrs: &[DomAttribute], name: &str) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if attr.name() != name {
+            return None;
+        }
+        match attr.value() {
+            DomAttributeValue::String(value) => Some(value.clone()),
+            DomAttributeValue::Bool(true) => Some(String::new()),
+            DomAttributeValue::Bool(false) => None,
+        }
+    })
+}
+
+pub(crate) fn attr_bool(attrs: &[DomAttribute], name: &str) -> bool {
+    attrs.iter().any(|attr| {
+        attr.name() == name
+            && match attr.value() {
+                DomAttributeValue::String(_) => true,
+                DomAttributeValue::Bool(value) => *value,
+            }
+    })
+}
+
+pub(crate) fn data_attr(active: bool) -> Option<&'static str> {
+    active.then_some("")
 }
 
 fn next_menu_id() -> String {

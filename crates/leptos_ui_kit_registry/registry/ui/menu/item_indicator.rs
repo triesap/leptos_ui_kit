@@ -1,10 +1,9 @@
 #![allow(dead_code)]
 
-use leptos::html;
 use leptos::prelude::*;
-use web_ui_primitives::leptos::{attrs::menu_item_indicator_attrs, use_dom_bindings};
+use web_ui_primitives::leptos::attrs::menu_item_indicator_attrs;
 
-use super::root::{MenuContext, class_with_base};
+use super::root::{MenuContext, attr_bool, attr_string, class_with_base};
 
 #[component]
 pub fn MenuItemIndicator(
@@ -24,10 +23,12 @@ pub fn MenuItemIndicator(
         });
         menu_item_indicator_attrs(&model, index)
     });
-    let bindings = use_dom_bindings::<html::Span>(attrs, Vec::new());
-
     view! {
-        <span node_ref=bindings.node_ref() class=class_with_base("kit-menu-item-indicator", &class)>
+        <span
+            class=class_with_base("kit-menu-item-indicator", &class)
+            hidden=move || attr_bool(&attrs.get(), "hidden")
+            data-state=move || attr_string(&attrs.get(), "data-state").unwrap_or_else(|| "unchecked".to_owned())
+        >
             {children()}
         </span>
     }
