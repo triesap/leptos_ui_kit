@@ -57,6 +57,7 @@ pub fn MenuTrigger(
             id=trigger_id
             node_ref=node_ref
             class=class_with_base("kit-menu-trigger", &class)
+            type="button"
             disabled=move || disabled.get()
             on:pointerdown=on_pointerdown
             on:click=on_click

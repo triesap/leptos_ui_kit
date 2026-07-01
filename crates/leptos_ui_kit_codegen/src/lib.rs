@@ -2235,7 +2235,7 @@ mod tests {
         assert!(
             ui_mod
                 .content
-                .contains("pub use nested::root::{NestedButton};")
+                .contains("pub use nested::root::NestedButton;")
         );
         assert_eq!(
             lock.files_by_path.get("src/components/ui/nested/root.rs"),
@@ -2499,7 +2499,7 @@ mod tests {
         assert_eq!(components, "// existing\npub mod ui;\n");
         assert_eq!(
             ui,
-            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonType, ButtonVariant};\npub mod collapsible;\npub use collapsible::root::{CollapsibleRoot};\n"
+            "// generated exports\npub mod button;\npub use button::{Button, ButtonSize, ButtonType, ButtonVariant};\npub mod collapsible;\npub use collapsible::root::CollapsibleRoot;\n"
         );
         assert_eq!(
             patch_ui_mod(

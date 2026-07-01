@@ -1246,6 +1246,11 @@ mod tests {
         assert!(source.contains("pub fn Button"));
         assert!(source.contains("Children"));
         assert!(source.contains("<button"));
+        assert!(source.contains("type=button_type.as_str()"));
+        assert!(source.contains("disabled=move || disabled.get()"));
+        assert!(source.contains("Self::Button => \"button\""));
+        assert!(source.contains("Self::Submit => \"submit\""));
+        assert!(source.contains("Self::Reset => \"reset\""));
         assert!(!source.contains("leptos_router"));
         assert!(!source.contains("tailwind"));
         assert!(css.contains(".kit-button"));
@@ -1281,6 +1286,8 @@ mod tests {
         assert!(source.contains("href=href"));
         assert!(source.contains("target=target_attr"));
         assert!(source.contains("rel=rel_attr"));
+        assert!(source.contains("Self::Blank => Some(\"_blank\")"));
+        assert!(source.contains("rel.or_else(|| target.default_rel().map(str::to_owned))"));
         assert!(source.contains("noopener noreferrer"));
         assert!(!source.contains("leptos_router"));
         assert!(css.contains(".kit-anchor"));
@@ -1339,11 +1346,20 @@ mod tests {
         assert!(input_source.contains("pub fn TextInput"));
         assert!(input_source.contains("TextInputType"));
         assert!(input_source.contains("context.required_signal()"));
+        assert!(input_source.contains("required=move || required.get()"));
+        assert!(input_source.contains("disabled=move || disabled.get()"));
+        assert!(input_source.contains("aria-invalid=move || data_state(invalid.get())"));
         assert!(textarea_source.contains("pub fn TextArea"));
         assert!(textarea_source.contains("context.required_signal()"));
+        assert!(textarea_source.contains("required=move || required.get()"));
+        assert!(textarea_source.contains("disabled=move || disabled.get()"));
+        assert!(textarea_source.contains("aria-invalid=move || data_state(invalid.get())"));
         assert!(select_source.contains("pub fn NativeSelect"));
         assert!(select_source.contains("pub fn SelectIcon"));
         assert!(select_source.contains("context.required_signal()"));
+        assert!(select_source.contains("required=move || required.get()"));
+        assert!(select_source.contains("disabled=move || disabled.get()"));
+        assert!(select_source.contains("aria-invalid=move || data_state(invalid.get())"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
         assert!(css.contains(".kit-field-surface"));
@@ -1391,6 +1407,8 @@ mod tests {
         let root = built_in_registry_root();
         let root_source =
             fs::read_to_string(root.join("ui/menu/root.rs")).expect("read menu root source");
+        let trigger_source =
+            fs::read_to_string(root.join("ui/menu/trigger.rs")).expect("read menu trigger source");
         let item_source =
             fs::read_to_string(root.join("ui/menu/item.rs")).expect("read menu item source");
         let indicator_source = fs::read_to_string(root.join("ui/menu/item_indicator.rs"))
@@ -1400,10 +1418,22 @@ mod tests {
         assert!(root_source.contains("checked_index: Option<Signal<Option<usize>>>"));
         assert!(root_source.contains("model_snapshot"));
         assert!(root_source.contains("apply_controlled_checked_untracked"));
+        assert!(trigger_source.contains("menu_trigger_attrs"));
+        assert!(trigger_source.contains("use_dom_bindings::<html::Button>"));
+        assert!(trigger_source.contains("<button"));
+        assert!(trigger_source.contains("type=\"button\""));
+        assert!(trigger_source.contains("disabled=move || disabled.get()"));
         assert!(item_source.contains("MenuItemKind::Radio"));
         assert!(item_source.contains("checked_is_controlled"));
         assert!(item_source.contains("model_snapshot"));
+        assert!(item_source.contains("menu_item_attrs"));
+        assert!(item_source.contains("use_dom_bindings::<html::Button>"));
+        assert!(item_source.contains("<button"));
+        assert!(item_source.contains("type=\"button\""));
+        assert!(item_source.contains("MenuItemAttrs::new().kind(kind.as_attrs_kind())"));
         assert!(indicator_source.contains("model_snapshot"));
+        assert!(indicator_source.contains("menu_item_indicator_attrs"));
+        assert!(indicator_source.contains("use_dom_bindings::<html::Span>"));
         assert!(
             item.item
                 .accessibility

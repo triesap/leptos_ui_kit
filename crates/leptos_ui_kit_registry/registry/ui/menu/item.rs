@@ -120,6 +120,7 @@ pub fn MenuItem(
         <button
             node_ref=node_ref
             class=class_with_base("kit-menu-item", &class)
+            type="button"
             on:click=on_click
             on:focus=on_focus
             on:keydown=on_keydown
