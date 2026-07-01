@@ -60,6 +60,7 @@ pub fn Button(
     #[prop(optional, default = ButtonSize::Md)] size: ButtonSize,
     #[prop(optional, default = ButtonType::Button)] button_type: ButtonType,
     #[prop(optional, into, default = false.into())] disabled: Signal<bool>,
+    #[prop(optional)] on_click: Option<Callback<leptos::ev::MouseEvent>>,
     #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
@@ -75,6 +76,11 @@ pub fn Button(
             class=class
             type=button_type.as_str()
             disabled=move || disabled.get()
+            on:click=move |event| {
+                if let Some(on_click) = on_click.as_ref() {
+                    on_click.run(event);
+                }
+            }
         >
             {children()}
         </button>

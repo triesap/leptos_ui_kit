@@ -15,6 +15,7 @@ fn main() {
 #[component]
 fn App() -> impl IntoView {
     let (sending, _) = signal(false);
+    let (count, set_count) = signal(0);
 
     view! {
         <main>
@@ -28,6 +29,14 @@ fn App() -> impl IntoView {
                     {move || if sending.get() { "Sending" } else { "Send message" }}
                 </Button>
             </form>
+            <Button
+                variant=ButtonVariant::Ghost
+                size=ButtonSize::Sm
+                button_type=ButtonType::Button
+                on_click=Callback::new(move |_| set_count.update(|count| *count += 1))
+            >
+                {move || format!("Clicked {}", count.get())}
+            </Button>
             <CollapsibleRoot>
                 <CollapsibleTrigger>"Details"</CollapsibleTrigger>
                 <CollapsibleContent>
