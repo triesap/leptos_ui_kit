@@ -48,7 +48,7 @@ fn App() -> impl IntoView {
             >
                 {move || format!("Clicked {}", count.get())}
             </Button>
-            <FieldRoot id="contact-name" invalid=false disabled=false>
+            <FieldRoot id="contact-name" required=true invalid=false disabled=false>
                 <FieldLabel>
                     "Name"
                     <FieldRequired />
@@ -57,7 +57,6 @@ fn App() -> impl IntoView {
                     input_type=TextInputType::Text
                     name="name"
                     value=name
-                    required=true
                     on_input=Callback::new(move |value| set_name.set(value))
                 />
                 <FieldMessage>"Use your public name."</FieldMessage>
@@ -74,7 +73,7 @@ fn App() -> impl IntoView {
                 </NativeSelect>
                 <SelectIcon>"v"</SelectIcon>
             </FieldRoot>
-            <FieldRoot id="contact-message">
+            <FieldRoot id="contact-message" required=true>
                 <FieldLabel>
                     "Message"
                     <FieldRequired />
@@ -83,7 +82,6 @@ fn App() -> impl IntoView {
                     name="message"
                     value=message
                     rows=4
-                    required=true
                     on_input=Callback::new(move |value| set_message.set(value))
                 />
             </FieldRoot>

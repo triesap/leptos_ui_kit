@@ -24,6 +24,10 @@
       {
         "name": "required-indicator-hidden-from-screen-readers",
         "required": true
+      },
+      {
+        "name": "field-required-state-propagation",
+        "required": true
       }
     ],
     "notes": []

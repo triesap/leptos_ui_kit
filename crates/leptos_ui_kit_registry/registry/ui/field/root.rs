@@ -8,6 +8,7 @@ static NEXT_FIELD_ID: AtomicUsize = AtomicUsize::new(1);
 pub(crate) struct FieldContext {
     control_id: String,
     message_id: String,
+    pub(crate) required: Signal<bool>,
     pub(crate) invalid: Signal<bool>,
     pub(crate) disabled: Signal<bool>,
 }
@@ -19,6 +20,10 @@ impl FieldContext {
 
     pub(crate) fn message_id(&self) -> String {
         self.message_id.clone()
+    }
+
+    pub(crate) fn required_signal(&self) -> Signal<bool> {
+        self.required
     }
 
     pub(crate) fn invalid_signal(&self) -> Signal<bool> {
@@ -33,6 +38,7 @@ impl FieldContext {
 #[component]
 pub fn FieldRoot(
     #[prop(optional, into)] id: Option<String>,
+    #[prop(optional, into, default = false.into())] required: Signal<bool>,
     #[prop(optional, into, default = false.into())] invalid: Signal<bool>,
     #[prop(optional, into, default = false.into())] disabled: Signal<bool>,
     #[prop(optional, into)] class: String,
@@ -42,6 +48,7 @@ pub fn FieldRoot(
     provide_context(FieldContext {
         control_id: format!("{base_id}-control"),
         message_id: format!("{base_id}-message"),
+        required,
         invalid,
         disabled,
     });
@@ -49,6 +56,7 @@ pub fn FieldRoot(
     view! {
         <div
             class=class_with_base("kit-field", &class)
+            data-required=move || data_state(required.get())
             data-invalid=move || data_state(invalid.get())
             data-disabled=move || data_state(disabled.get())
         >

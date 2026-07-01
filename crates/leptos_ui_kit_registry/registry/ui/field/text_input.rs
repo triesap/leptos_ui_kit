@@ -36,7 +36,7 @@ pub fn TextInput(
     #[prop(optional, into)] name: Option<String>,
     #[prop(optional, into)] value: Option<Signal<String>>,
     #[prop(optional, into)] autocomplete: Option<String>,
-    #[prop(optional, default = false)] required: bool,
+    #[prop(optional, into)] required: Option<Signal<bool>>,
     #[prop(optional, into)] disabled: Option<Signal<bool>>,
     #[prop(optional, into)] invalid: Option<Signal<bool>>,
     #[prop(optional, into)] described_by: Option<String>,
@@ -46,6 +46,10 @@ pub fn TextInput(
     let context = field_context();
     let control_id = resolved_control_id(id, &context, "kit-input");
     let message_id = resolved_message_id(described_by, &context);
+    let required = resolved_bool_signal(
+        required,
+        context.as_ref().map(|context| context.required_signal()),
+    );
     let disabled = resolved_bool_signal(
         disabled,
         context.as_ref().map(|context| context.disabled_signal()),
@@ -62,7 +66,7 @@ pub fn TextInput(
             type=input_type.as_str()
             name=name
             autocomplete=autocomplete
-            required=required
+            required=move || required.get()
             disabled=move || disabled.get()
             aria-describedby=move || message_id.clone()
             aria-invalid=move || data_state(invalid.get())

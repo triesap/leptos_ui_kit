@@ -1291,20 +1291,26 @@ mod tests {
         assert!(root_source.contains("pub fn FieldRoot"));
         assert!(root_source.contains("control_id"));
         assert!(root_source.contains("message_id"));
+        assert!(root_source.contains("required_signal"));
+        assert!(root_source.contains("data-required"));
         assert!(label_source.contains("pub fn FieldLabel"));
         assert!(label_source.contains("<label"));
         assert!(label_source.contains("for=control_id"));
         assert!(message_source.contains("pub fn FieldMessage"));
         assert!(message_source.contains("id=message_id"));
         assert!(required_source.contains("pub fn FieldRequired"));
+        assert!(required_source.contains("FieldRequired must be used inside FieldRoot"));
         assert!(required_source.contains("aria-hidden=\"true\""));
         assert!(surface_source.contains("pub fn FieldSurface"));
         assert!(surface_source.contains("data-invalid"));
         assert!(input_source.contains("pub fn TextInput"));
         assert!(input_source.contains("TextInputType"));
+        assert!(input_source.contains("context.required_signal()"));
         assert!(textarea_source.contains("pub fn TextArea"));
+        assert!(textarea_source.contains("context.required_signal()"));
         assert!(select_source.contains("pub fn NativeSelect"));
         assert!(select_source.contains("pub fn SelectIcon"));
+        assert!(select_source.contains("context.required_signal()"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
         assert!(css.contains(".kit-field-surface"));
@@ -1319,6 +1325,16 @@ mod tests {
                 .behaviors
                 .iter()
                 .any(|behavior| behavior.name == "label-control-association" && behavior.required)
+        );
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(
+                    |behavior| behavior.name == "field-required-state-propagation"
+                        && behavior.required
+                )
         );
         assert_eq!(
             item.item.files[0].target.exports,
