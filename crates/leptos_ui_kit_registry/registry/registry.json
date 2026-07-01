@@ -16,6 +16,10 @@
       "path": "ui/dialog.json"
     },
     {
+      "name": "menu",
+      "path": "ui/menu.json"
+    },
+    {
       "name": "tabs",
       "path": "ui/tabs.json"
     }

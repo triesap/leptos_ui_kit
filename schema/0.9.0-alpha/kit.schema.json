@@ -170,6 +170,7 @@
               "button",
               "collapsible",
               "dialog",
+              "menu",
               "tabs"
             ]
           },

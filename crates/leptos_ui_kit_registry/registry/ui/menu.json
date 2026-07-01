@@ -1,11 +1,11 @@
 {
   "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
   "schemaVersion": "0.9.0-alpha",
-  "name": "dialog",
+  "name": "menu",
   "kind": "ui",
   "version": "0.9.0-alpha",
-  "title": "Dialog",
-  "description": "A primitive-backed Leptos dialog component family.",
+  "title": "Menu",
+  "description": "A primitive-backed Leptos menu component family.",
   "leptos": {
     "version": "0.9.0-alpha",
     "routerVersion": "0.9.0-alpha",
@@ -14,11 +14,7 @@
   "accessibility": {
     "behaviors": [
       {
-        "name": "required-accessible-name",
-        "required": true
-      },
-      {
-        "name": "modal-focus-trap",
+        "name": "menu-button-semantics",
         "required": true
       },
       {
@@ -26,11 +22,19 @@
         "required": true
       },
       {
-        "name": "return-focus",
+        "name": "roving-tabindex",
         "required": true
       },
       {
-        "name": "presence-exit-state",
+        "name": "checked-item-state",
+        "required": true
+      },
+      {
+        "name": "typeahead",
+        "required": true
+      },
+      {
+        "name": "return-focus",
         "required": true
       }
     ],
@@ -38,76 +42,69 @@
   },
   "files": [
     {
-      "source": "ui/dialog/mod.rs",
+      "source": "ui/menu/mod.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/mod.rs",
+        "path": "menu/mod.rs",
         "exports": [
-          "DialogClose",
-          "DialogContent",
-          "DialogContentRole",
-          "DialogDescription",
-          "DialogRoot",
-          "DialogTitle",
-          "DialogTrigger"
+          "MenuContent",
+          "MenuDirection",
+          "MenuItem",
+          "MenuItemIndicator",
+          "MenuItemKind",
+          "MenuLoop",
+          "MenuRoot",
+          "MenuTrigger"
         ]
       }
     },
     {
-      "source": "ui/dialog/root.rs",
+      "source": "ui/menu/root.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/root.rs",
+        "path": "menu/root.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/dialog/trigger.rs",
+      "source": "ui/menu/trigger.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/trigger.rs",
+        "path": "menu/trigger.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/dialog/content.rs",
+      "source": "ui/menu/content.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/content.rs",
+        "path": "menu/content.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/dialog/title.rs",
+      "source": "ui/menu/item.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/title.rs",
+        "path": "menu/item.rs",
         "exports": []
       }
     },
     {
-      "source": "ui/dialog/description.rs",
+      "source": "ui/menu/item_indicator.rs",
       "target": {
         "kind": "ui",
-        "path": "dialog/description.rs",
-        "exports": []
-      }
-    },
-    {
-      "source": "ui/dialog/close.rs",
-      "target": {
-        "kind": "ui",
-        "path": "dialog/close.rs",
+        "path": "menu/item_indicator.rs",
         "exports": []
       }
     }
   ],
   "styles": [
     {
-      "source": "styles/dialog.css",
+      "source": "styles/menu.css",
       "target": {
         "kind": "managed-css-block",
-        "id": "dialog"
+        "id": "menu"
       }
     }
   ],

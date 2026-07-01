@@ -14,8 +14,9 @@ pub use config::{
     StylesConfig, StylesMode, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
     ToolSourceConfig, WorkspaceMode, canonical_kit_config, canonical_kit_json,
     canonical_tool_config, desired_builtin_button_item, desired_builtin_collapsible_item,
-    desired_builtin_dialog_item, desired_builtin_tabs_item, kit_config_to_json,
-    kit_config_with_desired_item, normalize_single_crate_project, parse_kit_json_str,
+    desired_builtin_dialog_item, desired_builtin_menu_item, desired_builtin_tabs_item,
+    kit_config_to_json, kit_config_with_desired_item, normalize_single_crate_project,
+    parse_kit_json_str,
 };
 pub use detect::{
     DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,

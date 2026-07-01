@@ -23,6 +23,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["view", "collapsible", "--source", "--json"]);
     assert_success(&project, &["view", "dialog", "--json"]);
     assert_success(&project, &["view", "dialog", "--source", "--json"]);
+    assert_success(&project, &["view", "menu", "--json"]);
+    assert_success(&project, &["view", "menu", "--source", "--json"]);
     assert_success(&project, &["view", "tabs", "--json"]);
     assert_success(&project, &["view", "tabs", "--source", "--json"]);
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
@@ -31,6 +33,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["add", "collapsible"]);
     assert_success(&project, &["add", "dialog", "--dry-run", "--json"]);
     assert_success(&project, &["add", "dialog"]);
+    assert_success(&project, &["add", "menu", "--dry-run", "--json"]);
+    assert_success(&project, &["add", "menu"]);
     assert_success(&project, &["add", "tabs", "--dry-run", "--json"]);
     assert_success(&project, &["add", "tabs"]);
     assert_success(&project, &["sync", "--dry-run", "--json"]);
@@ -56,6 +60,8 @@ fn homepage_fixture_cli_workflow_smoke() {
             .join("src/components/ui/dialog/content.rs")
             .is_file()
     );
+    assert!(project.join("src/components/ui/menu/mod.rs").is_file());
+    assert!(project.join("src/components/ui/menu/content.rs").is_file());
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());
     assert!(project.join("src/components/ui/tabs/root.rs").is_file());
     assert!(project.join("src/components/ui/_kit/kit.json").is_file());

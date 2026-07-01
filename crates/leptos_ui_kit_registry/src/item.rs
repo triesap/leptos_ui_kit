@@ -1008,10 +1008,11 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 4);
+        assert_eq!(root.items.len(), 5);
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
         assert!(root.items.iter().any(|item| item.name == "dialog"));
+        assert!(root.items.iter().any(|item| item.name == "menu"));
         assert!(root.items.iter().any(|item| item.name == "tabs"));
     }
 
@@ -1128,7 +1129,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "b0c2c56f669d8ac531a6031f7b8b25f74ed75c60"
+                    "rev": "ef370748442f00b3647e96343dd5d307b71a20a1"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -1167,7 +1168,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "b0c2c56f669d8ac531a6031f7b8b25f74ed75c60",
+                    "rev": "ef370748442f00b3647e96343dd5d307b71a20a1",
                     "branch": "main"
                   },
                   "features": ["leptos"],

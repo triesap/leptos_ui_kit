@@ -5,7 +5,8 @@ mod components;
 use components::ui::{
     Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
-    DialogTrigger, TabsList, TabsPanel, TabsRoot, TabsTrigger,
+    DialogTrigger, MenuContent, MenuItem, MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger,
+    TabsList, TabsPanel, TabsRoot, TabsTrigger,
 };
 
 fn main() {
@@ -63,6 +64,23 @@ fn App() -> impl IntoView {
                     <DialogClose>"Close"</DialogClose>
                 </DialogContent>
             </DialogRoot>
+            <MenuRoot>
+                <MenuTrigger>"Locale"</MenuTrigger>
+                <MenuContent>
+                    <MenuItem index=0 kind=MenuItemKind::Radio label="English">
+                        <span>"English"</span>
+                        <MenuItemIndicator index=0>
+                            <span>"*"</span>
+                        </MenuItemIndicator>
+                    </MenuItem>
+                    <MenuItem index=1 kind=MenuItemKind::Radio label="Spanish">
+                        <span>"Spanish"</span>
+                        <MenuItemIndicator index=1>
+                            <span>"*"</span>
+                        </MenuItemIndicator>
+                    </MenuItem>
+                </MenuContent>
+            </MenuRoot>
         </main>
     }
 }
