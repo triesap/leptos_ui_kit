@@ -1072,11 +1072,15 @@ pub fn patch_ui_mod(
 
         lines.push(format!("pub mod {};", export.module));
         if !export.symbols.is_empty() {
-            lines.push(format!(
-                "pub use {}::{{{}}};",
-                export.path,
-                export.symbols.join(", ")
-            ));
+            if let [symbol] = export.symbols.as_slice() {
+                lines.push(format!("pub use {}::{};", export.path, symbol));
+            } else {
+                lines.push(format!(
+                    "pub use {}::{{{}}};",
+                    export.path,
+                    export.symbols.join(", ")
+                ));
+            }
         }
     }
 
@@ -2542,6 +2546,28 @@ mod tests {
         .expect("formatted grouped export should be idempotent");
 
         assert_eq!(patched, existing);
+    }
+
+    #[test]
+    fn ui_module_patcher_emits_rustfmt_stable_single_exports() {
+        let ui = patch_ui_mod(
+            Some("// generated exports\n"),
+            &[UiModuleExport::new("spinner", vec!["Spinner".to_owned()])],
+        )
+        .expect("patch ui mod");
+
+        assert_eq!(
+            ui,
+            "// generated exports\npub mod spinner;\npub use spinner::Spinner;\n"
+        );
+        assert_eq!(
+            patch_ui_mod(
+                Some(&ui),
+                &[UiModuleExport::new("spinner", vec!["Spinner".to_owned()])],
+            )
+            .expect("formatted single export should be idempotent"),
+            ui
+        );
     }
 
     #[test]
