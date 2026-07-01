@@ -1682,10 +1682,7 @@ fn patch_module_lines(
         if line.trim() != *line || line.is_empty() {
             return unsafe_patch(logical_path, "module patch line must be normalized");
         }
-        if output
-            .lines()
-            .any(|existing_line| existing_line.trim() == *line)
-        {
+        if module_line_exists(&output, line)? {
             continue;
         }
         if detects_private_module_conflict(&output, line) {
@@ -1702,6 +1699,81 @@ fn patch_module_lines(
     }
 
     Ok(output)
+}
+
+fn module_line_exists(existing: &str, required_line: &str) -> Result<bool, CodegenError> {
+    if existing
+        .lines()
+        .any(|existing_line| existing_line.trim() == required_line)
+    {
+        return Ok(true);
+    }
+
+    let Some((path, symbols)) = parse_grouped_pub_use(required_line)? else {
+        return Ok(false);
+    };
+
+    let marker = format!("pub use {path}::{{");
+    let mut offset = 0;
+    while let Some(relative_start) = existing[offset..].find(&marker) {
+        let start = offset + relative_start + marker.len();
+        let Some(relative_end) = existing[start..].find("};") else {
+            return Ok(false);
+        };
+        let end = start + relative_end;
+        if grouped_pub_use_contains(&existing[start..end], &symbols) {
+            return Ok(true);
+        }
+        offset = end + 2;
+    }
+
+    Ok(false)
+}
+
+fn parse_grouped_pub_use(required_line: &str) -> Result<Option<(&str, Vec<&str>)>, CodegenError> {
+    let Some(body) = required_line
+        .strip_prefix("pub use ")
+        .and_then(|line| line.strip_suffix("};"))
+    else {
+        return Ok(None);
+    };
+    let Some((path, symbols)) = body.split_once("::{") else {
+        return Ok(None);
+    };
+    validate_module_path(
+        path,
+        "UI export path",
+        Path::new("src/components/ui/mod.rs"),
+    )?;
+    let symbols = symbols
+        .split(',')
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .collect::<Vec<_>>();
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+    for symbol in &symbols {
+        validate_patch_identifier(
+            symbol,
+            "UI export symbol",
+            Path::new("src/components/ui/mod.rs"),
+        )?;
+    }
+
+    Ok(Some((path, symbols)))
+}
+
+fn grouped_pub_use_contains(existing_symbols: &str, required_symbols: &[&str]) -> bool {
+    let existing_symbols = existing_symbols
+        .split(',')
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .collect::<Vec<_>>();
+
+    required_symbols
+        .iter()
+        .all(|symbol| existing_symbols.iter().any(|existing| existing == symbol))
 }
 
 fn detects_private_module_conflict(existing: &str, required_line: &str) -> bool {
@@ -2446,6 +2518,30 @@ mod tests {
             .expect("idempotent enough"),
             ui
         );
+    }
+
+    #[test]
+    fn ui_module_patcher_accepts_formatted_grouped_exports() {
+        let existing = "pub mod menu;\npub use menu::{\n    MenuContent, MenuDirection, MenuItem, MenuItemIndicator, MenuItemKind, MenuLoop, MenuRoot,\n    MenuTrigger,\n};\n";
+        let patched = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new(
+                "menu",
+                vec![
+                    "MenuContent".to_owned(),
+                    "MenuDirection".to_owned(),
+                    "MenuItem".to_owned(),
+                    "MenuItemIndicator".to_owned(),
+                    "MenuItemKind".to_owned(),
+                    "MenuLoop".to_owned(),
+                    "MenuRoot".to_owned(),
+                    "MenuTrigger".to_owned(),
+                ],
+            )],
+        )
+        .expect("formatted grouped export should be idempotent");
+
+        assert_eq!(patched, existing);
     }
 
     #[test]
