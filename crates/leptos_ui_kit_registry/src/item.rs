@@ -1008,12 +1008,13 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 6);
+        assert_eq!(root.items.len(), 7);
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
         assert!(root.items.iter().any(|item| item.name == "dialog"));
         assert!(root.items.iter().any(|item| item.name == "field"));
         assert!(root.items.iter().any(|item| item.name == "menu"));
+        assert!(root.items.iter().any(|item| item.name == "spinner"));
         assert!(root.items.iter().any(|item| item.name == "tabs"));
     }
 
@@ -1328,6 +1329,30 @@ mod tests {
                 "TextInputType"
             ]
         );
+    }
+
+    #[test]
+    fn spinner_source_and_css_encode_status_loading_indicator() {
+        let root = built_in_registry_root();
+        let source = fs::read_to_string(root.join("ui/spinner.rs")).expect("read spinner source");
+        let css = fs::read_to_string(root.join("styles/spinner.css")).expect("read spinner css");
+        let item = load_built_in_registry_item("spinner").expect("load spinner");
+
+        assert!(source.contains("pub fn Spinner"));
+        assert!(source.contains("role=\"status\""));
+        assert!(source.contains("kit-spinner-mark"));
+        assert!(source.contains("kit-spinner-label"));
+        assert!(css.contains(".kit-spinner"));
+        assert!(css.contains("@keyframes kit-spinner-rotate"));
+        assert!(css.contains("--kit-spinner-animation-duration"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "status-role" && behavior.required)
+        );
+        assert_eq!(item.item.files[0].target.exports, ["Spinner"]);
     }
 
     #[test]

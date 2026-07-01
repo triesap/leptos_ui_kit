@@ -1,0 +1,46 @@
+/* leptos-ui-kit:start spinner */
+:root {
+  --kit-spinner-animation-duration: 900ms;
+  --kit-spinner-block-size: 1em;
+  --kit-spinner-border-width: 0.125em;
+  --kit-spinner-color: currentColor;
+  --kit-spinner-inline-size: 1em;
+  --kit-spinner-track-color: rgb(0 0 0 / 20%);
+}
+
+.kit-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--kit-spinner-inline-size);
+  block-size: var(--kit-spinner-block-size);
+  color: currentColor;
+  line-height: 1;
+}
+
+.kit-spinner-mark {
+  box-sizing: border-box;
+  inline-size: 100%;
+  block-size: 100%;
+  border: var(--kit-spinner-border-width) solid var(--kit-spinner-track-color);
+  border-block-start-color: var(--kit-spinner-color);
+  border-radius: 999px;
+  animation: kit-spinner-rotate var(--kit-spinner-animation-duration) linear infinite;
+}
+
+.kit-spinner-label {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@keyframes kit-spinner-rotate {
+  to {
+    transform: rotate(1turn);
+  }
+}
+/* leptos-ui-kit:end spinner */

@@ -287,6 +287,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
         }
     }
@@ -304,6 +305,7 @@ pub enum DesiredItemName {
     Dialog,
     Field,
     Menu,
+    Spinner,
     Tabs,
 }
 
@@ -315,6 +317,7 @@ impl DesiredItemName {
             Self::Dialog => "dialog",
             Self::Field => "field",
             Self::Menu => "menu",
+            Self::Spinner => "spinner",
             Self::Tabs => "tabs",
         }
     }
@@ -454,6 +457,13 @@ pub fn desired_builtin_field_item() -> DesiredItemConfig {
 pub fn desired_builtin_menu_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Menu,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_spinner_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Spinner,
         source: RegistrySource::Builtin,
     }
 }

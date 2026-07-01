@@ -172,6 +172,7 @@
               "dialog",
               "field",
               "menu",
+              "spinner",
               "tabs"
             ]
           },

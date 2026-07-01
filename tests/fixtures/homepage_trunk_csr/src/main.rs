@@ -7,7 +7,7 @@ use components::ui::{
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
     MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, SelectIcon, TabsList,
-    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
+    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType, Spinner,
 };
 
 fn main() {
@@ -31,7 +31,13 @@ fn App() -> impl IntoView {
                     button_type=ButtonType::Submit
                     disabled=move || sending.get()
                 >
-                    {move || if sending.get() { "Sending" } else { "Send message" }}
+                    {move || {
+                        if sending.get() {
+                            view! { <Spinner label="Sending" /> }.into_any()
+                        } else {
+                            view! { <span>"Send message"</span> }.into_any()
+                        }
+                    }}
                 </Button>
             </form>
             <Button
