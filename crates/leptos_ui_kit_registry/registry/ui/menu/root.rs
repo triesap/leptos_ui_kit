@@ -166,13 +166,9 @@ pub(crate) fn attr_string(attrs: &[DomAttribute], name: &str) -> Option<String> 
 }
 
 pub(crate) fn attr_bool(attrs: &[DomAttribute], name: &str) -> bool {
-    attrs.iter().any(|attr| {
-        attr.name() == name
-            && match attr.value() {
-                DomAttributeValue::String(_) => true,
-                DomAttributeValue::Bool(value) => *value,
-            }
-    })
+    attrs
+        .iter()
+        .any(|attr| attr.name() == name && matches!(attr.value(), DomAttributeValue::Bool(true)))
 }
 
 pub(crate) fn data_attr(active: bool) -> Option<&'static str> {

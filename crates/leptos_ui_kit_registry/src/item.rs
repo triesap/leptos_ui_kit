@@ -1432,6 +1432,8 @@ mod tests {
         assert!(root_source.contains("DomAttribute"));
         assert!(root_source.contains("attr_string"));
         assert!(root_source.contains("attr_bool"));
+        assert!(root_source.contains("matches!(attr.value(), DomAttributeValue::Bool(true))"));
+        assert!(!root_source.contains("DomAttributeValue::String(_) => true"));
         assert!(trigger_source.contains("menu_trigger_attrs"));
         assert!(trigger_source.contains("<button"));
         assert!(trigger_source.contains("type=\"button\""));
