@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::leptos::{attrs::menu_item_indicator_attrs, use_dom_bindings};
