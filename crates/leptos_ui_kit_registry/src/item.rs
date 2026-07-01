@@ -1008,10 +1008,11 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 5);
+        assert_eq!(root.items.len(), 6);
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
         assert!(root.items.iter().any(|item| item.name == "dialog"));
+        assert!(root.items.iter().any(|item| item.name == "field"));
         assert!(root.items.iter().any(|item| item.name == "menu"));
         assert!(root.items.iter().any(|item| item.name == "tabs"));
     }
@@ -1261,6 +1262,47 @@ mod tests {
         assert_eq!(
             item.item.files[0].target.exports,
             ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
+        );
+    }
+
+    #[test]
+    fn field_source_and_css_encode_label_message_structure() {
+        let root = built_in_registry_root();
+        let root_source =
+            fs::read_to_string(root.join("ui/field/root.rs")).expect("read field root source");
+        let label_source =
+            fs::read_to_string(root.join("ui/field/label.rs")).expect("read field label source");
+        let message_source = fs::read_to_string(root.join("ui/field/message.rs"))
+            .expect("read field message source");
+        let required_source = fs::read_to_string(root.join("ui/field/required.rs"))
+            .expect("read field required source");
+        let css = fs::read_to_string(root.join("styles/field.css")).expect("read field css");
+        let item = load_built_in_registry_item("field").expect("load field");
+
+        assert!(root_source.contains("pub fn FieldRoot"));
+        assert!(root_source.contains("control_id"));
+        assert!(root_source.contains("message_id"));
+        assert!(label_source.contains("pub fn FieldLabel"));
+        assert!(label_source.contains("<label"));
+        assert!(label_source.contains("for=control_id"));
+        assert!(message_source.contains("pub fn FieldMessage"));
+        assert!(message_source.contains("id=message_id"));
+        assert!(required_source.contains("pub fn FieldRequired"));
+        assert!(required_source.contains("aria-hidden=\"true\""));
+        assert!(css.contains(".kit-field"));
+        assert!(css.contains(".kit-field-label"));
+        assert!(css.contains(".kit-field-message"));
+        assert!(css.contains("--kit-field-required-color"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "label-control-association" && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            ["FieldLabel", "FieldMessage", "FieldRequired", "FieldRoot"]
         );
     }
 

@@ -1,0 +1,54 @@
+/* leptos-ui-kit:start field */
+:root {
+  --kit-field-disabled-opacity: 0.55;
+  --kit-field-gap: 0.5rem;
+  --kit-field-label-color: #111827;
+  --kit-field-label-font-size: 0.9375rem;
+  --kit-field-label-font-weight: 500;
+  --kit-field-label-gap: 0.25rem;
+  --kit-field-message-color: #4b5563;
+  --kit-field-message-font-size: 0.875rem;
+  --kit-field-message-font-weight: 400;
+  --kit-field-message-line-height: 1.35;
+  --kit-field-message-invalid-color: #dc2626;
+  --kit-field-required-color: #dc2626;
+}
+
+.kit-field {
+  display: grid;
+  gap: var(--kit-field-gap);
+}
+
+.kit-field[data-disabled] {
+  opacity: var(--kit-field-disabled-opacity);
+}
+
+.kit-field-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--kit-field-label-gap);
+  color: var(--kit-field-label-color);
+  font: inherit;
+  font-size: var(--kit-field-label-font-size);
+  font-weight: var(--kit-field-label-font-weight);
+  line-height: 1;
+}
+
+.kit-field-required {
+  color: var(--kit-field-required-color);
+}
+
+.kit-field-message {
+  margin: 0;
+  color: var(--kit-field-message-color);
+  font: inherit;
+  font-size: var(--kit-field-message-font-size);
+  font-weight: var(--kit-field-message-font-weight);
+  line-height: var(--kit-field-message-line-height);
+}
+
+.kit-field-message[data-invalid],
+.kit-field[data-invalid] .kit-field-message {
+  color: var(--kit-field-message-invalid-color);
+}
+/* leptos-ui-kit:end field */

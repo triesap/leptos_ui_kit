@@ -5,8 +5,9 @@ mod components;
 use components::ui::{
     Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
-    DialogTrigger, MenuContent, MenuItem, MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger,
-    TabsList, TabsPanel, TabsRoot, TabsTrigger,
+    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
+    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, TabsList, TabsPanel, TabsRoot,
+    TabsTrigger,
 };
 
 fn main() {
@@ -38,6 +39,14 @@ fn App() -> impl IntoView {
             >
                 {move || format!("Clicked {}", count.get())}
             </Button>
+            <FieldRoot id="contact-name" invalid=false disabled=false>
+                <FieldLabel>
+                    "Name"
+                    <FieldRequired />
+                </FieldLabel>
+                <input id="contact-name-control" aria-describedby="contact-name-message" />
+                <FieldMessage>"Use your public name."</FieldMessage>
+            </FieldRoot>
             <CollapsibleRoot>
                 <CollapsibleTrigger>"Details"</CollapsibleTrigger>
                 <CollapsibleContent>

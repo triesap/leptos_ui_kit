@@ -1,0 +1,111 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "field",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Field",
+  "description": "A pure-CSS Leptos form field structure component family.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "accessibility": {
+    "behaviors": [
+      {
+        "name": "label-control-association",
+        "required": true
+      },
+      {
+        "name": "message-id-association",
+        "required": true
+      },
+      {
+        "name": "required-indicator-hidden-from-screen-readers",
+        "required": true
+      }
+    ],
+    "notes": []
+  },
+  "files": [
+    {
+      "source": "ui/field/mod.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/mod.rs",
+        "exports": [
+          "FieldLabel",
+          "FieldMessage",
+          "FieldRequired",
+          "FieldRoot"
+        ]
+      }
+    },
+    {
+      "source": "ui/field/root.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/root.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/label.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/label.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/required.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/required.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/message.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/message.rs",
+        "exports": []
+      }
+    }
+  ],
+  "styles": [
+    {
+      "source": "styles/field.css",
+      "target": {
+        "kind": "managed-css-block",
+        "id": "field"
+      }
+    }
+  ],
+  "registryDependencies": [],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [
+        "csr"
+      ],
+      "required": true
+    },
+    {
+      "crate": "leptos_router",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [],
+      "required": true
+    }
+  ],
+  "extra": {}
+}

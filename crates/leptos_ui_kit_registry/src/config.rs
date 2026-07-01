@@ -285,6 +285,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
         }
@@ -301,6 +302,7 @@ pub enum DesiredItemName {
     Button,
     Collapsible,
     Dialog,
+    Field,
     Menu,
     Tabs,
 }
@@ -311,6 +313,7 @@ impl DesiredItemName {
             Self::Button => "button",
             Self::Collapsible => "collapsible",
             Self::Dialog => "dialog",
+            Self::Field => "field",
             Self::Menu => "menu",
             Self::Tabs => "tabs",
         }
@@ -437,6 +440,13 @@ pub fn desired_builtin_collapsible_item() -> DesiredItemConfig {
 pub fn desired_builtin_dialog_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Dialog,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_field_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Field,
         source: RegistrySource::Builtin,
     }
 }
