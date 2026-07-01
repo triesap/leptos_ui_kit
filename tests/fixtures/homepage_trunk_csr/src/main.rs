@@ -7,7 +7,8 @@ use components::ui::{
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
     MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, SelectIcon, TabsList,
-    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType, Spinner,
+    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType, Spinner, Status,
+    StatusPoliteness, StatusRole,
 };
 
 fn main() {
@@ -85,6 +86,9 @@ fn App() -> impl IntoView {
                     on_input=Callback::new(move |value| set_message.set(value))
                 />
             </FieldRoot>
+            <Status role=StatusRole::Status politeness=StatusPoliteness::Polite>
+                "Message sent"
+            </Status>
             <CollapsibleRoot>
                 <CollapsibleTrigger>"Details"</CollapsibleTrigger>
                 <CollapsibleContent>

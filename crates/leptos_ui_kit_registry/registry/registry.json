@@ -28,6 +28,10 @@
       "path": "ui/spinner.json"
     },
     {
+      "name": "status",
+      "path": "ui/status.json"
+    },
+    {
       "name": "tabs",
       "path": "ui/tabs.json"
     }

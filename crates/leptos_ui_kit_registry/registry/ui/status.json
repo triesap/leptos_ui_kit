@@ -1,0 +1,78 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "status",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Status",
+  "description": "A pure-CSS Leptos live-region status primitive.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "accessibility": {
+    "behaviors": [
+      {
+        "name": "live-region-role",
+        "required": true
+      },
+      {
+        "name": "live-region-politeness",
+        "required": true
+      },
+      {
+        "name": "live-region-atomicity",
+        "required": true
+      }
+    ],
+    "notes": []
+  },
+  "files": [
+    {
+      "source": "ui/status.rs",
+      "target": {
+        "kind": "ui",
+        "path": "status.rs",
+        "exports": [
+          "Status",
+          "StatusPoliteness",
+          "StatusRole"
+        ]
+      }
+    }
+  ],
+  "styles": [
+    {
+      "source": "styles/status.css",
+      "target": {
+        "kind": "managed-css-block",
+        "id": "status"
+      }
+    }
+  ],
+  "registryDependencies": [],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [
+        "csr"
+      ],
+      "required": true
+    },
+    {
+      "crate": "leptos_router",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [],
+      "required": true
+    }
+  ],
+  "extra": {}
+}

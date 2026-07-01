@@ -288,6 +288,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Status, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
         }
     }
@@ -306,6 +307,7 @@ pub enum DesiredItemName {
     Field,
     Menu,
     Spinner,
+    Status,
     Tabs,
 }
 
@@ -318,6 +320,7 @@ impl DesiredItemName {
             Self::Field => "field",
             Self::Menu => "menu",
             Self::Spinner => "spinner",
+            Self::Status => "status",
             Self::Tabs => "tabs",
         }
     }
@@ -464,6 +467,13 @@ pub fn desired_builtin_menu_item() -> DesiredItemConfig {
 pub fn desired_builtin_spinner_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Spinner,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_status_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Status,
         source: RegistrySource::Builtin,
     }
 }

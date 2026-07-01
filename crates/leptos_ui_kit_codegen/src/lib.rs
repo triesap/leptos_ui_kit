@@ -14,9 +14,9 @@ use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, RegistryItem,
     SCHEMA_VERSION, canonical_kit_json, desired_builtin_button_item,
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
-    desired_builtin_menu_item, desired_builtin_spinner_item, desired_builtin_tabs_item,
-    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
-    parse_kit_json_str, read_built_in_registry_source,
+    desired_builtin_menu_item, desired_builtin_spinner_item, desired_builtin_status_item,
+    desired_builtin_tabs_item, kit_config_to_json, kit_config_with_desired_item,
+    load_built_in_registry_item, parse_kit_json_str, read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -497,6 +497,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         "field" => desired_builtin_field_item(),
         "menu" => desired_builtin_menu_item(),
         "spinner" => desired_builtin_spinner_item(),
+        "status" => desired_builtin_status_item(),
         "tabs" => desired_builtin_tabs_item(),
         _ => return Err(RegistryError::BuiltInNotFound(item_name.to_owned()).into()),
     };
