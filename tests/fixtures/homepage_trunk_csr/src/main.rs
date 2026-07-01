@@ -3,7 +3,8 @@ use leptos::prelude::*;
 mod components;
 
 use components::ui::{
-    Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
+    Anchor, AnchorTarget, Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent,
+    CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
     MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, SelectIcon, TabsList,
@@ -50,6 +51,9 @@ fn App() -> impl IntoView {
             >
                 {move || format!("Clicked {}", count.get())}
             </Button>
+            <Anchor href="https://example.com" target=AnchorTarget::Blank>
+                "External link"
+            </Anchor>
             <FieldRoot id="contact-name" required=true invalid=false disabled=false>
                 <FieldLabel>
                     "Name"

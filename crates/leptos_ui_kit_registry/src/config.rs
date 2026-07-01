@@ -282,6 +282,7 @@ pub struct DesiredItemConfig {
 impl DesiredItemConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         match (self.name, self.source) {
+            (DesiredItemName::Anchor, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
@@ -301,6 +302,7 @@ impl DesiredItemConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesiredItemName {
+    Anchor,
     Button,
     Collapsible,
     Dialog,
@@ -314,6 +316,7 @@ pub enum DesiredItemName {
 impl DesiredItemName {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Anchor => "anchor",
             Self::Button => "button",
             Self::Collapsible => "collapsible",
             Self::Dialog => "dialog",
@@ -427,6 +430,13 @@ pub fn kit_config_with_desired_item(
     }
     config.validate()?;
     Ok(config)
+}
+
+pub fn desired_builtin_anchor_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Anchor,
+        source: RegistrySource::Builtin,
+    }
 }
 
 pub fn desired_builtin_button_item() -> DesiredItemConfig {

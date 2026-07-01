@@ -1008,7 +1008,8 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 8);
+        assert_eq!(root.items.len(), 9);
+        assert!(root.items.iter().any(|item| item.name == "anchor"));
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
         assert!(root.items.iter().any(|item| item.name == "dialog"));
@@ -1264,6 +1265,37 @@ mod tests {
         assert_eq!(
             item.item.files[0].target.exports,
             ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
+        );
+    }
+
+    #[test]
+    fn anchor_source_and_css_encode_native_anchor_contract() {
+        let root = built_in_registry_root();
+        let source = fs::read_to_string(root.join("ui/anchor.rs")).expect("read anchor source");
+        let css = fs::read_to_string(root.join("styles/anchor.css")).expect("read anchor css");
+        let item = load_built_in_registry_item("anchor").expect("load anchor");
+
+        assert!(source.contains("pub enum AnchorTarget"));
+        assert!(source.contains("pub fn Anchor"));
+        assert!(source.contains("<a"));
+        assert!(source.contains("href=href"));
+        assert!(source.contains("target=target_attr"));
+        assert!(source.contains("rel=rel_attr"));
+        assert!(source.contains("noopener noreferrer"));
+        assert!(!source.contains("leptos_router"));
+        assert!(css.contains(".kit-anchor"));
+        assert!(css.contains("--kit-anchor-color"));
+        assert!(css.contains(":focus-visible"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "external-target-rel-safety" && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            ["Anchor", "AnchorTarget"]
         );
     }
 

@@ -4,6 +4,10 @@
   "name": "leptos-ui-kit",
   "items": [
     {
+      "name": "anchor",
+      "path": "ui/anchor.json"
+    },
+    {
       "name": "button",
       "path": "ui/button.json"
     },

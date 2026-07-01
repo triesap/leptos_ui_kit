@@ -167,6 +167,7 @@
         "properties": {
           "name": {
             "enum": [
+              "anchor",
               "button",
               "collapsible",
               "dialog",

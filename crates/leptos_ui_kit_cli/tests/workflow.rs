@@ -17,6 +17,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["info", "--json"]);
     assert_success(&project, &["init", "--dry-run", "--json"]);
     assert_success(&project, &["init"]);
+    assert_success(&project, &["view", "anchor", "--json"]);
+    assert_success(&project, &["view", "anchor", "--source", "--json"]);
     assert_success(&project, &["view", "button", "--json"]);
     assert_success(&project, &["view", "button", "--source", "--json"]);
     assert_success(&project, &["view", "collapsible", "--json"]);
@@ -33,6 +35,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["view", "status", "--source", "--json"]);
     assert_success(&project, &["view", "tabs", "--json"]);
     assert_success(&project, &["view", "tabs", "--source", "--json"]);
+    assert_success(&project, &["add", "anchor", "--dry-run", "--json"]);
+    assert_success(&project, &["add", "anchor"]);
     assert_success(&project, &["add", "button", "--dry-run", "--json"]);
     assert_success(&project, &["add", "button"]);
     assert_success(&project, &["add", "collapsible", "--dry-run", "--json"]);
@@ -55,6 +59,7 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_cargo_subcommand_success(&project, &["doctor", "--strict", "--json"]);
     assert_cargo_check(&project);
 
+    assert!(project.join("src/components/ui/anchor.rs").is_file());
     assert!(project.join("src/components/ui/button.rs").is_file());
     assert!(
         project

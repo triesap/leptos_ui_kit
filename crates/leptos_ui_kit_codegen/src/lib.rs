@@ -12,7 +12,7 @@ use std::{
 
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, RegistryItem,
-    SCHEMA_VERSION, canonical_kit_json, desired_builtin_button_item,
+    SCHEMA_VERSION, canonical_kit_json, desired_builtin_anchor_item, desired_builtin_button_item,
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
     desired_builtin_menu_item, desired_builtin_spinner_item, desired_builtin_status_item,
     desired_builtin_tabs_item, kit_config_to_json, kit_config_with_desired_item,
@@ -491,6 +491,7 @@ pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
     let item = load_built_in_registry_item(item_name)?;
     let desired_item = match item.item.name.as_str() {
+        "anchor" => desired_builtin_anchor_item(),
         "button" => desired_builtin_button_item(),
         "collapsible" => desired_builtin_collapsible_item(),
         "dialog" => desired_builtin_dialog_item(),
