@@ -17,7 +17,11 @@ pub fn MenuItemIndicator(
     context.ensure_len(index);
     let attrs_context = context.clone();
     let attrs = Signal::derive(move || {
-        let model = attrs_context.model.get();
+        let model = attrs_context.model_snapshot(|model| {
+            if model.len() <= index {
+                model.set_len(index + 1);
+            }
+        });
         menu_item_indicator_attrs(&model, index)
     });
     let bindings = use_dom_bindings::<html::Span>(attrs, Vec::new());

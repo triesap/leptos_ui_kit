@@ -9,6 +9,7 @@ static NEXT_MENU_ID: AtomicUsize = AtomicUsize::new(1);
 #[derive(Clone)]
 pub(crate) struct MenuContext {
     pub(crate) model: RwSignal<MenuModel>,
+    pub(crate) checked_index: Option<Signal<Option<usize>>>,
     pub(crate) direction: Direction,
     base_id: String,
     item_refs: RwSignal<Vec<Option<NodeRef<html::Button>>>>,
@@ -58,14 +59,35 @@ impl MenuContext {
 
     pub(crate) fn set_open(&self, open: bool) {
         self.model.update(|model| {
+            self.apply_controlled_checked_untracked(model);
             model.set_open(open);
         });
     }
 
     pub(crate) fn toggle_open(&self) {
         self.model.update(|model| {
+            self.apply_controlled_checked_untracked(model);
             model.toggle();
         });
+    }
+
+    pub(crate) fn checked_is_controlled(&self) -> bool {
+        self.checked_index.is_some()
+    }
+
+    pub(crate) fn model_snapshot(&self, update: impl FnOnce(&mut MenuModel)) -> MenuModel {
+        let mut model = self.model.get();
+        update(&mut model);
+        if let Some(checked_index) = self.checked_index {
+            model.set_checked(checked_index.get());
+        }
+        model
+    }
+
+    fn apply_controlled_checked_untracked(&self, model: &mut MenuModel) {
+        if let Some(checked_index) = self.checked_index {
+            model.set_checked(checked_index.get_untracked());
+        }
     }
 
     pub(crate) fn focus_item(&self, index: usize) {
@@ -95,6 +117,7 @@ impl MenuContext {
 #[component]
 pub fn MenuRoot(
     #[prop(optional, default = false)] default_open: bool,
+    #[prop(optional, into)] checked_index: Option<Signal<Option<usize>>>,
     #[prop(optional, default = MenuLoop::Wrap)] loop_policy: MenuLoop,
     #[prop(optional, default = Direction::Ltr)] direction: Direction,
     #[prop(optional, into)] class: String,
@@ -106,6 +129,7 @@ pub fn MenuRoot(
     let base_id = id.unwrap_or_else(next_menu_id);
     provide_context(MenuContext {
         model: RwSignal::new(model),
+        checked_index,
         direction,
         base_id,
         item_refs: RwSignal::new(Vec::new()),

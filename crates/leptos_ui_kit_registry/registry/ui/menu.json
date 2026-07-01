@@ -30,6 +30,10 @@
         "required": true
       },
       {
+        "name": "controlled-checked-item-state",
+        "required": true
+      },
+      {
         "name": "typeahead",
         "required": true
       },

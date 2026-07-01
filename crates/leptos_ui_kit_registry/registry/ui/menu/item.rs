@@ -37,11 +37,12 @@ pub fn MenuItem(
     context.set_disabled(index, disabled.get_untracked());
     let attrs_context = context.clone();
     let attrs = Signal::derive(move || {
-        let mut model = attrs_context.model.get();
-        if model.len() <= index {
-            model.set_len(index + 1);
-        }
-        model.set_disabled(index, disabled.get());
+        let model = attrs_context.model_snapshot(|model| {
+            if model.len() <= index {
+                model.set_len(index + 1);
+            }
+            model.set_disabled(index, disabled.get());
+        });
         menu_item_attrs(
             &model,
             index,
@@ -131,7 +132,7 @@ pub fn MenuItem(
 fn activate_item(context: &MenuContext, index: usize, kind: MenuItemKind) -> bool {
     let mut activated = false;
     context.model.update(|model| {
-        if kind == MenuItemKind::Radio {
+        if kind == MenuItemKind::Radio && !context.checked_is_controlled() {
             model.set_checked(Some(index));
         }
         activated = model.activate_index(index).is_some();

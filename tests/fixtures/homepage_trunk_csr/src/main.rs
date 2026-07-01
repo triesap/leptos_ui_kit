@@ -22,6 +22,7 @@ fn App() -> impl IntoView {
     let (name, set_name) = signal(String::new());
     let (method, set_method) = signal("email".to_owned());
     let (message, set_message) = signal(String::new());
+    let (locale_index, set_locale_index) = signal(Some(0));
 
     view! {
         <main>
@@ -115,16 +116,26 @@ fn App() -> impl IntoView {
                     <DialogClose>"Close"</DialogClose>
                 </DialogContent>
             </DialogRoot>
-            <MenuRoot>
+            <MenuRoot checked_index=locale_index>
                 <MenuTrigger>"Locale"</MenuTrigger>
                 <MenuContent>
-                    <MenuItem index=0 kind=MenuItemKind::Radio label="English">
+                    <MenuItem
+                        index=0
+                        kind=MenuItemKind::Radio
+                        label="English"
+                        on_select=Callback::new(move |_| set_locale_index.set(Some(0)))
+                    >
                         <span>"English"</span>
                         <MenuItemIndicator index=0>
                             <span>"*"</span>
                         </MenuItemIndicator>
                     </MenuItem>
-                    <MenuItem index=1 kind=MenuItemKind::Radio label="Spanish">
+                    <MenuItem
+                        index=1
+                        kind=MenuItemKind::Radio
+                        label="Spanish"
+                        on_select=Callback::new(move |_| set_locale_index.set(Some(1)))
+                    >
                         <span>"Spanish"</span>
                         <MenuItemIndicator index=1>
                             <span>"*"</span>

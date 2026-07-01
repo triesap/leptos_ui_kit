@@ -1355,6 +1355,47 @@ mod tests {
     }
 
     #[test]
+    fn menu_source_encodes_controlled_checked_state() {
+        let root = built_in_registry_root();
+        let root_source =
+            fs::read_to_string(root.join("ui/menu/root.rs")).expect("read menu root source");
+        let item_source =
+            fs::read_to_string(root.join("ui/menu/item.rs")).expect("read menu item source");
+        let indicator_source = fs::read_to_string(root.join("ui/menu/item_indicator.rs"))
+            .expect("read menu indicator source");
+        let item = load_built_in_registry_item("menu").expect("load menu");
+
+        assert!(root_source.contains("checked_index: Option<Signal<Option<usize>>>"));
+        assert!(root_source.contains("model_snapshot"));
+        assert!(root_source.contains("apply_controlled_checked_untracked"));
+        assert!(item_source.contains("MenuItemKind::Radio"));
+        assert!(item_source.contains("checked_is_controlled"));
+        assert!(item_source.contains("model_snapshot"));
+        assert!(indicator_source.contains("model_snapshot"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "controlled-checked-item-state"
+                    && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            [
+                "MenuContent",
+                "MenuDirection",
+                "MenuItem",
+                "MenuItemIndicator",
+                "MenuItemKind",
+                "MenuLoop",
+                "MenuRoot",
+                "MenuTrigger"
+            ]
+        );
+    }
+
+    #[test]
     fn spinner_source_and_css_encode_status_loading_indicator() {
         let root = built_in_registry_root();
         let source = fs::read_to_string(root.join("ui/spinner.rs")).expect("read spinner source");
