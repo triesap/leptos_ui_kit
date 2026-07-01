@@ -38,7 +38,12 @@
           "FieldLabel",
           "FieldMessage",
           "FieldRequired",
-          "FieldRoot"
+          "FieldRoot",
+          "NativeSelect",
+          "SelectIcon",
+          "TextArea",
+          "TextInput",
+          "TextInputType"
         ]
       }
     },
@@ -71,6 +76,30 @@
       "target": {
         "kind": "ui",
         "path": "field/message.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/text_input.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/text_input.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/text_area.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/text_area.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/native_select.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/native_select.rs",
         "exports": []
       }
     }

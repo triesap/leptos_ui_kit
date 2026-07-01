@@ -6,8 +6,8 @@ use components::ui::{
     Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent, CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
-    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, TabsList, TabsPanel, TabsRoot,
-    TabsTrigger,
+    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, SelectIcon, TabsList,
+    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
 };
 
 fn main() {
@@ -18,6 +18,9 @@ fn main() {
 fn App() -> impl IntoView {
     let (sending, _) = signal(false);
     let (count, set_count) = signal(0);
+    let (name, set_name) = signal(String::new());
+    let (method, set_method) = signal("email".to_owned());
+    let (message, set_message) = signal(String::new());
 
     view! {
         <main>
@@ -44,8 +47,39 @@ fn App() -> impl IntoView {
                     "Name"
                     <FieldRequired />
                 </FieldLabel>
-                <input id="contact-name-control" aria-describedby="contact-name-message" />
+                <TextInput
+                    input_type=TextInputType::Text
+                    name="name"
+                    value=name
+                    required=true
+                    on_input=Callback::new(move |value| set_name.set(value))
+                />
                 <FieldMessage>"Use your public name."</FieldMessage>
+            </FieldRoot>
+            <FieldRoot id="contact-method">
+                <FieldLabel>"Contact"</FieldLabel>
+                <NativeSelect
+                    name="contact_method"
+                    value=method
+                    on_change=Callback::new(move |value| set_method.set(value))
+                >
+                    <option value="email">"Email"</option>
+                    <option value="nostr">"Nostr"</option>
+                </NativeSelect>
+                <SelectIcon>"v"</SelectIcon>
+            </FieldRoot>
+            <FieldRoot id="contact-message">
+                <FieldLabel>
+                    "Message"
+                    <FieldRequired />
+                </FieldLabel>
+                <TextArea
+                    name="message"
+                    value=message
+                    rows=4
+                    required=true
+                    on_input=Callback::new(move |value| set_message.set(value))
+                />
             </FieldRoot>
             <CollapsibleRoot>
                 <CollapsibleTrigger>"Details"</CollapsibleTrigger>

@@ -66,6 +66,21 @@ fn homepage_fixture_cli_workflow_smoke() {
     );
     assert!(project.join("src/components/ui/field/mod.rs").is_file());
     assert!(project.join("src/components/ui/field/label.rs").is_file());
+    assert!(
+        project
+            .join("src/components/ui/field/text_input.rs")
+            .is_file()
+    );
+    assert!(
+        project
+            .join("src/components/ui/field/text_area.rs")
+            .is_file()
+    );
+    assert!(
+        project
+            .join("src/components/ui/field/native_select.rs")
+            .is_file()
+    );
     assert!(project.join("src/components/ui/menu/mod.rs").is_file());
     assert!(project.join("src/components/ui/menu/content.rs").is_file());
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());

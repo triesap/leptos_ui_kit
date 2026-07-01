@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn field_source_and_css_encode_label_message_structure() {
+    fn form_field_source_and_css_encode_label_message_structure() {
         let root = built_in_registry_root();
         let root_source =
             fs::read_to_string(root.join("ui/field/root.rs")).expect("read field root source");
@@ -1276,6 +1276,12 @@ mod tests {
             .expect("read field message source");
         let required_source = fs::read_to_string(root.join("ui/field/required.rs"))
             .expect("read field required source");
+        let input_source =
+            fs::read_to_string(root.join("ui/field/text_input.rs")).expect("read input source");
+        let textarea_source =
+            fs::read_to_string(root.join("ui/field/text_area.rs")).expect("read textarea source");
+        let select_source =
+            fs::read_to_string(root.join("ui/field/native_select.rs")).expect("read select source");
         let css = fs::read_to_string(root.join("styles/field.css")).expect("read field css");
         let item = load_built_in_registry_item("field").expect("load field");
 
@@ -1289,8 +1295,16 @@ mod tests {
         assert!(message_source.contains("id=message_id"));
         assert!(required_source.contains("pub fn FieldRequired"));
         assert!(required_source.contains("aria-hidden=\"true\""));
+        assert!(input_source.contains("pub fn TextInput"));
+        assert!(input_source.contains("TextInputType"));
+        assert!(textarea_source.contains("pub fn TextArea"));
+        assert!(select_source.contains("pub fn NativeSelect"));
+        assert!(select_source.contains("pub fn SelectIcon"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
+        assert!(css.contains(".kit-field-control"));
+        assert!(css.contains(".kit-native-select"));
+        assert!(css.contains(".kit-select-icon"));
         assert!(css.contains(".kit-field-message"));
         assert!(css.contains("--kit-field-required-color"));
         assert!(
@@ -1302,7 +1316,17 @@ mod tests {
         );
         assert_eq!(
             item.item.files[0].target.exports,
-            ["FieldLabel", "FieldMessage", "FieldRequired", "FieldRoot"]
+            [
+                "FieldLabel",
+                "FieldMessage",
+                "FieldRequired",
+                "FieldRoot",
+                "NativeSelect",
+                "SelectIcon",
+                "TextArea",
+                "TextInput",
+                "TextInputType"
+            ]
         );
     }
 

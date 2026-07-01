@@ -2,6 +2,21 @@
 :root {
   --kit-field-disabled-opacity: 0.55;
   --kit-field-gap: 0.5rem;
+  --kit-field-control-background: #ffffff;
+  --kit-field-control-border-color: var(--kit-color-border, #d1d5db);
+  --kit-field-control-border-width: 1px;
+  --kit-field-control-color: #111827;
+  --kit-field-control-focus-ring: var(--kit-focus-ring, #2563eb);
+  --kit-field-control-font-size: 1rem;
+  --kit-field-control-font-weight: 400;
+  --kit-field-control-invalid-border-color: #dc2626;
+  --kit-field-control-line-height: 1.35;
+  --kit-field-control-min-height: 2.75rem;
+  --kit-field-control-padding-block: 0.625rem;
+  --kit-field-control-padding-inline: 0.75rem;
+  --kit-field-control-radius: var(--kit-radius-md, 0.375rem);
+  --kit-field-control-transition-duration: 120ms;
+  --kit-field-control-transition-timing: ease;
   --kit-field-label-color: #111827;
   --kit-field-label-font-size: 0.9375rem;
   --kit-field-label-font-weight: 500;
@@ -12,11 +27,16 @@
   --kit-field-message-line-height: 1.35;
   --kit-field-message-invalid-color: #dc2626;
   --kit-field-required-color: #dc2626;
+  --kit-select-icon-color: currentColor;
+  --kit-select-icon-inline-end: var(--kit-field-control-padding-inline);
+  --kit-select-icon-size: 1rem;
+  --kit-text-area-min-block-size: 7rem;
 }
 
 .kit-field {
   display: grid;
   gap: var(--kit-field-gap);
+  position: relative;
 }
 
 .kit-field[data-disabled] {
@@ -36,6 +56,63 @@
 
 .kit-field-required {
   color: var(--kit-field-required-color);
+}
+
+.kit-field-control {
+  box-sizing: border-box;
+  inline-size: 100%;
+  border: var(--kit-field-control-border-width) solid var(--kit-field-control-border-color);
+  border-radius: var(--kit-field-control-radius);
+  min-block-size: var(--kit-field-control-min-height);
+  padding:
+    var(--kit-field-control-padding-block)
+    var(--kit-field-control-padding-inline);
+  background: var(--kit-field-control-background);
+  color: var(--kit-field-control-color);
+  font: inherit;
+  font-size: var(--kit-field-control-font-size);
+  font-weight: var(--kit-field-control-font-weight);
+  line-height: var(--kit-field-control-line-height);
+  transition:
+    border-color var(--kit-field-control-transition-duration) var(--kit-field-control-transition-timing),
+    box-shadow var(--kit-field-control-transition-duration) var(--kit-field-control-transition-timing);
+}
+
+.kit-field-control:focus-visible {
+  outline: 2px solid var(--kit-field-control-focus-ring);
+  outline-offset: 2px;
+}
+
+.kit-field-control[data-invalid] {
+  border-color: var(--kit-field-control-invalid-border-color);
+}
+
+.kit-field-control[data-disabled] {
+  cursor: not-allowed;
+}
+
+.kit-text-area {
+  min-block-size: var(--kit-text-area-min-block-size);
+  resize: vertical;
+}
+
+.kit-native-select {
+  appearance: none;
+  padding-inline-end: calc(var(--kit-select-icon-inline-end) * 2 + var(--kit-select-icon-size));
+}
+
+.kit-select-icon {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-end: var(--kit-select-icon-inline-end);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--kit-select-icon-size);
+  block-size: var(--kit-select-icon-size);
+  color: var(--kit-select-icon-color);
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .kit-field-message {
