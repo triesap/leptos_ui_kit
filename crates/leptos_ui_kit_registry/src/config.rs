@@ -288,6 +288,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::RouterLink, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Status, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
@@ -308,6 +309,7 @@ pub enum DesiredItemName {
     Dialog,
     Field,
     Menu,
+    RouterLink,
     Spinner,
     Status,
     Tabs,
@@ -322,6 +324,7 @@ impl DesiredItemName {
             Self::Dialog => "dialog",
             Self::Field => "field",
             Self::Menu => "menu",
+            Self::RouterLink => "router-link",
             Self::Spinner => "spinner",
             Self::Status => "status",
             Self::Tabs => "tabs",
@@ -470,6 +473,13 @@ pub fn desired_builtin_field_item() -> DesiredItemConfig {
 pub fn desired_builtin_menu_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Menu,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_router_link_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::RouterLink,
         source: RegistrySource::Builtin,
     }
 }

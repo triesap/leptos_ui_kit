@@ -29,6 +29,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["view", "field", "--source", "--json"]);
     assert_success(&project, &["view", "menu", "--json"]);
     assert_success(&project, &["view", "menu", "--source", "--json"]);
+    assert_success(&project, &["view", "router-link", "--json"]);
+    assert_success(&project, &["view", "router-link", "--source", "--json"]);
     assert_success(&project, &["view", "spinner", "--json"]);
     assert_success(&project, &["view", "spinner", "--source", "--json"]);
     assert_success(&project, &["view", "status", "--json"]);
@@ -47,6 +49,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["add", "field"]);
     assert_success(&project, &["add", "menu", "--dry-run", "--json"]);
     assert_success(&project, &["add", "menu"]);
+    assert_success(&project, &["add", "router-link", "--dry-run", "--json"]);
+    assert_success(&project, &["add", "router-link"]);
     assert_success(&project, &["add", "spinner", "--dry-run", "--json"]);
     assert_success(&project, &["add", "spinner"]);
     assert_success(&project, &["add", "status", "--dry-run", "--json"]);
@@ -96,6 +100,7 @@ fn homepage_fixture_cli_workflow_smoke() {
     );
     assert!(project.join("src/components/ui/menu/mod.rs").is_file());
     assert!(project.join("src/components/ui/menu/content.rs").is_file());
+    assert!(project.join("src/components/ui/router_link.rs").is_file());
     assert!(project.join("src/components/ui/spinner.rs").is_file());
     assert!(project.join("src/components/ui/status.rs").is_file());
     assert!(project.join("src/components/ui/tabs/mod.rs").is_file());

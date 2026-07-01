@@ -14,9 +14,10 @@ use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, RegistryItem,
     SCHEMA_VERSION, canonical_kit_json, desired_builtin_anchor_item, desired_builtin_button_item,
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
-    desired_builtin_menu_item, desired_builtin_spinner_item, desired_builtin_status_item,
-    desired_builtin_tabs_item, kit_config_to_json, kit_config_with_desired_item,
-    load_built_in_registry_item, parse_kit_json_str, read_built_in_registry_source,
+    desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
+    desired_builtin_status_item, desired_builtin_tabs_item, kit_config_to_json,
+    kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
+    read_built_in_registry_source,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -497,6 +498,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         "dialog" => desired_builtin_dialog_item(),
         "field" => desired_builtin_field_item(),
         "menu" => desired_builtin_menu_item(),
+        "router-link" => desired_builtin_router_link_item(),
         "spinner" => desired_builtin_spinner_item(),
         "status" => desired_builtin_status_item(),
         "tabs" => desired_builtin_tabs_item(),
@@ -520,7 +522,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
 
-    let config = kit_config_with_desired_item(config, desired_item)?;
+    let config = kit_config_with_transitive_desired_item(config, desired_item)?;
     let config_content = kit_config_to_json(&config)?;
     upsert_planned_file(
         project_root,
@@ -552,6 +554,17 @@ pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codege
     apply_planned_files(project_root, &plan.files, &plan.changes)?;
 
     Ok(plan)
+}
+
+fn kit_config_with_transitive_desired_item(
+    config: KitConfig,
+    item: leptos_ui_kit_registry::DesiredItemConfig,
+) -> Result<KitConfig, CodegenError> {
+    let mut config = config;
+    if item.name == leptos_ui_kit_registry::DesiredItemName::RouterLink {
+        config = kit_config_with_desired_item(config, desired_builtin_anchor_item())?;
+    }
+    Ok(kit_config_with_desired_item(config, item)?)
 }
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
@@ -2349,6 +2362,43 @@ mod tests {
         let second = apply_add(root, "button").expect("second add");
 
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn add_router_link_records_anchor_dependency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+
+        let plan = apply_add(root, "router-link").expect("add router link");
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+        )
+        .expect("parse config");
+        let item_names = config
+            .items
+            .iter()
+            .map(|item| item.item_name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(item_names, ["anchor", "router-link"]);
+        assert_eq!(plan.item_id, "builtin:router-link");
+        assert_eq!(
+            plan.lock.items.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "builtin:anchor".to_owned(),
+                "builtin:router-link".to_owned()
+            ]
+        );
+        assert!(root.join("src/components/ui/anchor.rs").is_file());
+        assert!(root.join("src/components/ui/router_link.rs").is_file());
+        assert!(root.join("styles/kit.css").is_file());
     }
 
     #[test]

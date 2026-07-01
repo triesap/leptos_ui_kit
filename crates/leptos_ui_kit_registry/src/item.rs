@@ -545,17 +545,11 @@ pub fn load_built_in_registry_root() -> Result<RegistryRoot, RegistryError> {
 
 pub fn load_built_in_registry_item(name: &str) -> Result<ResolvedRegistryItem, RegistryError> {
     let root = load_built_in_registry_root()?;
-    let Some(entry) = root.items.iter().find(|item| item.name == name) else {
-        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
-    };
-
-    let path = built_in_registry_root().join(&entry.path);
-    if !path.is_file() {
-        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
-    }
-
-    let item = parse_registry_item_file(&path)?;
-    validate_registry_graph(std::slice::from_ref(&item))?;
+    let (item, path) = parse_built_in_item_from_root(&root, name)?;
+    let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
+    collect_built_in_item_closure(&root, name, &mut seen, &mut items)?;
+    validate_registry_graph(&items)?;
     let targets = resolve_registry_targets(&item)?;
     let content_hash = registry_item_content_hash(&item, &built_in_registry_root())?;
 
@@ -578,13 +572,10 @@ pub fn resolve_built_in_registry_items(
 ) -> Result<Vec<ResolvedRegistryItem>, RegistryError> {
     let root = load_built_in_registry_root()?;
     let mut items = Vec::new();
+    let mut seen = BTreeSet::new();
 
     for name in names {
-        let Some(entry) = root.items.iter().find(|item| item.name == *name) else {
-            return Err(RegistryError::BuiltInNotFound(name.clone()));
-        };
-        let path = built_in_registry_root().join(&entry.path);
-        items.push(parse_registry_item_file(&path)?);
+        collect_built_in_item_closure(&root, name, &mut seen, &mut items)?;
     }
 
     let order = validate_registry_graph(&items)?;
@@ -592,6 +583,40 @@ pub fn resolve_built_in_registry_items(
         .into_iter()
         .map(|name| load_built_in_registry_item(&name))
         .collect()
+}
+
+fn parse_built_in_item_from_root(
+    root: &RegistryRoot,
+    name: &str,
+) -> Result<(RegistryItem, PathBuf), RegistryError> {
+    let Some(entry) = root.items.iter().find(|item| item.name == name) else {
+        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
+    };
+
+    let path = built_in_registry_root().join(&entry.path);
+    if !path.is_file() {
+        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
+    }
+
+    Ok((parse_registry_item_file(&path)?, path))
+}
+
+fn collect_built_in_item_closure(
+    root: &RegistryRoot,
+    name: &str,
+    seen: &mut BTreeSet<String>,
+    items: &mut Vec<RegistryItem>,
+) -> Result<(), RegistryError> {
+    if !seen.insert(name.to_owned()) {
+        return Ok(());
+    }
+
+    let (item, _) = parse_built_in_item_from_root(root, name)?;
+    for dependency in &item.registry_dependencies {
+        collect_built_in_item_closure(root, dependency, seen, items)?;
+    }
+    items.push(item);
+    Ok(())
 }
 
 pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, RegistryError> {
@@ -1018,13 +1043,14 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 9);
+        assert_eq!(root.items.len(), 10);
         assert!(root.items.iter().any(|item| item.name == "anchor"));
         assert!(root.items.iter().any(|item| item.name == "button"));
         assert!(root.items.iter().any(|item| item.name == "collapsible"));
         assert!(root.items.iter().any(|item| item.name == "dialog"));
         assert!(root.items.iter().any(|item| item.name == "field"));
         assert!(root.items.iter().any(|item| item.name == "menu"));
+        assert!(root.items.iter().any(|item| item.name == "router-link"));
         assert!(root.items.iter().any(|item| item.name == "spinner"));
         assert!(root.items.iter().any(|item| item.name == "status"));
         assert!(root.items.iter().any(|item| item.name == "tabs"));
@@ -1314,6 +1340,37 @@ mod tests {
             item.item.files[0].target.exports,
             ["Anchor", "AnchorTarget"]
         );
+    }
+
+    #[test]
+    fn router_link_source_reuses_anchor_style_contract() {
+        let root = built_in_registry_root();
+        let source =
+            fs::read_to_string(root.join("ui/router_link.rs")).expect("read router link source");
+        let item = load_built_in_registry_item("router-link").expect("load router link");
+        let resolved = resolve_built_in_registry_items(&["router-link".to_owned()])
+            .expect("resolve router link");
+        let resolved_names = resolved
+            .iter()
+            .map(|item| item.item.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(source.contains("use leptos_router::components::A;"));
+        assert!(source.contains("pub fn RouterLink"));
+        assert!(source.contains("<A"));
+        assert!(source.contains("attr:class=class"));
+        assert!(source.contains("href=href"));
+        assert!(source.contains("class_with_base(\"kit-anchor\", &class)"));
+        assert!(!source.contains("AnchorTarget"));
+        assert!(!source.contains("starts_with"));
+        assert_eq!(
+            item.item.accessibility.behaviors[0].name,
+            "router-link-semantics"
+        );
+        assert_eq!(item.item.registry_dependencies, ["anchor"]);
+        assert!(item.item.styles.is_empty());
+        assert_eq!(item.item.files[0].target.exports, ["RouterLink"]);
+        assert_eq!(resolved_names, ["anchor", "router-link"]);
     }
 
     #[test]

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "router-link",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Router Link",
+  "description": "A pure-CSS Leptos Router link primitive.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "accessibility": {
+    "behaviors": [
+      {
+        "name": "router-link-semantics",
+        "required": true
+      },
+      {
+        "name": "focus-visible-style",
+        "required": true
+      },
+      {
+        "name": "explicit-route-navigation",
+        "required": true
+      }
+    ],
+    "notes": []
+  },
+  "files": [
+    {
+      "source": "ui/router_link.rs",
+      "target": {
+        "kind": "ui",
+        "path": "router_link.rs",
+        "exports": [
+          "RouterLink"
+        ]
+      }
+    }
+  ],
+  "styles": [],
+  "registryDependencies": [
+    "anchor"
+  ],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [
+        "csr"
+      ],
+      "required": true
+    },
+    {
+      "crate": "leptos_router",
+      "source": {
+        "kind": "version",
+        "version": "0.9.0-alpha"
+      },
+      "features": [],
+      "required": true
+    }
+  ],
+  "extra": {}
+}

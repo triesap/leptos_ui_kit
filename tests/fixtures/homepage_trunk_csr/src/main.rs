@@ -7,8 +7,8 @@ use components::ui::{
     CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
-    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, SelectIcon, TabsList,
-    TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType, Spinner, Status,
+    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, RouterLink, SelectIcon,
+    Spinner, Status, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
     StatusPoliteness, StatusRole,
 };
 
@@ -54,6 +54,9 @@ fn App() -> impl IntoView {
             <Anchor href="https://example.com" target=AnchorTarget::Blank>
                 "External link"
             </Anchor>
+            <RouterLink href="/contact">
+                "Contact"
+            </RouterLink>
             <FieldRoot id="contact-name" required=true invalid=false disabled=false>
                 <FieldLabel>
                     "Name"

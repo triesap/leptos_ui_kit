@@ -28,6 +28,10 @@
       "path": "ui/menu.json"
     },
     {
+      "name": "router-link",
+      "path": "ui/router-link.json"
+    },
+    {
       "name": "spinner",
       "path": "ui/spinner.json"
     },
