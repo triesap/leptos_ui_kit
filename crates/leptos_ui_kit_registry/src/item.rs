@@ -1413,6 +1413,7 @@ mod tests {
             fs::read_to_string(root.join("ui/menu/item.rs")).expect("read menu item source");
         let indicator_source = fs::read_to_string(root.join("ui/menu/item_indicator.rs"))
             .expect("read menu indicator source");
+        let css = fs::read_to_string(root.join("styles/menu.css")).expect("read menu css");
         let item = load_built_in_registry_item("menu").expect("load menu");
 
         assert!(root_source.contains("checked_index: Option<Signal<Option<usize>>>"));
@@ -1434,6 +1435,8 @@ mod tests {
         assert!(indicator_source.contains("model_snapshot"));
         assert!(indicator_source.contains("menu_item_indicator_attrs"));
         assert!(indicator_source.contains("use_dom_bindings::<html::Span>"));
+        assert!(css.contains(".kit-menu-item-indicator[hidden]"));
+        assert!(css.contains("display: none;"));
         assert!(
             item.item
                 .accessibility
