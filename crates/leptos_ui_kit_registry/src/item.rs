@@ -1430,6 +1430,10 @@ mod tests {
             fs::read_to_string(root.join("ui/field/text_input.rs")).expect("read input source");
         let textarea_source =
             fs::read_to_string(root.join("ui/field/text_area.rs")).expect("read textarea source");
+        let text_field_source = fs::read_to_string(root.join("ui/field/text_field.rs"))
+            .expect("read text field source");
+        let text_area_field_source = fs::read_to_string(root.join("ui/field/text_area_field.rs"))
+            .expect("read text area field source");
         let select_source =
             fs::read_to_string(root.join("ui/field/native_select.rs")).expect("read select source");
         let css = fs::read_to_string(root.join("styles/field.css")).expect("read field css");
@@ -1471,6 +1475,26 @@ mod tests {
         assert!(textarea_source.contains("disabled=move || disabled.get()"));
         assert!(textarea_source.contains("aria-describedby=move || described_by.get()"));
         assert!(textarea_source.contains("aria-invalid=move || data_state(invalid.get())"));
+        assert!(text_field_source.contains("pub fn TextField"));
+        assert!(text_field_source.contains("FieldRoot"));
+        assert!(text_field_source.contains("FieldSurface"));
+        assert!(text_field_source.contains("FieldLabel"));
+        assert!(text_field_source.contains("TextInput"));
+        assert!(text_field_source.contains("#[prop(into)] id: String"));
+        assert!(text_field_source.contains("#[prop(into)] name: String"));
+        assert!(text_field_source.contains("#[prop(into)] value: Signal<String>"));
+        assert!(text_field_source.contains("message: Option<Signal<Option<String>>>"));
+        assert!(text_field_source.contains("children: Option<Children>"));
+        assert!(text_area_field_source.contains("pub fn TextAreaField"));
+        assert!(text_area_field_source.contains("FieldRoot"));
+        assert!(text_area_field_source.contains("FieldSurface"));
+        assert!(text_area_field_source.contains("FieldLabel"));
+        assert!(text_area_field_source.contains("TextArea"));
+        assert!(text_area_field_source.contains("#[prop(into)] id: String"));
+        assert!(text_area_field_source.contains("#[prop(into)] name: String"));
+        assert!(text_area_field_source.contains("#[prop(into)] value: Signal<String>"));
+        assert!(text_area_field_source.contains("message: Option<Signal<Option<String>>>"));
+        assert!(text_area_field_source.contains("children: Option<Children>"));
         assert!(select_source.contains("pub fn NativeSelect"));
         assert!(select_source.contains("pub fn SelectIcon"));
         assert!(select_source.contains("context.required_signal()"));
@@ -1481,6 +1505,7 @@ mod tests {
         assert!(select_source.contains("aria-invalid=move || data_state(invalid.get())"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
+        assert!(css.contains(".kit-field-label-row"));
         assert!(css.contains(".kit-field-surface"));
         assert!(css.contains(".kit-field-control"));
         assert!(css.contains(".kit-native-select"));
@@ -1515,6 +1540,8 @@ mod tests {
                 "NativeSelect",
                 "SelectIcon",
                 "TextArea",
+                "TextAreaField",
+                "TextField",
                 "TextInput",
                 "TextInputType"
             ]

@@ -47,6 +47,8 @@
           "NativeSelect",
           "SelectIcon",
           "TextArea",
+          "TextAreaField",
+          "TextField",
           "TextInput",
           "TextInputType"
         ]
@@ -105,6 +107,22 @@
       "target": {
         "kind": "ui",
         "path": "field/text_area.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/text_field.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/text_field.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/text_area_field.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/text_area_field.rs",
         "exports": []
       }
     },

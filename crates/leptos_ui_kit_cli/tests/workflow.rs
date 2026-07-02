@@ -95,6 +95,16 @@ fn homepage_fixture_cli_workflow_smoke() {
     );
     assert!(
         project
+            .join("src/components/ui/field/text_field.rs")
+            .is_file()
+    );
+    assert!(
+        project
+            .join("src/components/ui/field/text_area_field.rs")
+            .is_file()
+    );
+    assert!(
+        project
             .join("src/components/ui/field/native_select.rs")
             .is_file()
     );

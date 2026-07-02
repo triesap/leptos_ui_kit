@@ -5,6 +5,8 @@ mod required;
 mod root;
 mod surface;
 mod text_area;
+mod text_area_field;
+mod text_field;
 mod text_input;
 
 pub use label::FieldLabel;
@@ -14,4 +16,6 @@ pub use required::FieldRequired;
 pub use root::FieldRoot;
 pub use surface::FieldSurface;
 pub use text_area::TextArea;
+pub use text_area_field::TextAreaField;
+pub use text_field::TextField;
 pub use text_input::{TextInput, TextInputType};

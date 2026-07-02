@@ -74,6 +74,13 @@
   line-height: 1;
 }
 
+.kit-field-label-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--kit-field-label-gap);
+  min-inline-size: 0;
+}
+
 .kit-field-required {
   color: var(--kit-field-required-color);
 }
