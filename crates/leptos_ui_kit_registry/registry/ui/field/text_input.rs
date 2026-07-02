@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 use super::root::{
     class_with_base, data_state, field_context, resolved_bool_signal, resolved_control_id,
-    resolved_message_id,
+    resolved_described_by,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,7 +45,7 @@ pub fn TextInput(
 ) -> impl IntoView {
     let context = field_context();
     let control_id = resolved_control_id(id, &context, "kit-input");
-    let message_id = resolved_message_id(described_by, &context);
+    let described_by = resolved_described_by(described_by, &context);
     let required = resolved_bool_signal(
         required,
         context.as_ref().map(|context| context.required_signal()),
@@ -68,7 +68,7 @@ pub fn TextInput(
             autocomplete=autocomplete
             required=move || required.get()
             disabled=move || disabled.get()
-            aria-describedby=move || message_id.clone()
+            aria-describedby=move || described_by.get()
             aria-invalid=move || data_state(invalid.get())
             data-invalid=move || data_state(invalid.get())
             data-disabled=move || data_state(disabled.get())

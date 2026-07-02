@@ -11,6 +11,7 @@ pub(crate) struct FieldContext {
     pub(crate) required: Signal<bool>,
     pub(crate) invalid: Signal<bool>,
     pub(crate) disabled: Signal<bool>,
+    pub(crate) message_present: RwSignal<bool>,
 }
 
 impl FieldContext {
@@ -20,6 +21,16 @@ impl FieldContext {
 
     pub(crate) fn message_id(&self) -> String {
         self.message_id.clone()
+    }
+
+    pub(crate) fn described_by_signal(&self) -> Signal<Option<String>> {
+        let context = self.clone();
+        Signal::derive(move || {
+            context
+                .message_present
+                .get()
+                .then(|| context.message_id.clone())
+        })
     }
 
     pub(crate) fn required_signal(&self) -> Signal<bool> {
@@ -51,6 +62,7 @@ pub fn FieldRoot(
         required,
         invalid,
         disabled,
+        message_present: RwSignal::new(false),
     });
 
     view! {
@@ -90,11 +102,17 @@ pub(crate) fn resolved_control_id(
         .unwrap_or_else(|| next_id(prefix))
 }
 
-pub(crate) fn resolved_message_id(
+pub(crate) fn resolved_described_by(
     described_by: Option<String>,
     context: &Option<FieldContext>,
-) -> Option<String> {
-    described_by.or_else(|| context.as_ref().map(FieldContext::message_id))
+) -> Signal<Option<String>> {
+    if let Some(described_by) = described_by {
+        Signal::derive(move || Some(described_by.clone()))
+    } else if let Some(context) = context {
+        context.described_by_signal()
+    } else {
+        None::<String>.into()
+    }
 }
 
 pub(crate) fn resolved_bool_signal(
