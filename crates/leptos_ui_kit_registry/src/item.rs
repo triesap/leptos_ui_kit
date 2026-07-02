@@ -1326,6 +1326,12 @@ mod tests {
         assert!(source.contains("rel.or_else(|| target.default_rel().map(str::to_owned))"));
         assert!(source.contains("noopener noreferrer"));
         assert!(!source.contains("leptos_router"));
+        assert!(
+            item.item
+                .cargo_plan
+                .iter()
+                .all(|dependency| dependency.crate_name != "leptos_router")
+        );
         assert!(css.contains(".kit-anchor"));
         assert!(css.contains("--kit-anchor-color"));
         assert!(css.contains(":focus-visible"));
