@@ -108,6 +108,11 @@ fn homepage_fixture_cli_workflow_smoke() {
             .join("src/components/ui/field/native_select.rs")
             .is_file()
     );
+    assert!(
+        project
+            .join("src/components/ui/field/select_field.rs")
+            .is_file()
+    );
     assert!(project.join("src/components/ui/menu/mod.rs").is_file());
     assert!(project.join("src/components/ui/menu/content.rs").is_file());
     assert!(project.join("src/components/ui/router_link.rs").is_file());

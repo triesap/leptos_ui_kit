@@ -128,6 +128,46 @@
   padding-inline-end: calc(var(--kit-select-icon-inline-end) * 2 + var(--kit-select-icon-size));
 }
 
+.kit-select-field-surface {
+  position: relative;
+}
+
+.kit-select-field-native {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  block-size: 100%;
+  inline-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.kit-select-field-native:disabled {
+  cursor: not-allowed;
+}
+
+.kit-select-field-value-row {
+  display: inline-flex;
+  align-items: baseline;
+  min-inline-size: 0;
+  padding-inline-end: calc(var(--kit-select-icon-inline-end) + var(--kit-select-icon-size));
+  pointer-events: none;
+  position: relative;
+  z-index: 2;
+}
+
+.kit-select-field-value {
+  overflow: hidden;
+  color: var(--kit-field-control-color);
+  font: inherit;
+  font-size: var(--kit-field-control-font-size);
+  font-weight: var(--kit-field-control-font-weight);
+  line-height: var(--kit-field-control-line-height);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .kit-select-icon {
   position: absolute;
   inset-block-start: 50%;
@@ -140,6 +180,7 @@
   color: var(--kit-select-icon-color);
   pointer-events: none;
   transform: translateY(-50%);
+  z-index: 2;
 }
 
 .kit-field-message {

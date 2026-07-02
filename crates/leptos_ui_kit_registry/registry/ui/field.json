@@ -45,6 +45,7 @@
           "FieldRoot",
           "FieldSurface",
           "NativeSelect",
+          "SelectField",
           "SelectIcon",
           "TextArea",
           "TextAreaField",
@@ -131,6 +132,14 @@
       "target": {
         "kind": "ui",
         "path": "field/native_select.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/field/select_field.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/select_field.rs",
         "exports": []
       }
     }

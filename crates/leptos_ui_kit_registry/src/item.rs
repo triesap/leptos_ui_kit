@@ -1436,6 +1436,8 @@ mod tests {
             .expect("read text area field source");
         let select_source =
             fs::read_to_string(root.join("ui/field/native_select.rs")).expect("read select source");
+        let select_field_source = fs::read_to_string(root.join("ui/field/select_field.rs"))
+            .expect("read select field source");
         let css = fs::read_to_string(root.join("styles/field.css")).expect("read field css");
         let item = load_built_in_registry_item("field").expect("load field");
 
@@ -1503,12 +1505,22 @@ mod tests {
         assert!(select_source.contains("disabled=move || disabled.get()"));
         assert!(select_source.contains("aria-describedby=move || described_by.get()"));
         assert!(select_source.contains("aria-invalid=move || data_state(invalid.get())"));
+        assert!(select_field_source.contains("pub fn SelectField"));
+        assert!(select_field_source.contains("NativeSelect"));
+        assert!(select_field_source.contains("SelectIcon"));
+        assert!(select_field_source.contains("#[prop(into)] selected_label: Signal<String>"));
+        assert!(select_field_source.contains("label_action: Option<Children>"));
+        assert!(select_field_source.contains("icon: Option<Children>"));
+        assert!(select_field_source.contains("children: Children"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
         assert!(css.contains(".kit-field-label-row"));
         assert!(css.contains(".kit-field-surface"));
         assert!(css.contains(".kit-field-control"));
         assert!(css.contains(".kit-native-select"));
+        assert!(css.contains(".kit-select-field-native"));
+        assert!(css.contains(".kit-select-field-value-row"));
+        assert!(css.contains(".kit-select-field-value"));
         assert!(css.contains(".kit-select-icon"));
         assert!(css.contains(".kit-field-message"));
         assert!(css.contains("--kit-field-required-color"));
@@ -1538,6 +1550,7 @@ mod tests {
                 "FieldRoot",
                 "FieldSurface",
                 "NativeSelect",
+                "SelectField",
                 "SelectIcon",
                 "TextArea",
                 "TextAreaField",
