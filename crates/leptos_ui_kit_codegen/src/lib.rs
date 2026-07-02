@@ -17,7 +17,7 @@ use leptos_ui_kit_registry::{
     desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
     desired_builtin_status_item, desired_builtin_tabs_item, kit_config_to_json,
     kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
-    read_built_in_registry_source,
+    read_built_in_registry_source, resolve_built_in_registry_items,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -491,19 +491,10 @@ pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 
 pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
     let item = load_built_in_registry_item(item_name)?;
-    let desired_item = match item.item.name.as_str() {
-        "anchor" => desired_builtin_anchor_item(),
-        "button" => desired_builtin_button_item(),
-        "collapsible" => desired_builtin_collapsible_item(),
-        "dialog" => desired_builtin_dialog_item(),
-        "field" => desired_builtin_field_item(),
-        "menu" => desired_builtin_menu_item(),
-        "router-link" => desired_builtin_router_link_item(),
-        "spinner" => desired_builtin_spinner_item(),
-        "status" => desired_builtin_status_item(),
-        "tabs" => desired_builtin_tabs_item(),
-        _ => return Err(RegistryError::BuiltInNotFound(item_name.to_owned()).into()),
-    };
+    let desired_items = resolve_built_in_registry_items(&[item_name.to_owned()])?
+        .into_iter()
+        .map(|item| desired_builtin_item(&item.item.name))
+        .collect::<Result<Vec<_>, _>>()?;
     let item_id = built_in_item_id(&item.item.name);
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
@@ -522,7 +513,7 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
 
-    let config = kit_config_with_transitive_desired_item(config, desired_item)?;
+    let config = kit_config_with_desired_items(config, desired_items)?;
     let config_content = kit_config_to_json(&config)?;
     upsert_planned_file(
         project_root,
@@ -556,15 +547,33 @@ pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codege
     Ok(plan)
 }
 
-fn kit_config_with_transitive_desired_item(
+fn desired_builtin_item(
+    name: &str,
+) -> Result<leptos_ui_kit_registry::DesiredItemConfig, RegistryError> {
+    match name {
+        "anchor" => Ok(desired_builtin_anchor_item()),
+        "button" => Ok(desired_builtin_button_item()),
+        "collapsible" => Ok(desired_builtin_collapsible_item()),
+        "dialog" => Ok(desired_builtin_dialog_item()),
+        "field" => Ok(desired_builtin_field_item()),
+        "menu" => Ok(desired_builtin_menu_item()),
+        "router-link" => Ok(desired_builtin_router_link_item()),
+        "spinner" => Ok(desired_builtin_spinner_item()),
+        "status" => Ok(desired_builtin_status_item()),
+        "tabs" => Ok(desired_builtin_tabs_item()),
+        _ => Err(RegistryError::BuiltInNotFound(name.to_owned())),
+    }
+}
+
+fn kit_config_with_desired_items(
     config: KitConfig,
-    item: leptos_ui_kit_registry::DesiredItemConfig,
+    items: Vec<leptos_ui_kit_registry::DesiredItemConfig>,
 ) -> Result<KitConfig, CodegenError> {
     let mut config = config;
-    if item.name == leptos_ui_kit_registry::DesiredItemName::RouterLink {
-        config = kit_config_with_desired_item(config, desired_builtin_anchor_item())?;
+    for item in items {
+        config = kit_config_with_desired_item(config, item)?;
     }
-    Ok(kit_config_with_desired_item(config, item)?)
+    Ok(config)
 }
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
@@ -2365,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn add_router_link_records_anchor_dependency() {
+    fn add_router_link_records_registry_dependencies_from_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
