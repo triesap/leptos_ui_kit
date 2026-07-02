@@ -2154,7 +2154,7 @@ mod tests {
             plan.lock.style_blocks_by_id.get("button"),
             Some(&"builtin:button".to_owned())
         );
-        assert_eq!(plan.cargo_plan.len(), 2);
+        assert_eq!(plan.cargo_plan.len(), 1);
         assert!(
             plan.cargo_plan
                 .iter()
@@ -2185,7 +2185,7 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
         assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
-        assert_eq!(plan.cargo_plan.len(), 2);
+        assert_eq!(plan.cargo_plan.len(), 1);
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
     }

@@ -1682,7 +1682,8 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"itemIds\": ["));
         assert!(output.contains("\"builtin:button\""));
         assert!(output.contains("\"cargoPlan\""));
-        assert!(output.contains("\"crate\": \"leptos_router\""));
+        assert!(output.contains("\"crate\": \"leptos\""));
+        assert!(!output.contains("\"crate\": \"leptos_router\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
     }
 
@@ -1756,7 +1757,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"name\": \"registry\""));
         assert!(output.contains("\"status\": \"pass\""));
         assert!(output.contains("\"name\": \"dependency.registry.leptos\""));
-        assert!(output.contains("\"name\": \"dependency.registry.leptos_router\""));
+        assert!(!output.contains("\"name\": \"dependency.registry.leptos_router\""));
     }
 
     #[test]

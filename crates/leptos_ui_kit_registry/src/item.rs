@@ -1380,6 +1380,40 @@ mod tests {
     }
 
     #[test]
+    fn built_in_router_dependency_metadata_matches_router_source_usage() {
+        for name in [
+            "button",
+            "field",
+            "spinner",
+            "status",
+            "collapsible",
+            "dialog",
+            "menu",
+            "tabs",
+        ] {
+            let item = load_built_in_registry_item(name).expect("load built-in item");
+
+            assert!(
+                item.item
+                    .cargo_plan
+                    .iter()
+                    .all(|dependency| dependency.crate_name != "leptos_router"),
+                "{name} must not require leptos_router"
+            );
+        }
+
+        let router_link = load_built_in_registry_item("router-link").expect("load router-link");
+
+        assert!(
+            router_link
+                .item
+                .cargo_plan
+                .iter()
+                .any(|dependency| dependency.crate_name == "leptos_router")
+        );
+    }
+
+    #[test]
     fn form_field_source_and_css_encode_label_message_structure() {
         let root = built_in_registry_root();
         let root_source =

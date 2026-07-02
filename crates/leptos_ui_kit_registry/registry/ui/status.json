@@ -63,15 +63,6 @@
         "csr"
       ],
       "required": true
-    },
-    {
-      "crate": "leptos_router",
-      "source": {
-        "kind": "version",
-        "version": "0.9.0-alpha"
-      },
-      "features": [],
-      "required": true
     }
   ],
   "extra": {}
