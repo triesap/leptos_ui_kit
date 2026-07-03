@@ -1,7 +1,8 @@
 use leptos::prelude::*;
 
 use super::{
-    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, TextInput, TextInputType,
+    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSlot, FieldSurface, TextInput,
+    TextInputType,
 };
 
 #[component]
@@ -24,10 +25,11 @@ pub fn TextField(
     #[prop(optional, into)] required_class: String,
     #[prop(optional, into)] input_class: String,
     #[prop(optional, into)] message_class: String,
-    #[prop(optional)] children: Option<Children>,
+    #[prop(optional, into, default = FieldSlot::empty())] label_action: FieldSlot,
 ) -> impl IntoView {
     let required_class_for_marker = required_class.clone();
     let message_class_for_message = message_class.clone();
+    let label_action_for_render = label_action.clone();
 
     view! {
         <FieldRoot id=id class=class required=required invalid=invalid disabled=disabled>
@@ -41,7 +43,7 @@ pub fn TextField(
                             })
                         }}
                     </FieldLabel>
-                    {children.map(|children| children())}
+                    {move || label_action_for_render.render()}
                 </span>
                 <TextInput
                     input_type=input_type

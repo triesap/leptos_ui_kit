@@ -1435,6 +1435,8 @@ mod tests {
         let root = built_in_registry_root();
         let root_source =
             fs::read_to_string(root.join("ui/field/root.rs")).expect("read field root source");
+        let slot_source =
+            fs::read_to_string(root.join("ui/field/slot.rs")).expect("read field slot source");
         let label_source =
             fs::read_to_string(root.join("ui/field/label.rs")).expect("read field label source");
         let message_source = fs::read_to_string(root.join("ui/field/message.rs"))
@@ -1466,6 +1468,10 @@ mod tests {
         assert!(root_source.contains("resolved_described_by"));
         assert!(root_source.contains("required_signal"));
         assert!(root_source.contains("data-required"));
+        assert!(slot_source.contains("pub struct FieldSlot"));
+        assert!(slot_source.contains("impl<F, V> From<F> for FieldSlot"));
+        assert!(slot_source.contains("pub fn empty() -> Self"));
+        assert!(slot_source.contains("pub fn render(&self) -> AnyView"));
         assert!(label_source.contains("pub fn FieldLabel"));
         assert!(label_source.contains("<label"));
         assert!(label_source.contains("for=control_id"));
@@ -1503,7 +1509,10 @@ mod tests {
         assert!(text_field_source.contains("#[prop(into)] name: String"));
         assert!(text_field_source.contains("#[prop(into)] value: Signal<String>"));
         assert!(text_field_source.contains("message: Option<Signal<Option<String>>>"));
-        assert!(text_field_source.contains("children: Option<Children>"));
+        assert!(text_field_source.contains(
+            "#[prop(optional, into, default = FieldSlot::empty())] label_action: FieldSlot"
+        ));
+        assert!(text_field_source.contains("label_action_for_render.render()"));
         assert!(text_area_field_source.contains("pub fn TextAreaField"));
         assert!(text_area_field_source.contains("FieldRoot"));
         assert!(text_area_field_source.contains("FieldSurface"));
@@ -1513,7 +1522,10 @@ mod tests {
         assert!(text_area_field_source.contains("#[prop(into)] name: String"));
         assert!(text_area_field_source.contains("#[prop(into)] value: Signal<String>"));
         assert!(text_area_field_source.contains("message: Option<Signal<Option<String>>>"));
-        assert!(text_area_field_source.contains("children: Option<Children>"));
+        assert!(text_area_field_source.contains(
+            "#[prop(optional, into, default = FieldSlot::empty())] label_action: FieldSlot"
+        ));
+        assert!(text_area_field_source.contains("label_action_for_render.render()"));
         assert!(select_source.contains("pub fn NativeSelect"));
         assert!(select_source.contains("pub fn SelectIcon"));
         assert!(select_source.contains("context.required_signal()"));
@@ -1525,17 +1537,16 @@ mod tests {
         assert!(select_field_source.contains("pub fn SelectField"));
         assert!(select_field_source.contains("NativeSelect"));
         assert!(select_field_source.contains("SelectIcon"));
-        assert!(select_field_source.contains("pub struct SelectFieldSlot"));
-        assert!(select_field_source.contains("impl<F, V> From<F> for SelectFieldSlot"));
+        assert!(select_field_source.contains("FieldSlot"));
+        assert!(!select_field_source.contains("SelectFieldSlot"));
         assert!(select_field_source.contains("#[prop(into)] selected_label: Signal<String>"));
-        assert!(
-            select_field_source.contains(
-                "#[prop(optional, into, default = SelectFieldSlot::empty())] label_action: SelectFieldSlot"
-            )
-        );
         assert!(select_field_source.contains(
-            "#[prop(optional, into, default = SelectFieldSlot::empty())] icon: SelectFieldSlot"
+            "#[prop(optional, into, default = FieldSlot::empty())] label_action: FieldSlot"
         ));
+        assert!(
+            select_field_source
+                .contains("#[prop(optional, into, default = FieldSlot::empty())] icon: FieldSlot")
+        );
         assert!(select_field_source.contains("label_action_for_render.render()"));
         assert!(select_field_source.contains("icon_for_render.is_present()"));
         assert!(select_field_source.contains("children: Children"));
@@ -1575,10 +1586,10 @@ mod tests {
                 "FieldMessage",
                 "FieldRequired",
                 "FieldRoot",
+                "FieldSlot",
                 "FieldSurface",
                 "NativeSelect",
                 "SelectField",
-                "SelectFieldSlot",
                 "SelectIcon",
                 "TextArea",
                 "TextAreaField",

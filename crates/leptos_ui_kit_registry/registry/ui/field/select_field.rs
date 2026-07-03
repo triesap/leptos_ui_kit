@@ -1,59 +1,9 @@
 use leptos::prelude::*;
-use std::sync::Arc;
 
 use super::{
-    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectIcon,
+    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSlot, FieldSurface, NativeSelect,
+    SelectIcon,
 };
-
-#[derive(Clone)]
-pub struct SelectFieldSlot {
-    present: bool,
-    render: Arc<dyn Fn() -> AnyView + Send + Sync>,
-}
-
-impl SelectFieldSlot {
-    pub fn new<F, V>(render: F) -> Self
-    where
-        F: Fn() -> V + Send + Sync + 'static,
-        V: IntoView + 'static,
-    {
-        Self {
-            present: true,
-            render: Arc::new(move || render().into_any()),
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            present: false,
-            render: Arc::new(|| ().into_any()),
-        }
-    }
-
-    pub fn is_present(&self) -> bool {
-        self.present
-    }
-
-    pub fn render(&self) -> AnyView {
-        (self.render)()
-    }
-}
-
-impl Default for SelectFieldSlot {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
-impl<F, V> From<F> for SelectFieldSlot
-where
-    F: Fn() -> V + Send + Sync + 'static,
-    V: IntoView + 'static,
-{
-    fn from(render: F) -> Self {
-        Self::new(render)
-    }
-}
 
 #[component]
 pub fn SelectField(
@@ -77,8 +27,8 @@ pub fn SelectField(
     #[prop(optional, into)] value_class: String,
     #[prop(optional, into)] icon_class: String,
     #[prop(optional, into)] message_class: String,
-    #[prop(optional, into, default = SelectFieldSlot::empty())] label_action: SelectFieldSlot,
-    #[prop(optional, into, default = SelectFieldSlot::empty())] icon: SelectFieldSlot,
+    #[prop(optional, into, default = FieldSlot::empty())] label_action: FieldSlot,
+    #[prop(optional, into, default = FieldSlot::empty())] icon: FieldSlot,
     children: Children,
 ) -> impl IntoView {
     let required_class_for_marker = required_class.clone();

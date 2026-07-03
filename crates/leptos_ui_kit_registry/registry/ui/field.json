@@ -43,10 +43,10 @@
           "FieldMessage",
           "FieldRequired",
           "FieldRoot",
+          "FieldSlot",
           "FieldSurface",
           "NativeSelect",
           "SelectField",
-          "SelectFieldSlot",
           "SelectIcon",
           "TextArea",
           "TextAreaField",
@@ -54,6 +54,14 @@
           "TextInput",
           "TextInputType"
         ]
+      }
+    },
+    {
+      "source": "ui/field/slot.rs",
+      "target": {
+        "kind": "ui",
+        "path": "field/slot.rs",
+        "exports": []
       }
     },
     {
