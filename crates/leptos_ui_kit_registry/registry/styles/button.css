@@ -20,6 +20,7 @@
   --kit-button-font-weight: 600;
   --kit-button-gap: 0.375rem;
   --kit-button-line-height: 1;
+  --kit-button-spinner-size: 1em;
   --kit-button-transition-duration: 120ms;
   --kit-button-transition-timing: ease;
   --kit-button-sm-font-size: 0.875rem;
@@ -61,6 +62,11 @@
 .kit-button:disabled {
   cursor: not-allowed;
   opacity: var(--kit-button-disabled-opacity);
+}
+
+.kit-button-spinner {
+  inline-size: var(--kit-button-spinner-size);
+  block-size: var(--kit-button-spinner-size);
 }
 
 .kit-button--primary {

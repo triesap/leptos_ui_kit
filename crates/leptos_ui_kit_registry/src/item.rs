@@ -1279,11 +1279,17 @@ mod tests {
         assert!(source.contains("use leptos::prelude::*;"));
         assert!(source.contains("#[component]"));
         assert!(source.contains("#[allow(dead_code)]"));
+        assert!(source.contains("use super::{Spinner, SpinnerMode};"));
         assert!(source.contains("pub fn Button"));
-        assert!(source.contains("Children"));
+        assert!(source.contains("ChildrenFn"));
         assert!(source.contains("<button"));
         assert!(source.contains("type=button_type.as_str()"));
-        assert!(source.contains("disabled=move || disabled.get()"));
+        assert!(source.contains("loading: Signal<bool>"));
+        assert!(source.contains("loading_label: String"));
+        assert!(source.contains("disabled.get() || loading.get()"));
+        assert!(source.contains("disabled=move || disabled_state.get()"));
+        assert!(source.contains("aria-busy=move || loading.get().then_some(\"true\")"));
+        assert!(source.contains("SpinnerMode::Decorative"));
         assert!(source.contains("Self::Button => \"button\""));
         assert!(source.contains("Self::Submit => \"submit\""));
         assert!(source.contains("Self::Reset => \"reset\""));
@@ -1294,6 +1300,7 @@ mod tests {
         assert!(css.contains("--kit-color-primary-hover"));
         assert!(css.contains("--kit-button-disabled-opacity"));
         assert!(css.contains("--kit-button-lg-min-height"));
+        assert!(css.contains("--kit-button-spinner-size"));
         assert!(css.contains(":focus-visible"));
         assert!(!css.contains("@import"));
         assert!(
@@ -1303,6 +1310,14 @@ mod tests {
                 .iter()
                 .any(|behavior| behavior.name == "native-button-semantics" && behavior.required)
         );
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "loading-busy-state" && behavior.required)
+        );
+        assert_eq!(item.item.registry_dependencies, ["spinner"]);
         assert_eq!(
             item.item.files[0].target.exports,
             ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
@@ -1764,7 +1779,10 @@ mod tests {
         let item = load_built_in_registry_item("spinner").expect("load spinner");
 
         assert!(source.contains("pub fn Spinner"));
-        assert!(source.contains("role=\"status\""));
+        assert!(source.contains("pub enum SpinnerMode"));
+        assert!(source.contains("role=mode.role()"));
+        assert!(source.contains("aria-hidden=mode.aria_hidden()"));
+        assert!(source.contains("Self::Decorative"));
         assert!(source.contains("kit-spinner-mark"));
         assert!(source.contains("kit-spinner-label"));
         assert!(css.contains(".kit-spinner"));
@@ -1777,7 +1795,17 @@ mod tests {
                 .iter()
                 .any(|behavior| behavior.name == "status-role" && behavior.required)
         );
-        assert_eq!(item.item.files[0].target.exports, ["Spinner"]);
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "decorative-mode" && behavior.required)
+        );
+        assert_eq!(
+            item.item.files[0].target.exports,
+            ["Spinner", "SpinnerMode"]
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use components::ui::{
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent,
     MenuContentAlign, MenuContentSide, MenuRadioItem, MenuRoot, MenuTrigger, NativeSelect,
-    RouterLink, SelectIcon, Spinner, Status, StatusPoliteness, StatusRole, TabsList, TabsPanel,
-    TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
+    RouterLink, SelectIcon, Status, StatusPoliteness, StatusRole, TabsList, TabsPanel, TabsRoot,
+    TabsTrigger, TextArea, TextInput, TextInputType,
 };
 
 fn main() {
@@ -33,14 +33,10 @@ fn App() -> impl IntoView {
                     size=ButtonSize::Lg
                     button_type=ButtonType::Submit
                     disabled=move || sending.get()
+                    loading=move || sending.get()
+                    loading_label="Sending"
                 >
-                    {move || {
-                        if sending.get() {
-                            view! { <Spinner label="Sending" /> }.into_any()
-                        } else {
-                            view! { <span>"Send message"</span> }.into_any()
-                        }
-                    }}
+                    <span>"Send message"</span>
                 </Button>
             </form>
             <Button

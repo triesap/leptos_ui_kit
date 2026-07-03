@@ -1,5 +1,7 @@
 use leptos::prelude::*;
 
+use super::{Spinner, SpinnerMode};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 pub enum ButtonVariant {
@@ -60,9 +62,11 @@ pub fn Button(
     #[prop(optional, default = ButtonSize::Md)] size: ButtonSize,
     #[prop(optional, default = ButtonType::Button)] button_type: ButtonType,
     #[prop(optional, into, default = false.into())] disabled: Signal<bool>,
+    #[prop(optional, into, default = false.into())] loading: Signal<bool>,
+    #[prop(optional, into, default = "Loading".to_owned())] loading_label: String,
     #[prop(optional)] on_click: Option<Callback<leptos::ev::MouseEvent>>,
     #[prop(optional, into)] class: String,
-    children: Children,
+    children: ChildrenFn,
 ) -> impl IntoView {
     let base_class = format!("kit-button {} {}", variant.class(), size.class(),);
     let class = if class.is_empty() {
@@ -70,19 +74,36 @@ pub fn Button(
     } else {
         format!("{base_class} {class}")
     };
+    let disabled_state = Signal::derive(move || disabled.get() || loading.get());
+    let children = StoredValue::new(children);
 
     view! {
         <button
             class=class
             type=button_type.as_str()
-            disabled=move || disabled.get()
+            disabled=move || disabled_state.get()
+            aria-busy=move || loading.get().then_some("true")
             on:click=move |event| {
+                if disabled_state.get_untracked() {
+                    return;
+                }
+
                 if let Some(on_click) = on_click.as_ref() {
                     on_click.run(event);
                 }
             }
         >
-            {children()}
+            {move || {
+                if loading.get() {
+                    view! {
+                        <Spinner mode=SpinnerMode::Decorative class="kit-button-spinner" />
+                        <span class="kit-button-loading-label">{loading_label.clone()}</span>
+                    }
+                        .into_any()
+                } else {
+                    children.with_value(|children| children()).into_any()
+                }
+            }}
         </button>
     }
 }

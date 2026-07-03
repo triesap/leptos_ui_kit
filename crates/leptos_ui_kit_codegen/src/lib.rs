@@ -2395,15 +2395,26 @@ mod tests {
 
         assert!(!plan.is_empty());
         assert!(root.join("src/components/ui/button.rs").is_file());
+        assert!(root.join("src/components/ui/spinner.rs").is_file());
         assert!(
             fs::read_to_string(root.join("src/components/ui/mod.rs"))
                 .expect("read ui mod")
                 .contains("pub use button::{Button, ButtonSize, ButtonType, ButtonVariant};")
         );
         assert!(
+            fs::read_to_string(root.join("src/components/ui/mod.rs"))
+                .expect("read ui mod")
+                .contains("pub use spinner::{Spinner, SpinnerMode};")
+        );
+        assert!(
             fs::read_to_string(root.join("styles/kit.css"))
                 .expect("read css")
                 .contains("/* leptos-ui-kit:start button */")
+        );
+        assert!(
+            fs::read_to_string(root.join("styles/kit.css"))
+                .expect("read css")
+                .contains("/* leptos-ui-kit:start spinner */")
         );
         let lock = parse_install_lock_str_at_path(
             &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read lock"),
@@ -2411,12 +2422,19 @@ mod tests {
         )
         .expect("parse lock");
         assert!(lock.items.contains_key("builtin:button"));
+        assert!(lock.items.contains_key("builtin:spinner"));
         let config = parse_kit_json_str(
             &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
-        assert_eq!(config.items.len(), 1);
-        assert_eq!(config.items[0].item_name(), "button");
+        assert_eq!(config.items.len(), 2);
+        assert!(config.items.iter().any(|item| item.item_name() == "button"));
+        assert!(
+            config
+                .items
+                .iter()
+                .any(|item| item.item_name() == "spinner")
+        );
         assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
     }
 

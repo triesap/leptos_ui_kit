@@ -20,6 +20,10 @@
       {
         "name": "focus-visible-state",
         "required": true
+      },
+      {
+        "name": "loading-busy-state",
+        "required": true
       }
     ],
     "notes": []
@@ -48,7 +52,9 @@
       }
     }
   ],
-  "registryDependencies": [],
+  "registryDependencies": [
+    "spinner"
+  ],
   "cargoPlan": [
     {
       "crate": "leptos",

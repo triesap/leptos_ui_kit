@@ -24,6 +24,10 @@
       {
         "name": "decorative-spinner-mark",
         "required": true
+      },
+      {
+        "name": "decorative-mode",
+        "required": true
       }
     ],
     "notes": []
@@ -35,7 +39,8 @@
         "kind": "ui",
         "path": "spinner.rs",
         "exports": [
-          "Spinner"
+          "Spinner",
+          "SpinnerMode"
         ]
       }
     }
