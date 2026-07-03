@@ -6,10 +6,10 @@ use components::ui::{
     Anchor, AnchorTarget, Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent,
     CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
-    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuItem,
-    MenuItemIndicator, MenuItemKind, MenuRoot, MenuTrigger, NativeSelect, RouterLink, SelectIcon,
-    Spinner, Status, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
-    StatusPoliteness, StatusRole,
+    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuRadioItem,
+    MenuRoot, MenuTrigger, NativeSelect, RouterLink, SelectIcon, Spinner, Status,
+    StatusPoliteness, StatusRole, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput,
+    TextInputType,
 };
 
 fn main() {
@@ -126,28 +126,20 @@ fn App() -> impl IntoView {
             <MenuRoot checked_index=locale_index>
                 <MenuTrigger>"Locale"</MenuTrigger>
                 <MenuContent>
-                    <MenuItem
+                    <MenuRadioItem
                         index=0
-                        kind=MenuItemKind::Radio
                         label="English"
                         on_select=Callback::new(move |_| set_locale_index.set(Some(0)))
                     >
-                        <span>"English"</span>
-                        <MenuItemIndicator index=0>
-                            <span>"*"</span>
-                        </MenuItemIndicator>
-                    </MenuItem>
-                    <MenuItem
+                        <span>"*"</span>
+                    </MenuRadioItem>
+                    <MenuRadioItem
                         index=1
-                        kind=MenuItemKind::Radio
                         label="Spanish"
                         on_select=Callback::new(move |_| set_locale_index.set(Some(1)))
                     >
-                        <span>"Spanish"</span>
-                        <MenuItemIndicator index=1>
-                            <span>"*"</span>
-                        </MenuItemIndicator>
-                    </MenuItem>
+                        <span>"*"</span>
+                    </MenuRadioItem>
                 </MenuContent>
             </MenuRoot>
         </main>

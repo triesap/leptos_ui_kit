@@ -51,6 +51,13 @@ impl MenuContext {
         });
     }
 
+    pub(crate) fn set_label(&self, index: usize, label: String) {
+        self.ensure_len(index);
+        self.item_labels.update(|labels| {
+            labels[index] = label;
+        });
+    }
+
     pub(crate) fn set_disabled(&self, index: usize, disabled: bool) {
         self.ensure_len(index);
         self.model.update(|model| {

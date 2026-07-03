@@ -127,6 +127,10 @@
   opacity: var(--kit-menu-item-disabled-opacity);
 }
 
+.kit-menu-radio-item-label {
+  min-inline-size: 0;
+}
+
 .kit-menu-item-indicator {
   display: inline-flex;
   align-items: center;

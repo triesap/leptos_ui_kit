@@ -57,6 +57,7 @@
           "MenuItemIndicator",
           "MenuItemKind",
           "MenuLoop",
+          "MenuRadioItem",
           "MenuRoot",
           "MenuTrigger"
         ]
@@ -91,6 +92,14 @@
       "target": {
         "kind": "ui",
         "path": "menu/item.rs",
+        "exports": []
+      }
+    },
+    {
+      "source": "ui/menu/radio_item.rs",
+      "target": {
+        "kind": "ui",
+        "path": "menu/radio_item.rs",
         "exports": []
       }
     },

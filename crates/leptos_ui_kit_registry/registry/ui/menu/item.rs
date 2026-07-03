@@ -27,8 +27,8 @@ pub fn MenuItem(
     index: usize,
     #[prop(optional, default = MenuItemKind::Item)] kind: MenuItemKind,
     #[prop(optional, into, default = false.into())] disabled: Signal<bool>,
-    #[prop(optional, into)] label: Option<String>,
-    #[prop(optional)] on_select: Option<Callback<usize>>,
+    #[prop(optional, into)] label: Option<Signal<String>>,
+    #[prop(optional, default = Callback::new(|_| {}))] on_select: Callback<usize>,
     #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
@@ -49,7 +49,17 @@ pub fn MenuItem(
         )
     });
     let node_ref = NodeRef::<html::Button>::new();
-    context.register_item(index, node_ref, label.unwrap_or_default());
+    let initial_label = label
+        .as_ref()
+        .map(Signal::get_untracked)
+        .unwrap_or_default();
+    context.register_item(index, node_ref, initial_label);
+    if let Some(label) = label {
+        let label_context = context.clone();
+        Effect::new(move || {
+            label_context.set_label(index, label.get());
+        });
+    }
 
     let click_context = context.clone();
     let click_on_select = on_select.clone();
@@ -58,9 +68,7 @@ pub fn MenuItem(
             return;
         }
         if activate_item(&click_context, index, kind) {
-            if let Some(on_select) = click_on_select.as_ref() {
-                on_select.run(index);
-            }
+            click_on_select.run(index);
         }
     };
 
@@ -85,9 +93,7 @@ pub fn MenuItem(
         if key == "Enter" || key == " " {
             event.prevent_default();
             if activate_item(&key_context, index, kind) {
-                if let Some(on_select) = key_on_select.as_ref() {
-                    on_select.run(index);
-                }
+                key_on_select.run(index);
             }
             return;
         }

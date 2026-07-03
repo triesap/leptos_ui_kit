@@ -1581,6 +1581,8 @@ mod tests {
             fs::read_to_string(root.join("ui/menu/trigger.rs")).expect("read menu trigger source");
         let item_source =
             fs::read_to_string(root.join("ui/menu/item.rs")).expect("read menu item source");
+        let radio_item_source = fs::read_to_string(root.join("ui/menu/radio_item.rs"))
+            .expect("read menu radio item source");
         let indicator_source = fs::read_to_string(root.join("ui/menu/item_indicator.rs"))
             .expect("read menu indicator source");
         let css = fs::read_to_string(root.join("styles/menu.css")).expect("read menu css");
@@ -1603,6 +1605,8 @@ mod tests {
         assert!(trigger_source.contains("data-state=move || attr_string"));
         assert!(item_source.contains("MenuItemKind::Radio"));
         assert!(item_source.contains("checked_is_controlled"));
+        assert!(item_source.contains("label: Option<Signal<String>>"));
+        assert!(item_source.contains("set_label(index, label.get())"));
         assert!(item_source.contains("model_snapshot"));
         assert!(item_source.contains("menu_item_attrs"));
         assert!(item_source.contains("<button"));
@@ -1615,10 +1619,15 @@ mod tests {
         assert!(item_source.contains("data-highlighted=move || data_attr"));
         assert!(item_source.contains("data-disabled=move || data_attr"));
         assert!(item_source.contains("MenuItemAttrs::new().kind(kind.as_attrs_kind())"));
+        assert!(radio_item_source.contains("pub fn MenuRadioItem"));
+        assert!(radio_item_source.contains("kind=MenuItemKind::Radio"));
+        assert!(radio_item_source.contains("<MenuItemIndicator index=index"));
+        assert!(radio_item_source.contains("{move || label_for_text.get()}"));
         assert!(indicator_source.contains("model_snapshot"));
         assert!(indicator_source.contains("menu_item_indicator_attrs"));
         assert!(indicator_source.contains("hidden=move || attr_bool"));
         assert!(indicator_source.contains("data-state=move || attr_string"));
+        assert!(css.contains(".kit-menu-radio-item-label"));
         assert!(css.contains(".kit-menu-item-indicator[hidden]"));
         assert!(css.contains("display: none;"));
         assert!(
@@ -1638,6 +1647,7 @@ mod tests {
                 "MenuItemIndicator",
                 "MenuItemKind",
                 "MenuLoop",
+                "MenuRadioItem",
                 "MenuRoot",
                 "MenuTrigger"
             ]
