@@ -69,6 +69,14 @@
   block-size: var(--kit-button-spinner-size);
 }
 
+.kit-button-content {
+  display: contents;
+}
+
+.kit-button-content[data-loading] {
+  display: none;
+}
+
 .kit-button--primary {
   background: var(--kit-color-primary);
   color: var(--kit-color-primary-foreground);

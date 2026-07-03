@@ -66,7 +66,7 @@ pub fn Button(
     #[prop(optional, into, default = "Loading".to_owned())] loading_label: String,
     #[prop(optional)] on_click: Option<Callback<leptos::ev::MouseEvent>>,
     #[prop(optional, into)] class: String,
-    children: ChildrenFn,
+    children: Children,
 ) -> impl IntoView {
     let base_class = format!("kit-button {} {}", variant.class(), size.class(),);
     let class = if class.is_empty() {
@@ -75,7 +75,6 @@ pub fn Button(
         format!("{base_class} {class}")
     };
     let disabled_state = Signal::derive(move || disabled.get() || loading.get());
-    let children = StoredValue::new(children);
 
     view! {
         <button
@@ -101,9 +100,12 @@ pub fn Button(
                     }
                         .into_any()
                 } else {
-                    children.with_value(|children| children()).into_any()
+                    ().into_any()
                 }
             }}
+            <span class="kit-button-content" data-loading=move || loading.get().then_some("")>
+                {children()}
+            </span>
         </button>
     }
 }

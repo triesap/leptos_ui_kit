@@ -1281,7 +1281,7 @@ mod tests {
         assert!(source.contains("#[allow(dead_code)]"));
         assert!(source.contains("use super::{Spinner, SpinnerMode};"));
         assert!(source.contains("pub fn Button"));
-        assert!(source.contains("ChildrenFn"));
+        assert!(source.contains("Children"));
         assert!(source.contains("<button"));
         assert!(source.contains("type=button_type.as_str()"));
         assert!(source.contains("loading: Signal<bool>"));
@@ -1290,6 +1290,7 @@ mod tests {
         assert!(source.contains("disabled=move || disabled_state.get()"));
         assert!(source.contains("aria-busy=move || loading.get().then_some(\"true\")"));
         assert!(source.contains("SpinnerMode::Decorative"));
+        assert!(source.contains("kit-button-content"));
         assert!(source.contains("Self::Button => \"button\""));
         assert!(source.contains("Self::Submit => \"submit\""));
         assert!(source.contains("Self::Reset => \"reset\""));
@@ -1301,6 +1302,7 @@ mod tests {
         assert!(css.contains("--kit-button-disabled-opacity"));
         assert!(css.contains("--kit-button-lg-min-height"));
         assert!(css.contains("--kit-button-spinner-size"));
+        assert!(css.contains(".kit-button-content[data-loading]"));
         assert!(css.contains(":focus-visible"));
         assert!(!css.contains("@import"));
         assert!(
