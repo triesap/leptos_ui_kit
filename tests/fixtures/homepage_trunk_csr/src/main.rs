@@ -8,8 +8,9 @@ use components::ui::{
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
     DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent,
     MenuContentAlign, MenuContentSide, MenuRadioItem, MenuRoot, MenuTrigger, NativeSelect,
-    RouterLink, SelectIcon, Status, StatusPoliteness, StatusRole, TabsList, TabsPanel, TabsRoot,
-    TabsTrigger, TextArea, TextInput, TextInputType,
+    RouterLink, SelectField, SelectIcon, Spinner, SpinnerMode, Status, StatusPoliteness,
+    StatusRole, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextAreaField, TextField,
+    TextInput, TextInputType,
 };
 
 fn main() {
@@ -21,9 +22,16 @@ fn App() -> impl IntoView {
     let (sending, _) = signal(false);
     let (count, set_count) = signal(0);
     let (name, set_name) = signal(String::new());
+    let (email, set_email) = signal(String::new());
     let (method, set_method) = signal("email".to_owned());
     let (message, set_message) = signal(String::new());
+    let (body, set_body) = signal(String::new());
     let (locale_index, set_locale_index) = signal(Some(0));
+    let selected_method = Signal::derive(move || match method.get().as_str() {
+        "email" => "Email",
+        "nostr" => "Nostr",
+        _ => "Unknown",
+    }.to_owned());
 
     view! {
         <main>
@@ -53,6 +61,47 @@ fn App() -> impl IntoView {
             <RouterLink href="/contact">
                 "Contact"
             </RouterLink>
+            <TextField
+                id="contact-email"
+                label="Email"
+                input_type=TextInputType::Email
+                name="email"
+                value=email
+                required=true
+                on_input=Callback::new(move |value| set_email.set(value))
+                label_action=|| view! {
+                    <button type="button">"Use browser signer"</button>
+                }
+            />
+            <SelectField
+                id="contact-kind"
+                label="Contact"
+                name="contact_kind"
+                value=method
+                selected_label=selected_method
+                on_change=Callback::new(move |value| set_method.set(value))
+                label_action=|| view! {
+                    <span>"Browser signer available"</span>
+                }
+                icon=|| view! {
+                    <span>"v"</span>
+                }
+            >
+                <option value="email">"Email"</option>
+                <option value="nostr">"Nostr"</option>
+            </SelectField>
+            <TextAreaField
+                id="contact-body"
+                label="Body"
+                name="body"
+                value=body
+                rows=4
+                required=true
+                on_input=Callback::new(move |value| set_body.set(value))
+                label_action=|| view! {
+                    <span>"Required"</span>
+                }
+            />
             <FieldRoot id="contact-name" required=true invalid=false disabled=false>
                 <FieldLabel>
                     "Name"
@@ -93,6 +142,8 @@ fn App() -> impl IntoView {
             <Status role=StatusRole::Status politeness=StatusPoliteness::Polite>
                 "Message sent"
             </Status>
+            <Spinner label="Loading" />
+            <Spinner mode=SpinnerMode::Decorative />
             <CollapsibleRoot>
                 <CollapsibleTrigger>"Details"</CollapsibleTrigger>
                 <CollapsibleContent>
