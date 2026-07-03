@@ -1737,14 +1737,19 @@ fn consolidate_grouped_pub_use(
     let Some((path, required_symbols)) = parse_grouped_pub_use(required_line)? else {
         return Ok(None);
     };
-    let ranges = grouped_pub_use_ranges(existing, path)?;
-    if ranges.is_empty() {
+    let grouped_ranges = grouped_pub_use_ranges(existing, path)?;
+    let single_ranges = single_pub_use_ranges(existing, path)?;
+    if grouped_ranges.is_empty() && single_ranges.is_empty() {
         return Ok(None);
     }
-    if ranges.len() == 1
-        && required_symbols
-            .iter()
-            .all(|symbol| ranges[0].1.iter().any(|existing| existing == symbol))
+    if grouped_ranges.len() == 1
+        && single_ranges.is_empty()
+        && required_symbols.iter().all(|symbol| {
+            grouped_ranges[0]
+                .1
+                .iter()
+                .any(|existing| existing == symbol)
+        })
     {
         return Ok(None);
     }
@@ -1753,26 +1758,74 @@ fn consolidate_grouped_pub_use(
     for symbol in required_symbols {
         symbols.insert(symbol.to_owned());
     }
-    for (_, existing_symbols) in &ranges {
+    for (_, existing_symbols) in &grouped_ranges {
         for symbol in existing_symbols {
             symbols.insert(symbol.clone());
         }
     }
+    for (_, symbol) in &single_ranges {
+        symbols.insert(symbol.clone());
+    }
 
     let symbols = symbols.into_iter().collect::<Vec<_>>();
     let replacement = format_grouped_pub_use(path, &symbols);
+    let mut ranges = grouped_ranges
+        .into_iter()
+        .map(|(range, _)| range)
+        .chain(single_ranges.into_iter().map(|(range, _)| range))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
     let mut output = String::new();
     let mut last = 0;
-    for (index, (range, _)) in ranges.iter().enumerate() {
+    for (index, range) in ranges.iter().enumerate() {
         output.push_str(&existing[last..range.start]);
         if index == 0 {
             output.push_str(&replacement);
+            if existing[range.clone()].ends_with('\n') && !replacement.ends_with('\n') {
+                output.push('\n');
+            }
         }
         last = range.end;
     }
     output.push_str(&existing[last..]);
 
     Ok(Some(output))
+}
+
+fn single_pub_use_ranges(
+    existing: &str,
+    path: &str,
+) -> Result<Vec<(Range<usize>, String)>, CodegenError> {
+    let prefix = format!("pub use {path}::");
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+
+    for line in existing.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = line_start + line.len();
+        offset = line_end;
+
+        let trimmed = line.trim();
+        let Some(symbol) = trimmed
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(';'))
+        else {
+            continue;
+        };
+        if symbol.contains('{') || symbol.contains(',') {
+            continue;
+        }
+
+        validate_patch_identifier(
+            symbol,
+            "UI export symbol",
+            Path::new("src/components/ui/mod.rs"),
+        )?;
+        ranges.push((line_start..line_end, symbol.to_owned()));
+    }
+
+    Ok(ranges)
 }
 
 fn module_line_exists(existing: &str, required_line: &str) -> Result<bool, CodegenError> {
@@ -2770,6 +2823,24 @@ mod tests {
         assert_eq!(
             patched,
             "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField,\n    SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
+        );
+    }
+
+    #[test]
+    fn ui_module_patcher_consolidates_stale_single_exports() {
+        let existing = "pub mod spinner;\npub use spinner::Spinner;\n";
+        let patched = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new(
+                "spinner",
+                vec!["Spinner".to_owned(), "SpinnerMode".to_owned()],
+            )],
+        )
+        .expect("stale single export should be consolidated");
+
+        assert_eq!(
+            patched,
+            "pub mod spinner;\npub use spinner::{Spinner, SpinnerMode};\n"
         );
     }
 
