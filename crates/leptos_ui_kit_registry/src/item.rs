@@ -1169,7 +1169,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "67117663f968a01d738dfbe22e03557a70681047"
+                    "rev": "5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -1208,7 +1208,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "67117663f968a01d738dfbe22e03557a70681047",
+                    "rev": "5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f",
                     "branch": "main"
                   },
                   "features": ["leptos"],
@@ -1591,6 +1591,7 @@ mod tests {
         let item = load_built_in_registry_item("menu").expect("load menu");
 
         assert!(root_source.contains("checked_index: Option<Signal<Option<usize>>>"));
+        assert!(root_source.contains("trigger_ref: NodeRef<html::Button>"));
         assert!(root_source.contains("model_snapshot"));
         assert!(root_source.contains("apply_controlled_checked_untracked"));
         assert!(root_source.contains("DomAttribute"));
@@ -1600,6 +1601,7 @@ mod tests {
         assert!(!root_source.contains("DomAttributeValue::String(_) => true"));
         assert!(trigger_source.contains("menu_trigger_attrs"));
         assert!(trigger_source.contains("<button"));
+        assert!(trigger_source.contains("node_ref=node_ref"));
         assert!(trigger_source.contains("type=\"button\""));
         assert!(trigger_source.contains("disabled=move || disabled.get()"));
         assert!(trigger_source.contains("aria-expanded=move || attr_string"));
@@ -1609,8 +1611,13 @@ mod tests {
         assert!(content_source.contains("pub enum MenuContentAlign"));
         assert!(content_source.contains("side: MenuContentSide"));
         assert!(content_source.contains("align: MenuContentAlign"));
-        assert!(content_source.contains("data-side=side.as_str()"));
-        assert!(content_source.contains("data-align=align.as_str()"));
+        assert!(content_source.contains("spacing: f64"));
+        assert!(content_source.contains("viewport_padding: f64"));
+        assert!(content_source.contains("use_menu_placement_with_node_refs"));
+        assert!(content_source.contains("MenuPlacementOptions::new"));
+        assert!(content_source.contains("style=move || style_placement.style()"));
+        assert!(content_source.contains("data-side=move || side_placement.data_side()"));
+        assert!(content_source.contains("data-align=move || align_placement.data_align()"));
         assert!(item_source.contains("MenuItemKind::Radio"));
         assert!(item_source.contains("checked_is_controlled"));
         assert!(item_source.contains("label: Option<Signal<String>>"));
@@ -1635,11 +1642,12 @@ mod tests {
         assert!(indicator_source.contains("menu_item_indicator_attrs"));
         assert!(indicator_source.contains("hidden=move || attr_bool"));
         assert!(indicator_source.contains("data-state=move || attr_string"));
-        assert!(css.contains(".kit-menu-content[data-side=\"bottom\"]"));
-        assert!(css.contains(".kit-menu-content[data-side=\"top\"]"));
-        assert!(css.contains(".kit-menu-content[data-align=\"start\"]"));
-        assert!(css.contains(".kit-menu-content[data-align=\"center\"]"));
-        assert!(css.contains(".kit-menu-content[data-align=\"end\"]"));
+        assert!(css.contains("position: fixed;"));
+        assert!(css.contains("overflow: auto;"));
+        assert!(css.contains(".kit-menu-content[data-state=\"closed\"][data-side=\"bottom\"]"));
+        assert!(css.contains(".kit-menu-content[data-state=\"closed\"][data-side=\"top\"]"));
+        assert!(css.contains(".kit-menu-content[data-state=\"closed\"][data-side=\"right\"]"));
+        assert!(css.contains(".kit-menu-content[data-state=\"closed\"][data-side=\"left\"]"));
         assert!(css.contains(".kit-menu-radio-item-label"));
         assert!(css.contains(".kit-menu-item-indicator[hidden]"));
         assert!(css.contains("display: none;"));

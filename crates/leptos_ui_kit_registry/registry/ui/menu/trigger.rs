@@ -13,6 +13,7 @@ pub fn MenuTrigger(
     let context = use_context::<MenuContext>().expect("MenuTrigger must be used inside MenuRoot");
     let controls_id = context.content_id();
     let trigger_id = context.trigger_id();
+    let node_ref = context.trigger_ref;
     let attrs_context = context.clone();
     let attrs_controls_id = controls_id.clone();
     let attrs = Signal::derive(move || {
@@ -48,6 +49,7 @@ pub fn MenuTrigger(
 
     view! {
         <button
+            node_ref=node_ref
             id=trigger_id
             class=class_with_base("kit-menu-trigger", &class)
             type="button"

@@ -1,7 +1,9 @@
 use leptos::html;
 use leptos::prelude::*;
+use web_ui_primitives::core::{PlacementAlign, PlacementSide};
 use web_ui_primitives::leptos::{
-    DismissibleReason, MenuLayerOptions, use_menu_layer_with_node_ref,
+    DismissibleReason, MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions,
+    use_menu_layer_with_node_ref, use_menu_placement_with_node_refs,
 };
 
 use super::root::{MenuContext, class_with_base};
@@ -11,6 +13,8 @@ use super::root::{MenuContext, class_with_base};
 pub enum MenuContentSide {
     Bottom,
     Top,
+    Right,
+    Left,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,20 +26,22 @@ pub enum MenuContentAlign {
 }
 
 impl MenuContentSide {
-    fn as_str(self) -> &'static str {
+    fn as_placement(self) -> PlacementSide {
         match self {
-            Self::Bottom => "bottom",
-            Self::Top => "top",
+            Self::Bottom => PlacementSide::Bottom,
+            Self::Top => PlacementSide::Top,
+            Self::Right => PlacementSide::Right,
+            Self::Left => PlacementSide::Left,
         }
     }
 }
 
 impl MenuContentAlign {
-    fn as_str(self) -> &'static str {
+    fn as_placement(self) -> PlacementAlign {
         match self {
-            Self::Start => "start",
-            Self::Center => "center",
-            Self::End => "end",
+            Self::Start => PlacementAlign::Start,
+            Self::Center => PlacementAlign::Center,
+            Self::End => PlacementAlign::End,
         }
     }
 }
@@ -44,6 +50,8 @@ impl MenuContentAlign {
 pub fn MenuContent(
     #[prop(optional, default = MenuContentSide::Bottom)] side: MenuContentSide,
     #[prop(optional, default = MenuContentAlign::Start)] align: MenuContentAlign,
+    #[prop(optional, default = 4.0)] spacing: f64,
+    #[prop(optional, default = 8.0)] viewport_padding: f64,
     #[prop(optional, into)] class: String,
     children: ChildrenFn,
 ) -> impl IntoView {
@@ -69,6 +77,18 @@ pub fn MenuContent(
     let is_rendered = Signal::derive(move || render_layer.is_rendered());
     let data_layer = layer.clone();
     let data_state = Signal::derive(move || data_layer.data_state());
+    let placement_context = context.clone();
+    let placement = use_menu_placement_with_node_refs(
+        context.trigger_ref,
+        node_ref,
+        MenuPlacementOptions::new(
+            Signal::derive(move || placement_context.model.get().open()),
+            side.as_placement(),
+            align.as_placement(),
+        )
+        .spacing(spacing)
+        .viewport_padding(viewport_padding),
+    );
     let transition_end = layer.transition_end_handler();
     let animation_end = layer.animation_end_handler();
 
@@ -84,8 +104,7 @@ pub fn MenuContent(
                 trigger_id,
                 content_class,
                 data_state,
-                side,
-                align,
+                placement.clone(),
                 transition_end.clone(),
                 animation_end.clone(),
                 children,
@@ -101,12 +120,15 @@ fn menu_surface(
     trigger_id: Signal<String>,
     content_class: Signal<String>,
     data_state: Signal<&'static str>,
-    side: MenuContentSide,
-    align: MenuContentAlign,
+    placement: MenuPlacementBinding,
     transition_end: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
 ) -> impl IntoView {
+    let style_placement = placement.clone();
+    let side_placement = placement.clone();
+    let align_placement = placement.clone();
+
     view! {
         <div
             node_ref=node_ref
@@ -114,9 +136,10 @@ fn menu_surface(
             class=move || content_class.get()
             role="menu"
             tabindex="-1"
+            style=move || style_placement.style()
             data-state=move || data_state.get()
-            data-side=side.as_str()
-            data-align=align.as_str()
+            data-side=move || side_placement.data_side()
+            data-align=move || align_placement.data_align()
             aria-labelledby=move || trigger_id.get()
             on:transitionend=move |event| transition_end.run(event)
             on:animationend=move |event| animation_end.run(event)
