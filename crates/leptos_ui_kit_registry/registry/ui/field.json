@@ -46,6 +46,7 @@
           "FieldSurface",
           "NativeSelect",
           "SelectField",
+          "SelectFieldSlot",
           "SelectIcon",
           "TextArea",
           "TextAreaField",

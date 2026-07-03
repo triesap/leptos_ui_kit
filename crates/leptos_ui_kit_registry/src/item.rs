@@ -1508,13 +1508,19 @@ mod tests {
         assert!(select_field_source.contains("pub fn SelectField"));
         assert!(select_field_source.contains("NativeSelect"));
         assert!(select_field_source.contains("SelectIcon"));
+        assert!(select_field_source.contains("pub struct SelectFieldSlot"));
+        assert!(select_field_source.contains("impl<F, V> From<F> for SelectFieldSlot"));
         assert!(select_field_source.contains("#[prop(into)] selected_label: Signal<String>"));
-        assert!(select_field_source.contains("label_action: Option<ChildrenFn>"));
-        assert!(select_field_source.contains("icon: Option<ChildrenFn>"));
         assert!(
-            select_field_source.contains("let label_action = label_action.map(StoredValue::new)")
+            select_field_source.contains(
+                "#[prop(optional, into, default = SelectFieldSlot::empty())] label_action: SelectFieldSlot"
+            )
         );
-        assert!(select_field_source.contains("let icon = icon.map(StoredValue::new)"));
+        assert!(select_field_source.contains(
+            "#[prop(optional, into, default = SelectFieldSlot::empty())] icon: SelectFieldSlot"
+        ));
+        assert!(select_field_source.contains("label_action_for_render.render()"));
+        assert!(select_field_source.contains("icon_for_render.is_present()"));
         assert!(select_field_source.contains("children: Children"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));
@@ -1555,6 +1561,7 @@ mod tests {
                 "FieldSurface",
                 "NativeSelect",
                 "SelectField",
+                "SelectFieldSlot",
                 "SelectIcon",
                 "TextArea",
                 "TextAreaField",

@@ -15,7 +15,7 @@ pub use message::FieldMessage;
 pub use native_select::{NativeSelect, SelectIcon};
 pub use required::FieldRequired;
 pub use root::FieldRoot;
-pub use select_field::SelectField;
+pub use select_field::{SelectField, SelectFieldSlot};
 pub use surface::FieldSurface;
 pub use text_area::TextArea;
 pub use text_area_field::TextAreaField;

@@ -1,8 +1,59 @@
 use leptos::prelude::*;
+use std::sync::Arc;
 
 use super::{
     FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectIcon,
 };
+
+#[derive(Clone)]
+pub struct SelectFieldSlot {
+    present: bool,
+    render: Arc<dyn Fn() -> AnyView + Send + Sync>,
+}
+
+impl SelectFieldSlot {
+    pub fn new<F, V>(render: F) -> Self
+    where
+        F: Fn() -> V + Send + Sync + 'static,
+        V: IntoView + 'static,
+    {
+        Self {
+            present: true,
+            render: Arc::new(move || render().into_any()),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            present: false,
+            render: Arc::new(|| ().into_any()),
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.present
+    }
+
+    pub fn render(&self) -> AnyView {
+        (self.render)()
+    }
+}
+
+impl Default for SelectFieldSlot {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<F, V> From<F> for SelectFieldSlot
+where
+    F: Fn() -> V + Send + Sync + 'static,
+    V: IntoView + 'static,
+{
+    fn from(render: F) -> Self {
+        Self::new(render)
+    }
+}
 
 #[component]
 pub fn SelectField(
@@ -26,14 +77,14 @@ pub fn SelectField(
     #[prop(optional, into)] value_class: String,
     #[prop(optional, into)] icon_class: String,
     #[prop(optional, into)] message_class: String,
-    #[prop(optional)] label_action: Option<ChildrenFn>,
-    #[prop(optional)] icon: Option<ChildrenFn>,
+    #[prop(optional, into, default = SelectFieldSlot::empty())] label_action: SelectFieldSlot,
+    #[prop(optional, into, default = SelectFieldSlot::empty())] icon: SelectFieldSlot,
     children: Children,
 ) -> impl IntoView {
     let required_class_for_marker = required_class.clone();
     let message_class_for_message = message_class.clone();
-    let label_action = label_action.map(StoredValue::new);
-    let icon = icon.map(StoredValue::new);
+    let label_action_for_render = label_action.clone();
+    let icon_for_render = icon.clone();
     let surface_class = super::root::class_with_base("kit-select-field-surface", &surface_class);
     let select_class = super::root::class_with_base("kit-select-field-native", &select_class);
     let value_row_class =
@@ -52,11 +103,7 @@ pub fn SelectField(
                             })
                         }}
                     </FieldLabel>
-                    {move || {
-                        label_action.map(|label_action| {
-                            label_action.with_value(|label_action| label_action())
-                        })
-                    }}
+                    {move || label_action_for_render.render()}
                 </span>
                 <NativeSelect
                     name=name
@@ -70,11 +117,17 @@ pub fn SelectField(
                     <span class=value_class>{move || selected_label.get()}</span>
                 </span>
                 {move || {
-                    icon.map(|icon| view! {
+                    if !icon_for_render.is_present() {
+                        return ().into_any();
+                    }
+
+                    let icon = icon_for_render.clone();
+                    view! {
                         <SelectIcon class=icon_class.clone()>
-                            {icon.with_value(|icon| icon())}
+                            {icon.render()}
                         </SelectIcon>
-                    })
+                    }
+                    .into_any()
                 }}
             </FieldSurface>
             {move || {
