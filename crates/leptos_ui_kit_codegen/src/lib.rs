@@ -1892,10 +1892,27 @@ fn format_grouped_pub_use(path: &str, symbols: &[String]) -> String {
     }
 
     let mut output = format!("pub use {path}::{{\n");
+    let mut line = String::from("    ");
     for symbol in symbols {
-        output.push_str("    ");
-        output.push_str(symbol);
-        output.push_str(",\n");
+        let next = if line.trim().is_empty() {
+            format!("{symbol},")
+        } else {
+            format!(" {symbol},")
+        };
+        if line.len() + next.len() > 100 {
+            output.push_str(&line);
+            output.push('\n');
+            line.clear();
+            line.push_str("    ");
+            line.push_str(symbol);
+            line.push(',');
+        } else {
+            line.push_str(&next);
+        }
+    }
+    if !line.trim().is_empty() {
+        output.push_str(&line);
+        output.push('\n');
     }
     output.push_str("};");
     output
@@ -2734,7 +2751,7 @@ mod tests {
 
         assert_eq!(
             patched,
-            "pub mod field;\npub use field::{\n    FieldLabel,\n    FieldMessage,\n    FieldRequired,\n    FieldRoot,\n    FieldSurface,\n    NativeSelect,\n    SelectField,\n    SelectIcon,\n    TextArea,\n    TextAreaField,\n    TextField,\n    TextInput,\n    TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
+            "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField,\n    SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
         );
     }
 
