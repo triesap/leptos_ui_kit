@@ -3,7 +3,7 @@
 //! Code generation and install-planning layer.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt, fs,
     fs::OpenOptions,
     io::Write,
@@ -1742,32 +1742,14 @@ fn consolidate_grouped_pub_use(
     if grouped_ranges.is_empty() && single_ranges.is_empty() {
         return Ok(None);
     }
-    if grouped_ranges.len() == 1
-        && single_ranges.is_empty()
-        && required_symbols.iter().all(|symbol| {
-            grouped_ranges[0]
-                .1
-                .iter()
-                .any(|existing| existing == symbol)
-        })
-    {
+    let symbols = required_symbols
+        .iter()
+        .map(|symbol| (*symbol).to_owned())
+        .collect::<Vec<_>>();
+    if grouped_ranges.len() == 1 && single_ranges.is_empty() && grouped_ranges[0].1 == symbols {
         return Ok(None);
     }
 
-    let mut symbols = BTreeSet::new();
-    for symbol in required_symbols {
-        symbols.insert(symbol.to_owned());
-    }
-    for (_, existing_symbols) in &grouped_ranges {
-        for symbol in existing_symbols {
-            symbols.insert(symbol.clone());
-        }
-    }
-    for (_, symbol) in &single_ranges {
-        symbols.insert(symbol.clone());
-    }
-
-    let symbols = symbols.into_iter().collect::<Vec<_>>();
     let replacement = format_grouped_pub_use(path, &symbols);
     let mut ranges = grouped_ranges
         .into_iter()
@@ -2841,6 +2823,29 @@ mod tests {
         assert_eq!(
             patched,
             "pub mod spinner;\npub use spinner::{Spinner, SpinnerMode};\n"
+        );
+    }
+
+    #[test]
+    fn ui_module_patcher_removes_obsolete_grouped_exports() {
+        let existing = "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField, SelectFieldSlot};\n";
+        let patched = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new(
+                "field",
+                vec![
+                    "FieldLabel".to_owned(),
+                    "FieldRoot".to_owned(),
+                    "FieldSlot".to_owned(),
+                    "SelectField".to_owned(),
+                ],
+            )],
+        )
+        .expect("obsolete grouped export should be removed");
+
+        assert_eq!(
+            patched,
+            "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField};\n"
         );
     }
 
