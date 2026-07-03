@@ -26,12 +26,14 @@ pub fn SelectField(
     #[prop(optional, into)] value_class: String,
     #[prop(optional, into)] icon_class: String,
     #[prop(optional, into)] message_class: String,
-    #[prop(optional)] label_action: Option<Children>,
-    #[prop(optional)] icon: Option<Children>,
+    #[prop(optional)] label_action: Option<ChildrenFn>,
+    #[prop(optional)] icon: Option<ChildrenFn>,
     children: Children,
 ) -> impl IntoView {
     let required_class_for_marker = required_class.clone();
     let message_class_for_message = message_class.clone();
+    let label_action = label_action.map(StoredValue::new);
+    let icon = icon.map(StoredValue::new);
     let surface_class = super::root::class_with_base("kit-select-field-surface", &surface_class);
     let select_class = super::root::class_with_base("kit-select-field-native", &select_class);
     let value_row_class =
@@ -50,7 +52,11 @@ pub fn SelectField(
                             })
                         }}
                     </FieldLabel>
-                    {label_action.map(|label_action| label_action())}
+                    {move || {
+                        label_action.map(|label_action| {
+                            label_action.with_value(|label_action| label_action())
+                        })
+                    }}
                 </span>
                 <NativeSelect
                     name=name
@@ -63,9 +69,13 @@ pub fn SelectField(
                 <span class=value_row_class>
                     <span class=value_class>{move || selected_label.get()}</span>
                 </span>
-                {icon.map(|icon| view! {
-                    <SelectIcon class=icon_class>{icon()}</SelectIcon>
-                })}
+                {move || {
+                    icon.map(|icon| view! {
+                        <SelectIcon class=icon_class.clone()>
+                            {icon.with_value(|icon| icon())}
+                        </SelectIcon>
+                    })
+                }}
             </FieldSurface>
             {move || {
                 message.as_ref().and_then(|message| message.get()).map(|message| view! {

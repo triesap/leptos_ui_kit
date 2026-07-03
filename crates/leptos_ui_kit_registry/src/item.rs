@@ -1509,8 +1509,12 @@ mod tests {
         assert!(select_field_source.contains("NativeSelect"));
         assert!(select_field_source.contains("SelectIcon"));
         assert!(select_field_source.contains("#[prop(into)] selected_label: Signal<String>"));
-        assert!(select_field_source.contains("label_action: Option<Children>"));
-        assert!(select_field_source.contains("icon: Option<Children>"));
+        assert!(select_field_source.contains("label_action: Option<ChildrenFn>"));
+        assert!(select_field_source.contains("icon: Option<ChildrenFn>"));
+        assert!(
+            select_field_source.contains("let label_action = label_action.map(StoredValue::new)")
+        );
+        assert!(select_field_source.contains("let icon = icon.map(StoredValue::new)"));
         assert!(select_field_source.contains("children: Children"));
         assert!(css.contains(".kit-field"));
         assert!(css.contains(".kit-field-label"));

@@ -3,10 +3,11 @@
 //! Code generation and install-planning layer.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     fs::OpenOptions,
     io::Write,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -1099,11 +1100,7 @@ pub fn patch_ui_mod(
             if let [symbol] = export.symbols.as_slice() {
                 lines.push(format!("pub use {}::{};", export.path, symbol));
             } else {
-                lines.push(format!(
-                    "pub use {}::{{{}}};",
-                    export.path,
-                    export.symbols.join(", ")
-                ));
+                lines.push(format_grouped_pub_use(&export.path, &export.symbols));
             }
         }
     }
@@ -1710,6 +1707,10 @@ fn patch_module_lines(
         if line.trim() != *line || line.is_empty() {
             return unsafe_patch(logical_path, "module patch line must be normalized");
         }
+        if let Some(patched) = consolidate_grouped_pub_use(&output, line)? {
+            output = patched;
+            continue;
+        }
         if module_line_exists(&output, line)? {
             continue;
         }
@@ -1727,6 +1728,51 @@ fn patch_module_lines(
     }
 
     Ok(output)
+}
+
+fn consolidate_grouped_pub_use(
+    existing: &str,
+    required_line: &str,
+) -> Result<Option<String>, CodegenError> {
+    let Some((path, required_symbols)) = parse_grouped_pub_use(required_line)? else {
+        return Ok(None);
+    };
+    let ranges = grouped_pub_use_ranges(existing, path)?;
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+    if ranges.len() == 1
+        && required_symbols
+            .iter()
+            .all(|symbol| ranges[0].1.iter().any(|existing| existing == symbol))
+    {
+        return Ok(None);
+    }
+
+    let mut symbols = BTreeSet::new();
+    for symbol in required_symbols {
+        symbols.insert(symbol.to_owned());
+    }
+    for (_, existing_symbols) in &ranges {
+        for symbol in existing_symbols {
+            symbols.insert(symbol.clone());
+        }
+    }
+
+    let symbols = symbols.into_iter().collect::<Vec<_>>();
+    let replacement = format_grouped_pub_use(path, &symbols);
+    let mut output = String::new();
+    let mut last = 0;
+    for (index, (range, _)) in ranges.iter().enumerate() {
+        output.push_str(&existing[last..range.start]);
+        if index == 0 {
+            output.push_str(&replacement);
+        }
+        last = range.end;
+    }
+    output.push_str(&existing[last..]);
+
+    Ok(Some(output))
 }
 
 fn module_line_exists(existing: &str, required_line: &str) -> Result<bool, CodegenError> {
@@ -1756,6 +1802,41 @@ fn module_line_exists(existing: &str, required_line: &str) -> Result<bool, Codeg
     }
 
     Ok(false)
+}
+
+fn grouped_pub_use_ranges(
+    existing: &str,
+    path: &str,
+) -> Result<Vec<(Range<usize>, Vec<String>)>, CodegenError> {
+    let marker = format!("pub use {path}::{{");
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = existing[offset..].find(&marker) {
+        let start = offset + relative_start;
+        let body_start = start + marker.len();
+        let Some(relative_end) = existing[body_start..].find("};") else {
+            break;
+        };
+        let body_end = body_start + relative_end;
+        let end = body_end + 2;
+        let symbols = existing[body_start..body_end]
+            .split(',')
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(|symbol| {
+                validate_patch_identifier(
+                    symbol,
+                    "UI export symbol",
+                    Path::new("src/components/ui/mod.rs"),
+                )?;
+                Ok(symbol.to_owned())
+            })
+            .collect::<Result<Vec<_>, CodegenError>>()?;
+        ranges.push((start..end, symbols));
+        offset = end;
+    }
+
+    Ok(ranges)
 }
 
 fn parse_grouped_pub_use(required_line: &str) -> Result<Option<(&str, Vec<&str>)>, CodegenError> {
@@ -1802,6 +1883,22 @@ fn grouped_pub_use_contains(existing_symbols: &str, required_symbols: &[&str]) -
     required_symbols
         .iter()
         .all(|symbol| existing_symbols.iter().any(|existing| existing == symbol))
+}
+
+fn format_grouped_pub_use(path: &str, symbols: &[String]) -> String {
+    let one_line = format!("pub use {}::{{{}}};", path, symbols.join(", "));
+    if one_line.len() <= 100 {
+        return one_line;
+    }
+
+    let mut output = format!("pub use {path}::{{\n");
+    for symbol in symbols {
+        output.push_str("    ");
+        output.push_str(symbol);
+        output.push_str(",\n");
+    }
+    output.push_str("};");
+    output
 }
 
 fn detects_private_module_conflict(existing: &str, required_line: &str) -> bool {
@@ -2607,6 +2704,38 @@ mod tests {
         .expect("formatted grouped export should be idempotent");
 
         assert_eq!(patched, existing);
+    }
+
+    #[test]
+    fn ui_module_patcher_consolidates_stale_grouped_exports() {
+        let existing = "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectIcon,\n    TextArea, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\npub use field::{FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField, SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType};\n";
+        let patched = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new(
+                "field",
+                vec![
+                    "FieldLabel".to_owned(),
+                    "FieldMessage".to_owned(),
+                    "FieldRequired".to_owned(),
+                    "FieldRoot".to_owned(),
+                    "FieldSurface".to_owned(),
+                    "NativeSelect".to_owned(),
+                    "SelectField".to_owned(),
+                    "SelectIcon".to_owned(),
+                    "TextArea".to_owned(),
+                    "TextAreaField".to_owned(),
+                    "TextField".to_owned(),
+                    "TextInput".to_owned(),
+                    "TextInputType".to_owned(),
+                ],
+            )],
+        )
+        .expect("stale grouped export should be consolidated");
+
+        assert_eq!(
+            patched,
+            "pub mod field;\npub use field::{\n    FieldLabel,\n    FieldMessage,\n    FieldRequired,\n    FieldRoot,\n    FieldSurface,\n    NativeSelect,\n    SelectField,\n    SelectIcon,\n    TextArea,\n    TextAreaField,\n    TextField,\n    TextInput,\n    TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
+        );
     }
 
     #[test]
