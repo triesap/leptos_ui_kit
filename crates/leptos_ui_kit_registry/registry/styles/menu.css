@@ -6,6 +6,7 @@
   --kit-menu-content-color: #111827;
   --kit-menu-content-elevation: 0 12px 28px rgb(15 23 42 / 14%);
   --kit-menu-content-gap: 0.125rem;
+  --kit-menu-content-max-inline-size: calc(100vw - 1rem);
   --kit-menu-content-min-inline-size: 12rem;
   --kit-menu-content-padding-block: 0.25rem;
   --kit-menu-content-padding-inline: 0.25rem;
@@ -75,12 +76,13 @@
 
 .kit-menu-content {
   position: absolute;
-  inset-block-start: calc(100% + var(--kit-menu-content-spacing));
-  inset-inline-start: 0;
+  --kit-menu-content-translate-x: 0;
+  --kit-menu-content-translate-y: 0;
   z-index: var(--kit-menu-content-z-index);
   display: grid;
   gap: var(--kit-menu-content-gap);
   box-sizing: border-box;
+  max-inline-size: var(--kit-menu-content-max-inline-size);
   min-inline-size: var(--kit-menu-content-min-inline-size);
   border: var(--kit-menu-content-border-width) solid var(--kit-menu-content-border-color);
   border-radius: var(--kit-menu-content-radius);
@@ -90,14 +92,45 @@
   background: var(--kit-menu-content-background);
   color: var(--kit-menu-content-color);
   box-shadow: var(--kit-menu-content-elevation);
+  transform:
+    translate(
+      var(--kit-menu-content-translate-x),
+      var(--kit-menu-content-translate-y)
+    );
   transition:
     opacity var(--kit-menu-content-transition-duration) var(--kit-menu-content-transition-timing),
     transform var(--kit-menu-content-transition-duration) var(--kit-menu-content-transition-timing);
 }
 
-.kit-menu-content[data-state="closed"] {
+.kit-menu-content[data-side="bottom"] {
+  inset-block-start: calc(100% + var(--kit-menu-content-spacing));
+}
+
+.kit-menu-content[data-side="top"] {
+  inset-block-end: calc(100% + var(--kit-menu-content-spacing));
+}
+
+.kit-menu-content[data-align="start"] {
+  inset-inline-start: 0;
+}
+
+.kit-menu-content[data-align="center"] {
+  inset-inline-start: 50%;
+  --kit-menu-content-translate-x: -50%;
+}
+
+.kit-menu-content[data-align="end"] {
+  inset-inline-end: 0;
+}
+
+.kit-menu-content[data-state="closed"][data-side="bottom"] {
   opacity: 0;
-  transform: translateY(0.25rem);
+  --kit-menu-content-translate-y: 0.25rem;
+}
+
+.kit-menu-content[data-state="closed"][data-side="top"] {
+  opacity: 0;
+  --kit-menu-content-translate-y: -0.25rem;
 }
 
 .kit-menu-item {

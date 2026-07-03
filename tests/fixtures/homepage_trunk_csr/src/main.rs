@@ -6,10 +6,10 @@ use components::ui::{
     Anchor, AnchorTarget, Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent,
     CollapsibleRoot,
     CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
-    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent, MenuRadioItem,
-    MenuRoot, MenuTrigger, NativeSelect, RouterLink, SelectIcon, Spinner, Status,
-    StatusPoliteness, StatusRole, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextInput,
-    TextInputType,
+    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent,
+    MenuContentAlign, MenuContentSide, MenuRadioItem, MenuRoot, MenuTrigger, NativeSelect,
+    RouterLink, SelectIcon, Spinner, Status, StatusPoliteness, StatusRole, TabsList, TabsPanel,
+    TabsRoot, TabsTrigger, TextArea, TextInput, TextInputType,
 };
 
 fn main() {
@@ -125,7 +125,7 @@ fn App() -> impl IntoView {
             </DialogRoot>
             <MenuRoot checked_index=locale_index>
                 <MenuTrigger>"Locale"</MenuTrigger>
-                <MenuContent>
+                <MenuContent side=MenuContentSide::Bottom align=MenuContentAlign::Start>
                     <MenuRadioItem
                         index=0
                         label="English"

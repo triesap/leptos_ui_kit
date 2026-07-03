@@ -1579,6 +1579,8 @@ mod tests {
             fs::read_to_string(root.join("ui/menu/root.rs")).expect("read menu root source");
         let trigger_source =
             fs::read_to_string(root.join("ui/menu/trigger.rs")).expect("read menu trigger source");
+        let content_source =
+            fs::read_to_string(root.join("ui/menu/content.rs")).expect("read menu content source");
         let item_source =
             fs::read_to_string(root.join("ui/menu/item.rs")).expect("read menu item source");
         let radio_item_source = fs::read_to_string(root.join("ui/menu/radio_item.rs"))
@@ -1603,6 +1605,12 @@ mod tests {
         assert!(trigger_source.contains("aria-expanded=move || attr_string"));
         assert!(trigger_source.contains("aria-controls=move || attr_string"));
         assert!(trigger_source.contains("data-state=move || attr_string"));
+        assert!(content_source.contains("pub enum MenuContentSide"));
+        assert!(content_source.contains("pub enum MenuContentAlign"));
+        assert!(content_source.contains("side: MenuContentSide"));
+        assert!(content_source.contains("align: MenuContentAlign"));
+        assert!(content_source.contains("data-side=side.as_str()"));
+        assert!(content_source.contains("data-align=align.as_str()"));
         assert!(item_source.contains("MenuItemKind::Radio"));
         assert!(item_source.contains("checked_is_controlled"));
         assert!(item_source.contains("label: Option<Signal<String>>"));
@@ -1627,6 +1635,11 @@ mod tests {
         assert!(indicator_source.contains("menu_item_indicator_attrs"));
         assert!(indicator_source.contains("hidden=move || attr_bool"));
         assert!(indicator_source.contains("data-state=move || attr_string"));
+        assert!(css.contains(".kit-menu-content[data-side=\"bottom\"]"));
+        assert!(css.contains(".kit-menu-content[data-side=\"top\"]"));
+        assert!(css.contains(".kit-menu-content[data-align=\"start\"]"));
+        assert!(css.contains(".kit-menu-content[data-align=\"center\"]"));
+        assert!(css.contains(".kit-menu-content[data-align=\"end\"]"));
         assert!(css.contains(".kit-menu-radio-item-label"));
         assert!(css.contains(".kit-menu-item-indicator[hidden]"));
         assert!(css.contains("display: none;"));
@@ -1642,6 +1655,8 @@ mod tests {
             item.item.files[0].target.exports,
             [
                 "MenuContent",
+                "MenuContentAlign",
+                "MenuContentSide",
                 "MenuDirection",
                 "MenuItem",
                 "MenuItemIndicator",

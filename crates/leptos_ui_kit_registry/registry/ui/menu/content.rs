@@ -6,8 +6,47 @@ use web_ui_primitives::leptos::{
 
 use super::root::{MenuContext, class_with_base};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum MenuContentSide {
+    Bottom,
+    Top,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum MenuContentAlign {
+    Start,
+    Center,
+    End,
+}
+
+impl MenuContentSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Top => "top",
+        }
+    }
+}
+
+impl MenuContentAlign {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Center => "center",
+            Self::End => "end",
+        }
+    }
+}
+
 #[component]
-pub fn MenuContent(#[prop(optional, into)] class: String, children: ChildrenFn) -> impl IntoView {
+pub fn MenuContent(
+    #[prop(optional, default = MenuContentSide::Bottom)] side: MenuContentSide,
+    #[prop(optional, default = MenuContentAlign::Start)] align: MenuContentAlign,
+    #[prop(optional, into)] class: String,
+    children: ChildrenFn,
+) -> impl IntoView {
     let context = use_context::<MenuContext>().expect("MenuContent must be used inside MenuRoot");
     let children = StoredValue::new(children);
     let content_id_value = context.content_id();
@@ -45,6 +84,8 @@ pub fn MenuContent(#[prop(optional, into)] class: String, children: ChildrenFn) 
                 trigger_id,
                 content_class,
                 data_state,
+                side,
+                align,
                 transition_end.clone(),
                 animation_end.clone(),
                 children,
@@ -60,6 +101,8 @@ fn menu_surface(
     trigger_id: Signal<String>,
     content_class: Signal<String>,
     data_state: Signal<&'static str>,
+    side: MenuContentSide,
+    align: MenuContentAlign,
     transition_end: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
@@ -72,6 +115,8 @@ fn menu_surface(
             role="menu"
             tabindex="-1"
             data-state=move || data_state.get()
+            data-side=side.as_str()
+            data-align=align.as_str()
             aria-labelledby=move || trigger_id.get()
             on:transitionend=move |event| transition_end.run(event)
             on:animationend=move |event| animation_end.run(event)
