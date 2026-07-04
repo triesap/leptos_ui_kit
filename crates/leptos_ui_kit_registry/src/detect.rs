@@ -570,7 +570,7 @@ edition = "2024"
     fn dependency_requirement_reports_satisfied_git_rev_dependency() {
         let manifest: TomlValue = toml::from_str(
             r#"[dependencies]
-web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "def042b24a9a7e5f447aa1194550d561838b9b7d", features = ["leptos"] }
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "6c764c035b4f6e3bce63e1f8619e25b36b45cb81", features = ["leptos"] }
 "#,
         )
         .expect("parse manifest");
@@ -578,7 +578,7 @@ web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev 
             crate_name: "web_ui_primitives".to_owned(),
             source: CargoPlanSource::git(
                 "https://github.com/triesap/web_ui_primitives",
-                "def042b24a9a7e5f447aa1194550d561838b9b7d",
+                "6c764c035b4f6e3bce63e1f8619e25b36b45cb81",
             ),
             features: vec!["leptos".to_owned()],
             required: true,
@@ -596,7 +596,7 @@ web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev 
             crate_name: "web_ui_primitives".to_owned(),
             source: CargoPlanSource::git(
                 "https://github.com/triesap/web_ui_primitives",
-                "def042b24a9a7e5f447aa1194550d561838b9b7d",
+                "6c764c035b4f6e3bce63e1f8619e25b36b45cb81",
             ),
             features: vec!["leptos".to_owned()],
             required: true,

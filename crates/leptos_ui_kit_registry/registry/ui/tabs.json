@@ -114,7 +114,7 @@
       "source": {
         "kind": "git",
         "url": "https://github.com/triesap/web_ui_primitives",
-        "rev": "def042b24a9a7e5f447aa1194550d561838b9b7d"
+        "rev": "6c764c035b4f6e3bce63e1f8619e25b36b45cb81"
       },
       "features": [
         "leptos"
