@@ -11,7 +11,7 @@ pub(crate) struct FieldContext {
     pub(crate) required: Signal<bool>,
     pub(crate) invalid: Signal<bool>,
     pub(crate) disabled: Signal<bool>,
-    pub(crate) message_present: RwSignal<bool>,
+    pub(crate) message_ids: RwSignal<Vec<String>>,
 }
 
 impl FieldContext {
@@ -19,17 +19,28 @@ impl FieldContext {
         self.control_id.clone()
     }
 
-    pub(crate) fn message_id(&self) -> String {
-        self.message_id.clone()
+    pub(crate) fn next_message_id(&self) -> String {
+        next_owned_id(&self.message_id)
+    }
+
+    pub(crate) fn register_message_id(&self, message_id: String) {
+        self.message_ids.update(|message_ids| {
+            if !message_ids.contains(&message_id) {
+                message_ids.push(message_id);
+            }
+        });
+    }
+
+    pub(crate) fn unregister_message_id(&self, message_id: &str) {
+        self.message_ids
+            .update(|message_ids| message_ids.retain(|active_id| active_id != message_id));
     }
 
     pub(crate) fn described_by_signal(&self) -> Signal<Option<String>> {
         let context = self.clone();
         Signal::derive(move || {
-            context
-                .message_present
-                .get()
-                .then(|| context.message_id.clone())
+            let message_ids = context.message_ids.get();
+            (!message_ids.is_empty()).then(|| message_ids.join(" "))
         })
     }
 
@@ -62,7 +73,7 @@ pub fn FieldRoot(
         required,
         invalid,
         disabled,
-        message_present: RwSignal::new(false),
+        message_ids: RwSignal::new(Vec::new()),
     });
 
     view! {
@@ -123,6 +134,10 @@ pub(crate) fn resolved_bool_signal(
 }
 
 fn next_id(prefix: &'static str) -> String {
+    next_owned_id(prefix)
+}
+
+fn next_owned_id(prefix: &str) -> String {
     let id = NEXT_FIELD_ID.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{id}")
 }

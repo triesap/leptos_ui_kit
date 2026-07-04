@@ -1463,9 +1463,13 @@ mod tests {
         assert!(root_source.contains("pub fn FieldRoot"));
         assert!(root_source.contains("control_id"));
         assert!(root_source.contains("message_id"));
-        assert!(root_source.contains("message_present"));
+        assert!(root_source.contains("message_ids"));
+        assert!(root_source.contains("next_message_id"));
+        assert!(root_source.contains("register_message_id"));
+        assert!(root_source.contains("unregister_message_id"));
         assert!(root_source.contains("described_by_signal"));
         assert!(root_source.contains("resolved_described_by"));
+        assert!(root_source.contains("message_ids.join(\" \")"));
         assert!(root_source.contains("required_signal"));
         assert!(root_source.contains("data-required"));
         assert!(slot_source.contains("pub struct FieldSlot"));
@@ -1477,9 +1481,11 @@ mod tests {
         assert!(label_source.contains("for=control_id"));
         assert!(message_source.contains("pub fn FieldMessage"));
         assert!(message_source.contains("id=message_id"));
-        assert!(message_source.contains("context.message_present.set(true)"));
+        assert!(message_source.contains("context.register_message_id(message_id.clone())"));
         assert!(message_source.contains("on_cleanup"));
-        assert!(message_source.contains("cleanup_context.message_present.set(false)"));
+        assert!(
+            message_source.contains("cleanup_context.unregister_message_id(&cleanup_message_id)")
+        );
         assert!(required_source.contains("pub fn FieldRequired"));
         assert!(required_source.contains("FieldRequired must be used inside FieldRoot"));
         assert!(required_source.contains("aria-hidden=\"true\""));

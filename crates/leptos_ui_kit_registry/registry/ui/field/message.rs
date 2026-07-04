@@ -6,12 +6,13 @@ use super::root::{FieldContext, class_with_base, data_state};
 pub fn FieldMessage(#[prop(optional, into)] class: String, children: Children) -> impl IntoView {
     let context =
         use_context::<FieldContext>().expect("FieldMessage must be used inside FieldRoot");
-    context.message_present.set(true);
+    let message_id = context.next_message_id();
+    context.register_message_id(message_id.clone());
     let cleanup_context = context.clone();
+    let cleanup_message_id = message_id.clone();
     on_cleanup(move || {
-        cleanup_context.message_present.set(false);
+        cleanup_context.unregister_message_id(&cleanup_message_id);
     });
-    let message_id = context.message_id();
     let invalid = context.invalid;
     let disabled = context.disabled;
 
