@@ -17,7 +17,8 @@ use leptos_ui_kit_codegen::{
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DependencyRequirement,
-    DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem, build_info_output,
+    DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY,
+    TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output, canonical_tool_config,
     detect_cargo_plan_requirements, load_built_in_registry_item, load_registry_item,
     read_built_in_registry_source,
 };
@@ -45,6 +46,25 @@ struct RegistrySourceContent {
     path: String,
     kind: String,
     content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionCommandOutput {
+    package: &'static str,
+    binary: &'static str,
+    version: &'static str,
+    schema_version: &'static str,
+    source: VersionSourceOutput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionSourceOutput {
+    kind: &'static str,
+    url: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rev: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,8 +208,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         return Ok(());
     }
     if command == "--version" || command == "-V" {
-        println!("leptos_ui_kit {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return run_version(&args[1..]);
     }
     if args[1..].iter().any(|arg| is_help_arg(arg)) {
         println!("{}", command_help(command)?);
@@ -242,6 +261,27 @@ fn parse_common_args(
     }
 
     Ok((filtered, target_cwd, quiet, verbose))
+}
+
+fn run_version(args: &[OsString]) -> Result<(), String> {
+    let mut json = false;
+
+    for arg in args {
+        let Some(value) = arg.to_str() else {
+            return Err("non-utf8 arguments are not supported".to_owned());
+        };
+
+        match value {
+            "--json" => json = true,
+            value if value.starts_with('-') => {
+                return Err(format!("unsupported flag for version: {value}"));
+            }
+            _ => return Err("version does not accept positional arguments".to_owned()),
+        }
+    }
+
+    println!("{}", render_version_output(json)?);
+    Ok(())
 }
 
 fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
@@ -565,6 +605,35 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
     Ok(output)
+}
+
+fn render_version_output(json: bool) -> Result<String, String> {
+    let output = version_output();
+
+    if json {
+        return serde_json::to_string_pretty(&CommandEnvelope::success("version", output))
+            .map_err(|error| format!("failed to serialize version output: {error}"));
+    }
+
+    Ok(format!("{} {}", output.binary, output.version))
+}
+
+fn version_output() -> VersionCommandOutput {
+    let rev = canonical_tool_config().ok().map(|tool| match tool.source {
+        ToolSourceConfig::Git { rev, .. } => rev,
+    });
+
+    VersionCommandOutput {
+        package: TOOL_PACKAGE,
+        binary: TOOL_BINARY,
+        version: env!("CARGO_PKG_VERSION"),
+        schema_version: SCHEMA_VERSION,
+        source: VersionSourceOutput {
+            kind: "git",
+            url: TOOL_GIT_URL,
+            rev,
+        },
+    }
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
@@ -1936,10 +2005,39 @@ leptos_router = "0.9.0-alpha"
         run(vec![OsString::from("--help")], Path::new(".")).expect("top-level help");
         run(vec![OsString::from("--version")], Path::new(".")).expect("version");
         run(
+            vec![OsString::from("--version"), OsString::from("--json")],
+            Path::new("."),
+        )
+        .expect("json version");
+        run(
             vec![OsString::from("sync"), OsString::from("--help")],
             Path::new("."),
         )
         .expect("command help");
+    }
+
+    #[test]
+    fn version_json_outputs_tool_provenance() {
+        let output = render_version_output(true).expect("render version");
+
+        assert!(output.contains("\"command\": \"version\""));
+        assert!(output.contains("\"package\": \"leptos_ui_kit_cli\""));
+        assert!(output.contains("\"binary\": \"leptos_ui_kit\""));
+        assert!(output.contains("\"version\": \"0.9.0-alpha\""));
+        assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
+        assert!(output.contains("\"kind\": \"git\""));
+        assert!(output.contains("\"url\": \"https://github.com/triesap/leptos_ui_kit\""));
+    }
+
+    #[test]
+    fn version_rejects_unknown_flags() {
+        let error = run(
+            vec![OsString::from("--version"), OsString::from("--source")],
+            Path::new("."),
+        )
+        .expect_err("version flag should be unsupported");
+
+        assert!(error.contains("unsupported flag for version"));
     }
 
     #[test]
