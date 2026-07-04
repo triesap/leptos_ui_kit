@@ -23,25 +23,17 @@ pub fn MenuTrigger(
             MenuTriggerAttrs::new().controls_id(attrs_controls_id.as_str()),
         )
     });
-    let suppress_click = RwSignal::new(false);
-
     let pointer_context = context.clone();
     let on_pointerdown = move |event: PointerEvent| {
         if disabled.get_untracked() || !pointer_context.model.get_untracked().open() {
             return;
         }
-        event.prevent_default();
-        suppress_click.set(true);
-        pointer_context.set_open(false);
+        event.stop_propagation();
     };
 
     let click_context = context.clone();
     let on_click = move |_| {
         if disabled.get_untracked() {
-            return;
-        }
-        if suppress_click.get_untracked() {
-            suppress_click.set(false);
             return;
         }
         click_context.toggle_open();

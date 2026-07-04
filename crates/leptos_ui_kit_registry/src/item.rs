@@ -1641,6 +1641,9 @@ mod tests {
         assert!(trigger_source.contains("aria-expanded=move || attr_string"));
         assert!(trigger_source.contains("aria-controls=move || attr_string"));
         assert!(trigger_source.contains("data-state=move || attr_string"));
+        assert!(trigger_source.contains("event.stop_propagation()"));
+        assert!(!trigger_source.contains("suppress_click"));
+        assert!(!trigger_source.contains("event.prevent_default()"));
         assert!(content_source.contains("pub enum MenuContentSide"));
         assert!(content_source.contains("pub enum MenuContentAlign"));
         assert!(content_source.contains("side: MenuContentSide"));
