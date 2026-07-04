@@ -2,8 +2,9 @@ use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::core::{PlacementAlign, PlacementSide};
 use web_ui_primitives::leptos::{
-    DismissibleReason, MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions,
-    use_menu_layer_with_node_ref, use_menu_placement_with_node_refs,
+    DismissibleFocusOutsideEvent, DismissiblePointerDownOutsideEvent, DismissibleReason,
+    MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions, use_menu_layer_with_node_ref,
+    use_menu_placement_with_node_refs,
 };
 
 use super::root::{MenuContext, class_with_base};
@@ -67,8 +68,22 @@ pub fn MenuContent(
 
     let open_context = context.clone();
     let dismiss_context = context.clone();
+    let pointer_trigger_ref = context.trigger_ref;
+    let focus_trigger_ref = context.trigger_ref;
     let mut options =
         MenuLayerOptions::new(Signal::derive(move || open_context.model.get().open()));
+    options.on_pointer_down_outside = Some(Callback::new(
+        move |event: DismissiblePointerDownOutsideEvent| {
+            if target_is_trigger(event.event().target(), pointer_trigger_ref) {
+                event.prevent_default();
+            }
+        },
+    ));
+    options.on_focus_outside = Some(Callback::new(move |event: DismissibleFocusOutsideEvent| {
+        if target_is_trigger(event.event().target(), focus_trigger_ref) {
+            event.prevent_default();
+        }
+    }));
     options.on_dismiss = Some(Callback::new(move |_reason: DismissibleReason| {
         dismiss_context.set_open(false);
     }));
@@ -112,6 +127,31 @@ pub fn MenuContent(
             .into_any()
         }}
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn target_is_trigger(
+    target: Option<leptos::web_sys::EventTarget>,
+    trigger_ref: NodeRef<html::Button>,
+) -> bool {
+    use leptos::wasm_bindgen::JsCast;
+
+    let Some(target) = target.and_then(|target| target.dyn_into::<leptos::web_sys::Node>().ok())
+    else {
+        return false;
+    };
+    trigger_ref
+        .get_untracked()
+        .and_then(|trigger| trigger.dyn_into::<leptos::web_sys::Node>().ok())
+        .is_some_and(|trigger| trigger.contains(Some(&target)))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn target_is_trigger(
+    _target: Option<leptos::web_sys::EventTarget>,
+    _trigger_ref: NodeRef<html::Button>,
+) -> bool {
+    false
 }
 
 fn menu_surface(

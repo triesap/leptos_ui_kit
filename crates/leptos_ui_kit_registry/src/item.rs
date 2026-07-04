@@ -1650,6 +1650,9 @@ mod tests {
         assert!(content_source.contains("align: MenuContentAlign"));
         assert!(content_source.contains("spacing: f64"));
         assert!(content_source.contains("viewport_padding: f64"));
+        assert!(content_source.contains("on_pointer_down_outside"));
+        assert!(content_source.contains("on_focus_outside"));
+        assert!(content_source.contains("target_is_trigger"));
         assert!(content_source.contains("use_menu_placement_with_node_refs"));
         assert!(content_source.contains("MenuPlacementOptions::new"));
         assert!(content_source.contains("style=move || style_placement.style()"));
