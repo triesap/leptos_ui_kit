@@ -1814,7 +1814,7 @@ dependencies = [
 [[package]]
 name = "web_ui_primitives"
 version = "0.1.0"
-source = "git+https://github.com/triesap/web_ui_primitives?rev=5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f#5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f"
+source = "git+https://github.com/triesap/web_ui_primitives?rev=4472c5bab985c2dc3333c31bbdf193b24d36a979#4472c5bab985c2dc3333c31bbdf193b24d36a979"
 dependencies = [
  "web_ui_primitives_core",
  "web_ui_primitives_leptos",
@@ -1823,12 +1823,12 @@ dependencies = [
 [[package]]
 name = "web_ui_primitives_core"
 version = "0.1.0"
-source = "git+https://github.com/triesap/web_ui_primitives?rev=5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f#5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f"
+source = "git+https://github.com/triesap/web_ui_primitives?rev=4472c5bab985c2dc3333c31bbdf193b24d36a979#4472c5bab985c2dc3333c31bbdf193b24d36a979"
 
 [[package]]
 name = "web_ui_primitives_leptos"
 version = "0.1.0"
-source = "git+https://github.com/triesap/web_ui_primitives?rev=5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f#5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f"
+source = "git+https://github.com/triesap/web_ui_primitives?rev=4472c5bab985c2dc3333c31bbdf193b24d36a979#4472c5bab985c2dc3333c31bbdf193b24d36a979"
 dependencies = [
  "leptos",
  "send_wrapper",

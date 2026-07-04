@@ -172,7 +172,7 @@ fn App() -> impl IntoView {
             </DialogRoot>
             <MenuRoot checked_index=locale_index>
                 <MenuTrigger>"Locale"</MenuTrigger>
-                <MenuContent side=MenuContentSide::Bottom align=MenuContentAlign::Start>
+                <MenuContent side=MenuContentSide::Bottom align=MenuContentAlign::End>
                     <MenuRadioItem
                         index=0
                         label="English"

@@ -1169,7 +1169,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f"
+                    "rev": "4472c5bab985c2dc3333c31bbdf193b24d36a979"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -1208,7 +1208,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "5d866fafd9c44b52ae3f598c8c6d32489a1b3c9f",
+                    "rev": "4472c5bab985c2dc3333c31bbdf193b24d36a979",
                     "branch": "main"
                   },
                   "features": ["leptos"],
