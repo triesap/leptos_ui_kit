@@ -2,9 +2,6 @@
 /target/
 **/target/
 
-# Cargo
-Cargo.lock
-
 # Rust tooling
 **/*.rs.bk
 **/*.rlib
