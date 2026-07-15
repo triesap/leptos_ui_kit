@@ -143,9 +143,8 @@
     {
       "crate": "web_ui_primitives",
       "source": {
-        "kind": "git",
-        "url": "https://github.com/triesap/web_ui_primitives",
-        "rev": "6c764c035b4f6e3bce63e1f8619e25b36b45cb81"
+        "kind": "version",
+        "version": "0.1.0"
       },
       "features": [
         "leptos"

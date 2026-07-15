@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog and this project adheres to
 Semantic Versioning.
 
-## [0.9.0-alpha] - Unreleased
+## [0.1.0] - 2026-07-15
 
-- Align the crate family with the Leptos `0.9.0-alpha` version line.
+- Initial crates.io release.
 - Define the MVP as a source-first `leptos_ui_kit` CLI and packaged registry for
   pure-CSS Trunk CSR apps.
 - Scope the MVP to built-in `button`, strict config, no Tailwind, no shadcn
@@ -25,7 +25,7 @@ Semantic Versioning.
   subcommand entrypoint.
 - Add a Radroots-shaped workflow fixture that compiles the generated `Button`
   in a wasm Trunk CSR app.
-- Add dependency-plan metadata for pinned git/rev primitive dependencies without
+- Add dependency-plan metadata for crates.io primitive dependencies without
   mutating consumer `Cargo.toml`.
 - Add multi-file generated component targets and accessibility contract
   metadata for composite component families.

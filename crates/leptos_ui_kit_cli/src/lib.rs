@@ -2023,7 +2023,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"version\""));
         assert!(output.contains("\"package\": \"leptos_ui_kit_cli\""));
         assert!(output.contains("\"binary\": \"leptos_ui_kit\""));
-        assert!(output.contains("\"version\": \"0.9.0-alpha\""));
+        assert!(output.contains("\"version\": \"0.1.0\""));
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"kind\": \"git\""));
         assert!(output.contains("\"url\": \"https://github.com/triesap/leptos_ui_kit\""));

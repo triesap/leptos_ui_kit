@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION};
 
-pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
+pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
 
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
@@ -367,7 +367,7 @@ impl CargoPlanEntry {
             }
             "web_ui_primitives" => {
                 self.source
-                    .expect_git_url("cargoPlan[].source.url", WEB_UI_PRIMITIVES_GIT_URL)?;
+                    .expect_version("cargoPlan[].source.version", WEB_UI_PRIMITIVES_VERSION)?;
                 expect_features("cargoPlan[].features", &["leptos"], &self.features)
             }
             value => Err(RegistryError::InvalidValue {
@@ -455,17 +455,6 @@ impl CargoPlanSource {
             (CargoPlanSourceKind::Version, Some(version)) => {
                 expect_string(field, expected, version)
             }
-            _ => Err(RegistryError::InvalidValue {
-                field,
-                expected: expected.to_owned(),
-                actual: format!("{self:?}"),
-            }),
-        }
-    }
-
-    fn expect_git_url(&self, field: &'static str, expected: &str) -> Result<(), RegistryError> {
-        match (self.kind, self.url.as_deref()) {
-            (CargoPlanSourceKind::Git, Some(url)) => expect_string(field, expected, url),
             _ => Err(RegistryError::InvalidValue {
                 field,
                 expected: expected.to_owned(),
@@ -1145,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_web_ui_primitives_git_cargo_plan_entry() {
+    fn accepts_web_ui_primitives_version_cargo_plan_entry() {
         let item = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
@@ -1167,9 +1156,8 @@ mod tests {
                 {
                   "crate": "web_ui_primitives",
                   "source": {
-                    "kind": "git",
-                    "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "6c764c035b4f6e3bce63e1f8619e25b36b45cb81"
+                    "kind": "version",
+                    "version": "0.1.0"
                   },
                   "features": ["leptos"],
                   "required": true

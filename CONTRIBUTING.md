@@ -17,9 +17,6 @@ This repository is a Rust workspace. Typical tasks:
 - `cargo check`
 - `cargo test`
 
-When working from a parent repository that provides a build wrapper, use that
-parent repository's command routing instructions.
-
 ## MVP constraints
 
 - Target Leptos `0.9.0-alpha`.

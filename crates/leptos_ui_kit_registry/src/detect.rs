@@ -567,19 +567,16 @@ edition = "2024"
     }
 
     #[test]
-    fn dependency_requirement_reports_satisfied_git_rev_dependency() {
+    fn dependency_requirement_reports_satisfied_version_dependency() {
         let manifest: TomlValue = toml::from_str(
             r#"[dependencies]
-web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "6c764c035b4f6e3bce63e1f8619e25b36b45cb81", features = ["leptos"] }
+web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
 "#,
         )
         .expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::git(
-                "https://github.com/triesap/web_ui_primitives",
-                "6c764c035b4f6e3bce63e1f8619e25b36b45cb81",
-            ),
+            source: CargoPlanSource::version("0.1.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };
@@ -590,14 +587,11 @@ web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev 
     }
 
     #[test]
-    fn dependency_requirement_reports_missing_required_git_dependency() {
+    fn dependency_requirement_reports_missing_required_version_dependency() {
         let manifest: TomlValue = toml::from_str("[dependencies]\n").expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::git(
-                "https://github.com/triesap/web_ui_primitives",
-                "6c764c035b4f6e3bce63e1f8619e25b36b45cb81",
-            ),
+            source: CargoPlanSource::version("0.1.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };

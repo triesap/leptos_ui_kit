@@ -218,15 +218,31 @@ fn assert_cargo_subcommand_success(project: &Path, args: &[&str]) {
 }
 
 fn cli_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_leptos_ui_kit")
-        .map(PathBuf::from)
-        .expect("CARGO_BIN_EXE_leptos_ui_kit should be set by Cargo")
+    test_binary("CARGO_BIN_EXE_leptos_ui_kit", "leptos_ui_kit")
 }
 
 fn cargo_cli_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_cargo-leptos_ui_kit")
-        .map(PathBuf::from)
-        .expect("CARGO_BIN_EXE_cargo-leptos_ui_kit should be set by Cargo")
+    test_binary("CARGO_BIN_EXE_cargo-leptos_ui_kit", "cargo-leptos_ui_kit")
+}
+
+fn test_binary(env_var: &str, name: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(env_var).map(PathBuf::from) {
+        return path;
+    }
+
+    let binary = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let path = std::env::current_exe()
+        .expect("current test binary")
+        .parent()
+        .and_then(Path::parent)
+        .expect("target debug directory")
+        .join(binary);
+    assert!(
+        path.is_file(),
+        "{env_var} was not set and fallback binary was missing at {}",
+        path.display()
+    );
+    path
 }
 
 fn fixture_root() -> PathBuf {

@@ -8,6 +8,8 @@ description.workspace = true
 readme.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 leptos_ui_kit_registry.workspace = true
