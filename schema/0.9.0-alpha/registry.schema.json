@@ -22,6 +22,7 @@
     },
     "items": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -36,7 +37,7 @@
           },
           "path": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]+\\.json$"
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.json$"
           }
         }
       }

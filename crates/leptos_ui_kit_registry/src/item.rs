@@ -7,7 +7,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION};
+use crate::{
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION, THEME_CONTRACT_VERSION,
+};
 
 pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
 
@@ -113,14 +115,22 @@ impl RegistryRoot {
         expect_string("name", "leptos-ui-kit", &self.name)?;
 
         let mut names = BTreeSet::new();
+        let mut paths = BTreeSet::new();
         for item in &self.items {
             validate_item_name(&item.name)?;
-            validate_registry_source_path("items[].path", &item.path)?;
+            validate_registry_source_path_with_extension("items[].path", &item.path, "json")?;
             if !names.insert(item.name.clone()) {
                 return Err(RegistryError::DuplicateTarget(format!(
                     "item:{}",
                     item.name
                 )));
+            }
+            if !paths.insert(item.path.clone()) {
+                return Err(RegistryError::InvalidValue {
+                    field: "items[].path",
+                    expected: "deduplicated registry item paths".to_owned(),
+                    actual: item.path.clone(),
+                });
             }
         }
 
@@ -164,6 +174,8 @@ impl RegistryItem {
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
         validate_item_name(&self.name)?;
         expect_string("version", SCHEMA_VERSION, &self.version)?;
+        validate_non_empty_string("title", &self.title)?;
+        validate_non_empty_string("description", &self.description)?;
         self.leptos.validate()?;
         self.accessibility.validate()?;
 
@@ -182,8 +194,16 @@ impl RegistryItem {
             }
         }
 
+        let mut dependencies = BTreeSet::new();
         for dependency in &self.registry_dependencies {
             validate_item_name(dependency)?;
+            if !dependencies.insert(dependency) {
+                return Err(RegistryError::InvalidValue {
+                    field: "registryDependencies",
+                    expected: "deduplicated registry item names".to_owned(),
+                    actual: dependency.clone(),
+                });
+            }
         }
 
         for entry in &self.cargo_plan {
@@ -299,7 +319,7 @@ pub struct RegistryItemFile {
 
 impl RegistryItemFile {
     fn validate(&self) -> Result<(), RegistryError> {
-        validate_registry_source_path("files[].source", &self.source)?;
+        validate_registry_source_path_with_extension("files[].source", &self.source, "rs")?;
         self.target.validate()
     }
 }
@@ -335,7 +355,7 @@ pub struct RegistryItemStyle {
 
 impl RegistryItemStyle {
     fn validate(&self, item_name: &str) -> Result<(), RegistryError> {
-        validate_registry_source_path("styles[].source", &self.source)?;
+        validate_registry_source_path_with_extension("styles[].source", &self.source, "css")?;
         self.target.validate(item_name)
     }
 }
@@ -550,7 +570,9 @@ pub fn load_registry_item(
 
 pub fn load_built_in_registry_root() -> Result<RegistryRoot, RegistryError> {
     let path = built_in_registry_root().join("registry.json");
-    parse_registry_root_file(&path)
+    let root = parse_registry_root_file(&path)?;
+    validate_built_in_registry_catalog(&root)?;
+    Ok(root)
 }
 
 pub fn load_built_in_registry_item(name: &str) -> Result<ResolvedRegistryItem, RegistryError> {
@@ -608,7 +630,111 @@ fn parse_built_in_item_from_root(
         return Err(RegistryError::BuiltInNotFound(name.to_owned()));
     }
 
-    Ok((parse_registry_item_file(&path)?, path))
+    let item = parse_registry_item_file(&path)?;
+    validate_registry_root_item_identity(entry, &item)?;
+
+    Ok((item, path))
+}
+
+fn validate_built_in_registry_catalog(root: &RegistryRoot) -> Result<(), RegistryError> {
+    let mut items = Vec::with_capacity(root.items.len());
+    for entry in &root.items {
+        items.push(parse_built_in_item_from_root(root, &entry.name)?.0);
+    }
+
+    validate_built_in_registry_items(&items)
+}
+
+fn validate_built_in_registry_items(items: &[RegistryItem]) -> Result<(), RegistryError> {
+    validate_registry_graph(items)?;
+
+    let tokens = items
+        .iter()
+        .find(|item| item.name == "tokens")
+        .ok_or_else(|| RegistryError::BuiltInNotFound("tokens".to_owned()))?;
+    validate_built_in_tokens_item(tokens)?;
+
+    let router_link = items
+        .iter()
+        .find(|item| item.name == "router-link")
+        .ok_or_else(|| RegistryError::BuiltInNotFound("router-link".to_owned()))?;
+    if router_link.registry_dependencies != ["anchor"] {
+        return Err(RegistryError::InvalidValue {
+            field: "router-link.registryDependencies",
+            expected: "anchor".to_owned(),
+            actual: router_link.registry_dependencies.join(", "),
+        });
+    }
+
+    for item in items {
+        let direct_tokens_count = item
+            .registry_dependencies
+            .iter()
+            .filter(|dependency| dependency.as_str() == "tokens")
+            .count();
+        let expected_count = usize::from(item.name != "tokens" && !item.styles.is_empty());
+        if direct_tokens_count != expected_count {
+            return Err(RegistryError::InvalidValue {
+                field: "registryDependencies",
+                expected: if expected_count == 1 {
+                    "exactly one direct tokens dependency for a styled non-token item".to_owned()
+                } else {
+                    "no direct tokens dependency for tokens or an unstyled item".to_owned()
+                },
+                actual: format!(
+                    "{} direct tokens dependencies on {}",
+                    direct_tokens_count, item.name
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryError> {
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "themeContractVersion".to_owned(),
+        serde_json::Value::String(THEME_CONTRACT_VERSION.to_owned()),
+    );
+    let expected = RegistryItem {
+        schema: REGISTRY_ITEM_SCHEMA_URL.to_owned(),
+        schema_version: SCHEMA_VERSION.to_owned(),
+        name: "tokens".to_owned(),
+        kind: RegistryItemKind::Foundation,
+        version: SCHEMA_VERSION.to_owned(),
+        title: "Semantic Tokens".to_owned(),
+        description: "The shared semantic CSS token foundation for all styled leptos_ui_kit items."
+            .to_owned(),
+        leptos: RegistryLeptos {
+            version: LEPTOS_VERSION.to_owned(),
+            router_version: LEPTOS_ROUTER_VERSION.to_owned(),
+            render_mode: RenderMode::Csr,
+        },
+        accessibility: RegistryAccessibility::default(),
+        files: Vec::new(),
+        styles: vec![RegistryItemStyle {
+            source: "styles/tokens.css".to_owned(),
+            target: RegistryStyleTarget {
+                kind: RegistryStyleTargetKind::ManagedCssBlock,
+                id: "tokens".to_owned(),
+            },
+        }],
+        registry_dependencies: Vec::new(),
+        cargo_plan: Vec::new(),
+        extra,
+    };
+
+    if item == &expected {
+        Ok(())
+    } else {
+        Err(RegistryError::InvalidValue {
+            field: "built-in tokens manifest",
+            expected: format!("{expected:?}"),
+            actual: format!("{item:?}"),
+        })
+    }
 }
 
 fn collect_built_in_item_closure(
@@ -820,16 +946,16 @@ fn validate_item_name(value: &str) -> Result<(), RegistryError> {
 }
 
 fn validate_kebab_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
+    let mut bytes = value.bytes();
+    let valid = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+
+    if valid {
         Ok(())
     } else {
         Err(RegistryError::InvalidValue {
             field,
-            expected: "ASCII lowercase kebab-case name".to_owned(),
+            expected: "ASCII lowercase kebab-case name beginning with a letter".to_owned(),
             actual: value.to_owned(),
         })
     }
@@ -837,11 +963,18 @@ fn validate_kebab_name(field: &'static str, value: &str) -> Result<(), RegistryE
 
 fn validate_registry_source_path(field: &'static str, value: &str) -> Result<(), RegistryError> {
     let path = Path::new(value);
-    if path.is_absolute()
-        || value.starts_with('.')
+    if value.is_empty()
+        || value.contains('\\')
+        || path.is_absolute()
+        || value.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+        })
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment.starts_with('.'))
         || path
             .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err(RegistryError::UnsafePath {
             field,
@@ -850,6 +983,33 @@ fn validate_registry_source_path(field: &'static str, value: &str) -> Result<(),
     }
 
     Ok(())
+}
+
+fn validate_registry_source_path_with_extension(
+    field: &'static str,
+    value: &str,
+    extension: &str,
+) -> Result<(), RegistryError> {
+    validate_registry_source_path(field, value)?;
+    if Path::new(value)
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some(extension)
+    {
+        return Err(RegistryError::UnsafePath {
+            field,
+            path: value.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_registry_root_item_identity(
+    entry: &RegistryRootItem,
+    item: &RegistryItem,
+) -> Result<(), RegistryError> {
+    expect_string("items[].name", &entry.name, &item.name)
 }
 
 fn validate_ui_target_path(field: &'static str, value: &str) -> Result<(), RegistryError> {
@@ -1053,18 +1213,27 @@ mod tests {
         let root = load_built_in_registry_root().expect("load root");
 
         assert_eq!(root.schema_version, SCHEMA_VERSION);
-        assert_eq!(root.items.len(), 11);
-        assert!(root.items.iter().any(|item| item.name == "anchor"));
-        assert!(root.items.iter().any(|item| item.name == "button"));
-        assert!(root.items.iter().any(|item| item.name == "collapsible"));
-        assert!(root.items.iter().any(|item| item.name == "dialog"));
-        assert!(root.items.iter().any(|item| item.name == "field"));
-        assert!(root.items.iter().any(|item| item.name == "menu"));
-        assert!(root.items.iter().any(|item| item.name == "router-link"));
-        assert!(root.items.iter().any(|item| item.name == "spinner"));
-        assert!(root.items.iter().any(|item| item.name == "status"));
-        assert!(root.items.iter().any(|item| item.name == "tabs"));
-        assert!(root.items.iter().any(|item| item.name == "tokens"));
+        let entries = root
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.path.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            [
+                ("anchor", "ui/anchor.json"),
+                ("button", "ui/button.json"),
+                ("collapsible", "ui/collapsible.json"),
+                ("dialog", "ui/dialog.json"),
+                ("field", "ui/field.json"),
+                ("menu", "ui/menu.json"),
+                ("router-link", "ui/router-link.json"),
+                ("spinner", "ui/spinner.json"),
+                ("status", "ui/status.json"),
+                ("tabs", "ui/tabs.json"),
+                ("tokens", "foundation/tokens.json"),
+            ]
+        );
     }
 
     #[test]
@@ -1412,7 +1581,7 @@ mod tests {
             item.item.accessibility.behaviors[0].name,
             "router-link-semantics"
         );
-        assert_eq!(item.item.registry_dependencies, ["tokens", "anchor"]);
+        assert_eq!(item.item.registry_dependencies, ["anchor"]);
         assert!(item.item.styles.is_empty());
         assert_eq!(item.item.files[0].target.exports, ["RouterLink"]);
         assert_eq!(resolved_names, ["tokens", "anchor", "router-link"]);
@@ -2044,6 +2213,195 @@ mod tests {
     }
 
     #[test]
+    fn rejects_item_names_without_a_lowercase_letter_prefix() {
+        for name in ["", "-button", "1button", "Button", "button_name"] {
+            let item = item_with_name_and_target(name, "button.rs", name, &[]);
+            let error = item.validate().expect_err("item name should fail");
+
+            assert!(
+                matches!(error, RegistryError::InvalidValue { field: "name", .. }),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_blank_item_titles_and_descriptions() {
+        let mut blank_title = item_with_name_and_target("button", "button.rs", "button", &[]);
+        blank_title.title = " \n\t".to_owned();
+        assert!(matches!(
+            blank_title.validate(),
+            Err(RegistryError::InvalidValue { field: "title", .. })
+        ));
+
+        let mut blank_description = item_with_name_and_target("button", "button.rs", "button", &[]);
+        blank_description.description = " \n\t".to_owned();
+        assert!(matches!(
+            blank_description.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "description",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_accessibility_behavior_names_without_a_lowercase_letter_prefix() {
+        for name in ["1behavior", "-behavior"] {
+            let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
+            item.accessibility.behaviors = vec![RegistryAccessibilityBehavior {
+                name: name.to_owned(),
+                required: true,
+            }];
+
+            assert!(
+                matches!(
+                    item.validate(),
+                    Err(RegistryError::InvalidValue {
+                        field: "accessibility.behaviors[].name",
+                        ..
+                    })
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_or_wrong_type_registry_source_paths() {
+        for source in [
+            "",
+            "/ui/button.rs",
+            "ui/button",
+            "ui/button.css",
+            "../ui/button.rs",
+            "ui\\button.rs",
+            "ui//button.rs",
+            "ui/./button.rs",
+            "ui/.hidden/button.rs",
+        ] {
+            let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
+            item.files[0].source = source.to_owned();
+
+            assert!(
+                matches!(item.validate(), Err(RegistryError::UnsafePath { .. })),
+                "{source}"
+            );
+        }
+
+        for source in [
+            "",
+            "/styles/button.css",
+            "styles/button",
+            "styles/button.rs",
+            "styles/../button.css",
+            "styles/.hidden/button.css",
+        ] {
+            let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
+            item.styles[0].source = source.to_owned();
+
+            assert!(
+                matches!(item.validate(), Err(RegistryError::UnsafePath { .. })),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_root_rejects_unsafe_non_json_and_duplicate_paths() {
+        for path in [
+            "",
+            "/ui/button.json",
+            "ui/button",
+            "ui/button.css",
+            "ui\\button.json",
+            "ui//button.json",
+            "ui/./button.json",
+            "ui/../button.json",
+            ".hidden/button.json",
+        ] {
+            let root = registry_root_with_items(vec![RegistryRootItem {
+                name: "button".to_owned(),
+                path: path.to_owned(),
+            }]);
+            assert!(
+                matches!(
+                    root.validate(),
+                    Err(RegistryError::UnsafePath {
+                        field: "items[].path",
+                        ..
+                    })
+                ),
+                "{path:?}"
+            );
+        }
+
+        let root = registry_root_with_items(vec![
+            RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/shared.json".to_owned(),
+            },
+            RegistryRootItem {
+                name: "spinner".to_owned(),
+                path: "ui/shared.json".to_owned(),
+            },
+        ]);
+        assert!(matches!(
+            root.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "items[].path",
+                ..
+            })
+        ));
+
+        let duplicate_name = registry_root_with_items(vec![
+            RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/button.json".to_owned(),
+            },
+            RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/another-button.json".to_owned(),
+            },
+        ]);
+        assert!(matches!(
+            duplicate_name.validate(),
+            Err(RegistryError::DuplicateTarget(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_registry_dependencies() {
+        let item =
+            item_with_name_and_target("button", "button.rs", "button", &["tokens", "tokens"]);
+
+        assert!(matches!(
+            item.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "registryDependencies",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_registry_root_entry_name_that_differs_from_manifest_name() {
+        let entry = RegistryRootItem {
+            name: "button".to_owned(),
+            path: "ui/button.json".to_owned(),
+        };
+        let item = item_with_name_and_target("spinner", "spinner.rs", "spinner", &[]);
+
+        assert!(matches!(
+            validate_registry_root_item_identity(&entry, &item),
+            Err(RegistryError::InvalidValue {
+                field: "items[].name",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn foundation_items_require_styles_and_forbid_ui_files() {
         foundation_item()
             .validate()
@@ -2091,6 +2449,60 @@ mod tests {
     }
 
     #[test]
+    fn public_registry_schemas_declare_structural_integrity_constraints() {
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/0.9.0-alpha");
+        let root_schema = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(schema_root.join("registry.schema.json"))
+                .expect("read registry schema"),
+        )
+        .expect("parse registry schema");
+        let item_schema = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(schema_root.join("registry-item.schema.json"))
+                .expect("read registry item schema"),
+        )
+        .expect("parse registry item schema");
+
+        assert_eq!(
+            root_schema["properties"]["items"]["uniqueItems"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            root_schema["properties"]["items"]["items"]["properties"]["name"]["pattern"],
+            serde_json::json!("^[a-z][a-z0-9-]*$")
+        );
+        assert!(
+            root_schema["properties"]["items"]["items"]["properties"]["path"]["pattern"]
+                .as_str()
+                .expect("root item path pattern")
+                .ends_with("\\.json$")
+        );
+        assert_eq!(
+            item_schema["properties"]["title"]["pattern"],
+            serde_json::json!("\\S")
+        );
+        assert_eq!(
+            item_schema["properties"]["description"]["pattern"],
+            serde_json::json!("\\S")
+        );
+        assert!(
+            item_schema["properties"]["files"]["items"]["properties"]["source"]["pattern"]
+                .as_str()
+                .expect("Rust source pattern")
+                .ends_with("\\.rs$")
+        );
+        assert!(
+            item_schema["properties"]["styles"]["items"]["properties"]["source"]["pattern"]
+                .as_str()
+                .expect("CSS source pattern")
+                .ends_with("\\.css$")
+        );
+        assert_eq!(
+            item_schema["properties"]["registryDependencies"]["uniqueItems"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
     fn graph_validates_registry_dependency_order() {
         let dependency = item_with_name_and_target("base", "base.rs", "base", &[]);
         let dependent = item_with_name_and_target("button", "button.rs", "button", &["base"]);
@@ -2101,22 +2513,102 @@ mod tests {
     }
 
     #[test]
-    fn styled_built_in_items_depend_directly_on_tokens() {
+    fn exactly_styled_non_token_items_depend_directly_on_tokens() {
         let root = load_built_in_registry_root().expect("load root");
+        let mut styled = Vec::new();
 
         for entry in root.items {
             let item = load_built_in_registry_item(&entry.name).expect("load item");
-            if item.item.name != "tokens" && !item.item.styles.is_empty() {
-                assert!(
-                    item.item
-                        .registry_dependencies
-                        .iter()
-                        .any(|dependency| dependency == "tokens"),
-                    "{} should depend directly on tokens",
-                    item.item.name
-                );
+            let direct_tokens = item
+                .item
+                .registry_dependencies
+                .iter()
+                .filter(|dependency| dependency.as_str() == "tokens")
+                .count();
+            let should_depend = item.item.name != "tokens" && !item.item.styles.is_empty();
+            assert_eq!(
+                direct_tokens,
+                usize::from(should_depend),
+                "{}",
+                item.item.name
+            );
+            if should_depend {
+                styled.push(item.item.name);
             }
         }
+
+        assert_eq!(
+            styled,
+            [
+                "anchor",
+                "button",
+                "collapsible",
+                "dialog",
+                "field",
+                "menu",
+                "spinner",
+                "status",
+                "tabs",
+            ]
+        );
+    }
+
+    #[test]
+    fn tokens_manifest_exactly_matches_the_theme_contract_version() {
+        let tokens = load_built_in_registry_item("tokens").expect("load tokens");
+        let contract = crate::load_built_in_theme_contract().expect("load theme contract");
+
+        validate_built_in_tokens_item(&tokens.item).expect("validate exact tokens manifest");
+        assert_eq!(contract.contract_version, THEME_CONTRACT_VERSION);
+        assert_eq!(
+            tokens.item.extra.get("themeContractVersion"),
+            Some(&serde_json::json!(contract.contract_version))
+        );
+    }
+
+    #[test]
+    fn built_in_catalog_rejects_tokens_or_dependency_shape_drift() {
+        let root_path = built_in_registry_root().join("registry.json");
+        let root = parse_registry_root_file(&root_path).expect("parse root without catalog check");
+        let items = root
+            .items
+            .iter()
+            .map(|entry| {
+                parse_built_in_item_from_root(&root, &entry.name)
+                    .expect("parse item")
+                    .0
+            })
+            .collect::<Vec<_>>();
+
+        let mut missing_styled_dependency = items.clone();
+        missing_styled_dependency
+            .iter_mut()
+            .find(|item| item.name == "anchor")
+            .expect("anchor")
+            .registry_dependencies
+            .clear();
+        assert!(validate_built_in_registry_items(&missing_styled_dependency).is_err());
+
+        let mut redundant_unstyled_dependency = items.clone();
+        redundant_unstyled_dependency
+            .iter_mut()
+            .find(|item| item.name == "router-link")
+            .expect("router-link")
+            .registry_dependencies
+            .push("tokens".to_owned());
+        assert!(validate_built_in_registry_items(&redundant_unstyled_dependency).is_err());
+
+        let mut wrong_tokens_version = items;
+        wrong_tokens_version
+            .iter_mut()
+            .find(|item| item.name == "tokens")
+            .expect("tokens")
+            .extra
+            .insert(
+                "themeContractVersion".to_owned(),
+                serde_json::json!("wrong"),
+            );
+        assert!(validate_built_in_registry_items(&wrong_tokens_version).is_err());
     }
 
     #[test]
@@ -2225,6 +2717,15 @@ mod tests {
                 .collect(),
             cargo_plan: vec![],
             extra: BTreeMap::new(),
+        }
+    }
+
+    fn registry_root_with_items(items: Vec<RegistryRootItem>) -> RegistryRoot {
+        RegistryRoot {
+            schema: REGISTRY_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "leptos-ui-kit".to_owned(),
+            items,
         }
     }
 

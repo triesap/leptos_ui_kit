@@ -42,7 +42,6 @@
   ],
   "styles": [],
   "registryDependencies": [
-    "tokens",
     "anchor"
   ],
   "cargoPlan": [

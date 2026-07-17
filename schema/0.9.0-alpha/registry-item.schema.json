@@ -39,11 +39,13 @@
     },
     "title": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "description": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "\\S"
     },
     "leptos": {
       "type": "object",
@@ -94,7 +96,8 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "\\S"
           }
         }
       }
@@ -111,7 +114,7 @@
         "properties": {
           "source": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]+\\.rs$"
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.rs$"
           },
           "target": {
             "type": "object",
@@ -153,7 +156,7 @@
         "properties": {
           "source": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9._/-]+\\.css$"
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.css$"
           },
           "target": {
             "type": "object",
@@ -177,6 +180,7 @@
     },
     "registryDependencies": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "string",
         "pattern": "^[a-z][a-z0-9-]*$"
