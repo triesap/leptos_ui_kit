@@ -12,7 +12,8 @@ cargo install leptos_ui_kit_cli --locked
 ```
 
 Apps do not depend on `leptos_ui_kit` at runtime. The CLI installs source files
-under `src/components/ui` and managed CSS blocks in `styles/kit.css`.
+under `src/components/ui` and managed CSS blocks in `styles/kit.css` by
+default. `kit.json` may select another safe stylesheet under `styles/`.
 
 ## Commands
 
@@ -45,25 +46,101 @@ Multi-member workspace installs are not supported.
 
 ## Dependency Plan
 
-Primitive-backed components require:
+Most primitive-backed components require:
 
 ```toml
 [dependencies]
 leptos = "0.9.0-alpha"
-leptos_router = "0.9.0-alpha"
 web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
 ```
 
-The CLI reports required dependencies and verifies them with `doctor --strict`.
-It does not mutate `Cargo.toml`.
+`router-link` additionally requires:
+
+```toml
+leptos_router = "0.9.0-alpha"
+```
+
+The CLI reports the dependencies required by the selected registry items and
+verifies them with `doctor --strict`. It does not mutate `Cargo.toml`.
 
 ## Components
 
 The built-in registry includes `button`, `collapsible`, `tabs`, `dialog`,
-`menu`, `field`, `status`, `spinner`, `anchor`, and `router-link`.
+`menu`, `field`, `status`, `spinner`, `anchor`, `router-link`, and the
+CSS-only `tokens` foundation item.
 
 Generated source is app-owned. Managed CSS is delimited with
 `leptos-ui-kit:start` and `leptos-ui-kit:end` markers.
+
+## Theming
+
+The `tokens` foundation owns the canonical semantic `--kit-*` token contract.
+Every styled component directly depends on it, so adding a component installs
+the tokens managed block before the component styles. The machine-readable
+contract is packaged at `registry/contracts/theme-v1.json` and its public JSON
+schema is published at
+`schema/0.9.0-alpha/theme-contract.schema.json`.
+
+Load application theme CSS after the generated kit stylesheet, then keep
+application rules last:
+
+```html
+<link data-trunk rel="css" href="styles/kit.css" />
+<link data-trunk rel="css" href="styles/themes.css" />
+<link data-trunk rel="css" href="styles/app.css" />
+```
+
+Themes own semantic values and their `color-scheme` declaration. Component
+styles resolve those values at the property that uses them, so a nested theme
+scope works without component-level root aliases:
+
+```css
+:root {
+  color-scheme: light;
+  --kit-color-primary: #1d4ed8;
+  --kit-focus-ring: #2563eb;
+}
+
+[data-ui-theme="dark"] {
+  color-scheme: dark;
+  --kit-color-surface-raised: #172033;
+  --kit-color-text: #f9fafb;
+  --kit-color-border: #374151;
+}
+```
+
+Existing component variables remain optional escape hatches. For example,
+`--kit-button-gap`, `--kit-dialog-background`, and `--kit-spinner-track-color`
+can still be set by an app, but their defaults now fall back to semantic tokens
+or component-local structural values.
+
+`DialogContent` normally portals to the document body. For a dialog opened
+inside a nested theme scope, mount it below that scope instead:
+
+```rust
+use web_ui_primitives::leptos::PortalMount;
+
+let portal_mount: PortalMount = /* an element below the themed scope */;
+
+view! {
+  <DialogContent portal_mount=portal_mount>
+    <p>"Dialog content"</p>
+  </DialogContent>
+}
+```
+
+Omit `portal_mount` to keep the body default. Theme selection, named-theme
+state, and persistence belong to the consuming application rather than this
+kit.
+
+### Migrating existing generated CSS
+
+Run `leptos_ui_kit sync` after upgrading. An untouched tracked managed block is
+rewritten to the semantic fallback form, the `tokens` block is installed, and
+the lock and desired state are reconciled. A locally edited managed block is
+never overwritten. Move custom declarations outside the managed markers (for
+example, into `styles/themes.css`), restore or reinstall the generated block,
+run `sync`, then reapply the application-owned overrides after `kit.css`.
 
 ## Version
 

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog and this project adheres to
 Semantic Versioning.
 
+## [Unreleased]
+
+- Add the packaged v1 semantic theme contract and CSS-only `tokens` foundation
+  item, installed before every styled built-in component.
+- Replace component `:root` aliases with property-local semantic and structural
+  fallbacks while preserving existing component override names.
+- Add scoped-theme support for `DialogContent` through its optional portal
+  mount, while retaining the document-body default.
+- Reconcile existing untouched generated CSS through `sync`, preserve edited
+  managed blocks as conflicts, and extend strict doctor and fixture coverage.
+- Document theme stylesheet ordering, nested scopes, dependency requirements,
+  and migration guidance.
+
 ## [0.1.0] - 2026-07-15
 
 - Initial crates.io release.
