@@ -1775,6 +1775,26 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn doctor_strict_passes_after_sync_reconciles_button_dependencies() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        run(vec![OsString::from("init")], root).expect("run init");
+        write_desired_button_config(root);
+
+        run(vec![OsString::from("sync")], root).expect("run sync");
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert!(output.contains("managed CSS block tokens matches generated source"));
+        assert!(output.contains("desired item builtin:tokens is installed"));
+        assert!(output.contains("desired item builtin:spinner is installed"));
+        assert!(output.contains("desired item builtin:button is installed"));
+    }
+
+    #[test]
     fn doctor_strict_json_passes_after_init_and_add() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();

@@ -2614,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_migrates_an_untouched_legacy_install_with_tokens() {
+    fn sync_migrates_an_untouched_legacy_install_with_tokens_and_custom_stylesheet() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join("src")).expect("create src");
@@ -2623,9 +2623,18 @@ mod tests {
             "<html><head></head><body></body></html>\n",
         )
         .expect("write index");
+        let config = canonical_kit_json().expect("canonical config").replace(
+            "\"css\": \"styles/kit.css\"",
+            "\"css\": \"styles/custom.css\"",
+        );
+        write_kit_config(root, config);
         apply_init(root).expect("init");
         apply_add(root, "button").expect("install button");
-        remove_tokens_from_install(root);
+        reconstruct_legacy_button_install(root);
+        let css_path = root.join("styles/custom.css");
+        let mut legacy_css = fs::read_to_string(&css_path).expect("read legacy CSS");
+        legacy_css.push_str("\n:root {\n  --kit-button-gap: 0.75rem;\n}\n");
+        fs::write(&css_path, legacy_css).expect("write app override");
 
         let first = apply_sync(root).expect("migrate legacy install");
         let second = apply_sync(root).expect("second sync");
@@ -2644,11 +2653,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["tokens", "spinner", "button"]
         );
-        assert!(
-            fs::read_to_string(root.join("styles/kit.css"))
-                .expect("read CSS")
-                .contains("/* leptos-ui-kit:start tokens */")
+        let css = fs::read_to_string(&css_path).expect("read migrated CSS");
+        assert!(css.contains("/* leptos-ui-kit:start tokens */"));
+        assert!(css.contains("var(--kit-button-gap, 0.375rem)"));
+        assert!(css.contains("--kit-button-gap: 0.75rem;"));
+        assert!(!css.contains("--kit-button-gap: 0.375rem;"));
+        assert_eq!(
+            extract_managed_css_block(&css, "button")
+                .expect("extract button")
+                .expect("button block"),
+            read_built_in_registry_source("styles/button.css").expect("read button source")
         );
+
+        let lock = parse_install_lock_str_at_path(
+            &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read lock"),
+            Path::new(DEFAULT_KIT_LOCK_PATH),
+        )
+        .expect("parse lock");
+        for item in ["builtin:tokens", "builtin:spinner", "builtin:button"] {
+            assert!(lock.items.contains_key(item));
+        }
+        assert!(
+            lock.items
+                .values()
+                .flat_map(|item| &item.style_blocks)
+                .all(|block| block.css_path == "styles/custom.css")
+        );
+        for (block_id, source_path) in [
+            ("tokens", "styles/tokens.css"),
+            ("spinner", "styles/spinner.css"),
+            ("button", "styles/button.css"),
+        ] {
+            let item_id = lock
+                .style_blocks_by_id
+                .get(block_id)
+                .expect("style block owner");
+            let block = lock.items[item_id]
+                .style_blocks
+                .iter()
+                .find(|block| block.block_id == block_id)
+                .expect("installed style block");
+            let source = read_built_in_registry_source(source_path).expect("read style source");
+
+            assert_eq!(block.generated_hash, hash_bytes(source.as_bytes()));
+        }
     }
 
     #[test]
@@ -2663,7 +2711,7 @@ mod tests {
         .expect("write index");
         apply_init(root).expect("init");
         apply_add(root, "button").expect("install button");
-        remove_tokens_from_install(root);
+        reconstruct_legacy_button_install(root);
         let css_path = root.join("styles/kit.css");
         let edited_css = fs::read_to_string(&css_path)
             .expect("read CSS")
@@ -2687,6 +2735,7 @@ mod tests {
             lock_before
         );
         assert!(!css_before.contains("/* leptos-ui-kit:start tokens */"));
+        assert!(css_before.contains("--kit-button-gap: 0.375rem;"));
     }
 
     #[test]
@@ -2798,6 +2847,12 @@ mod tests {
         write_kit_config(root, kit_config_to_json(&config).expect("serialize config"));
     }
 
+    fn reconstruct_legacy_button_install(root: &Path) {
+        remove_tokens_from_install(root);
+        replace_legacy_css_block(root, "button", LEGACY_BUTTON_CSS);
+        replace_legacy_css_block(root, "spinner", LEGACY_SPINNER_CSS);
+    }
+
     fn remove_tokens_from_install(root: &Path) {
         let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
         let mut config =
@@ -2807,7 +2862,7 @@ mod tests {
         let config_content = kit_config_to_json(&config).expect("serialize config");
         fs::write(&config_path, &config_content).expect("write legacy config");
 
-        let css_path = root.join("styles/kit.css");
+        let css_path = root.join(&config.styles.css);
         let css = fs::read_to_string(&css_path).expect("read CSS");
         let tokens = extract_managed_css_block(&css, "tokens")
             .expect("extract tokens")
@@ -2829,6 +2884,77 @@ mod tests {
         )
         .expect("write legacy lock");
     }
+
+    fn replace_legacy_css_block(root: &Path, block_id: &str, replacement: &str) {
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+        )
+        .expect("parse config");
+        let css_path = root.join(&config.styles.css);
+        let css = fs::read_to_string(&css_path).expect("read CSS");
+        let current = extract_managed_css_block(&css, block_id)
+            .expect("extract managed block")
+            .expect("managed block");
+        fs::write(&css_path, css.replacen(&current, replacement, 1)).expect("write legacy CSS");
+
+        let lock_path = root.join(DEFAULT_KIT_LOCK_PATH);
+        let mut lock = parse_install_lock_str_at_path(
+            &fs::read_to_string(&lock_path).expect("read lock"),
+            Path::new(DEFAULT_KIT_LOCK_PATH),
+        )
+        .expect("parse lock");
+        let item_id = lock
+            .style_blocks_by_id
+            .get(block_id)
+            .expect("style block owner")
+            .clone();
+        let block = lock
+            .items
+            .get_mut(&item_id)
+            .expect("installed item")
+            .style_blocks
+            .iter_mut()
+            .find(|block| block.block_id == block_id)
+            .expect("installed style block");
+        block.generated_hash = hash_bytes(replacement.as_bytes());
+        fs::write(
+            &lock_path,
+            lock_to_json(&lock).expect("serialize legacy lock"),
+        )
+        .expect("write legacy lock");
+    }
+
+    const LEGACY_BUTTON_CSS: &str = r#"/* leptos-ui-kit:start button */
+:root {
+  --kit-color-primary: #111827;
+  --kit-button-gap: 0.375rem;
+}
+
+.kit-button {
+  display: inline-flex;
+  gap: var(--kit-button-gap);
+}
+
+.kit-button--primary {
+  background: var(--kit-color-primary);
+}
+/* leptos-ui-kit:end button */
+"#;
+
+    const LEGACY_SPINNER_CSS: &str = r#"/* leptos-ui-kit:start spinner */
+:root {
+  --kit-spinner-track-color: rgb(0 0 0 / 20%);
+}
+
+.kit-spinner {
+  color: currentColor;
+}
+
+.kit-spinner-mark {
+  border-color: var(--kit-spinner-track-color);
+}
+/* leptos-ui-kit:end spinner */
+"#;
 
     #[test]
     fn css_patcher_appends_managed_block() {
