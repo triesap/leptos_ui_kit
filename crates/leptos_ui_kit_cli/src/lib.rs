@@ -19,8 +19,8 @@ use leptos_ui_kit_registry::{
     CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DependencyRequirement,
     DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY,
     TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output, canonical_tool_config,
-    detect_cargo_plan_requirements, load_built_in_registry_item, load_registry_item,
-    read_built_in_registry_source,
+    detect_cargo_plan_requirements, load_built_in_registry_item, load_built_in_registry_root,
+    load_registry_item, read_built_in_registry_source,
 };
 use serde::Serialize;
 
@@ -639,7 +639,7 @@ fn version_output() -> VersionCommandOutput {
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
     let command_output = InfoCommandOutput {
         info: output.clone(),
-        registry_available: load_built_in_registry_item("button").is_ok(),
+        registry_available: validate_built_in_registry_assets().is_ok(),
         installed_lock: read_installed_lock(
             &output.detected.project_root,
             output.kit_config.as_ref(),
@@ -734,6 +734,22 @@ fn registry_item_source_output(
     })
 }
 
+fn validate_built_in_registry_assets() -> Result<(), String> {
+    let root = load_built_in_registry_root().map_err(|error| error.to_string())?;
+
+    for entry in root.items {
+        let item = load_built_in_registry_item(&entry.name).map_err(|error| error.to_string())?;
+        for file in &item.targets.ui_files {
+            read_built_in_registry_source(&file.source).map_err(|error| error.to_string())?;
+        }
+        for style in &item.targets.style_blocks {
+            read_built_in_registry_source(&style.source).map_err(|error| error.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
     let mut checks = Vec::new();
 
@@ -760,14 +776,6 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 "leptos",
                 info.detected.dependency_plan.leptos.status,
             );
-            dependency_check(
-                &mut checks,
-                strict,
-                "dependency.leptos_router",
-                "leptos_router",
-                info.detected.dependency_plan.leptos_router.status,
-            );
-
             checks.extend(lock_checks(cwd, strict, info.kit_config.as_ref()));
             checks.extend(stylesheet_checks(cwd, strict, &info));
             checks.extend(registry_dependency_checks(cwd, strict, &info));
@@ -777,30 +785,12 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
         }
     }
 
-    match load_built_in_registry_item("button") {
-        Ok(item) => {
-            let mut registry_ok = true;
-            for file in &item.targets.ui_files {
-                registry_ok &= read_built_in_registry_source(&file.source).is_ok();
-            }
-            for style in &item.targets.style_blocks {
-                registry_ok &= read_built_in_registry_source(&style.source).is_ok();
-            }
-            if registry_ok {
-                checks.push(DoctorCheck::pass(
-                    "registry",
-                    "built-in registry button assets are available",
-                ));
-            } else {
-                checks.push(DoctorCheck::fail(
-                    "registry",
-                    "built-in registry button assets are incomplete",
-                ));
-            }
-        }
-        Err(error) => {
-            checks.push(DoctorCheck::fail("registry", error.to_string()));
-        }
+    match validate_built_in_registry_assets() {
+        Ok(()) => checks.push(DoctorCheck::pass(
+            "registry",
+            "all built-in registry assets are available",
+        )),
+        Err(error) => checks.push(DoctorCheck::fail("registry", error)),
     }
 
     if check {
@@ -1416,28 +1406,19 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
         .iter()
         .filter_map(|check| match check.status {
             DoctorCheckStatus::Pass => None,
-            DoctorCheckStatus::Warning => Some(Diagnostic::new(
-                DiagnosticLevel::Warning,
-                format!("doctor.{}", check.name),
-                check.message.clone(),
-            )),
-            DoctorCheckStatus::Fail => Some(Diagnostic::new(
-                DiagnosticLevel::Error,
-                format!("doctor.{}", check.name),
-                check.message.clone(),
-            )),
+            DoctorCheckStatus::Warning => Some((DiagnosticLevel::Warning, check)),
+            DoctorCheckStatus::Fail => Some((DiagnosticLevel::Error, check)),
         })
-        .map(|diagnostic| {
-            if let Some(path) = output
-                .checks
-                .iter()
-                .find(|check| format!("doctor.{}", check.name) == diagnostic.code)
-                .and_then(|check| check.path.clone())
-            {
-                diagnostic.with_path(path)
-            } else {
-                diagnostic
-            }
+        .map(|(level, check)| {
+            let diagnostic = Diagnostic::new(
+                level,
+                format!("doctor.{}", check.name),
+                check.message.clone(),
+            );
+            check
+                .path
+                .clone()
+                .map_or(diagnostic.clone(), |path| diagnostic.with_path(path))
         })
         .collect()
 }
@@ -1590,6 +1571,17 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"source\""));
         assert!(output.contains("\"features\""));
+    }
+
+    #[test]
+    fn view_envelope_json_outputs_css_only_tokens_item() {
+        let item = load_registry_item("tokens", Path::new(".")).expect("load tokens item");
+        let output = render_registry_item(&item, true, true).expect("render json");
+
+        assert!(output.contains("\"name\": \"tokens\""));
+        assert!(output.contains("\"kind\": \"foundation\""));
+        assert!(output.contains("styles/tokens.css"));
+        assert!(!output.contains("\"kind\": \"rust\""));
     }
 
     #[test]
@@ -1827,6 +1819,60 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"pass\""));
         assert!(output.contains("\"name\": \"dependency.registry.leptos\""));
         assert!(!output.contains("\"name\": \"dependency.registry.leptos_router\""));
+    }
+
+    #[test]
+    fn doctor_strict_passes_after_tokens_only_add_without_router() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("tokens")], root).expect("run add tokens");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert!(output.contains("all built-in registry assets are available"));
+        assert!(!output.contains("\"name\": \"dependency.leptos_router\""));
+        assert!(!output.contains("\"name\": \"dependency.registry.leptos_router\""));
+    }
+
+    #[test]
+    fn doctor_diagnostics_preserve_each_duplicate_check_path() {
+        let output = DoctorOutput {
+            project_root: PathBuf::from("."),
+            strict: true,
+            check: false,
+            trunk_build: false,
+            checks: vec![
+                DoctorCheck::warning("style_block", "first").with_path("first.css"),
+                DoctorCheck::warning("style_block", "second").with_path("second.css"),
+            ],
+        };
+        let diagnostics = doctor_diagnostics(&output);
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].path.as_deref(), Some("first.css"));
+        assert_eq!(diagnostics[1].path.as_deref(), Some("second.css"));
     }
 
     #[test]

@@ -204,7 +204,7 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ThemeContr
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use serde_json::json;
 
@@ -213,7 +213,7 @@ mod tests {
         ThemeContractError, ThemeToken, ThemeTokenCategory, load_built_in_theme_contract,
         parse_theme_contract_str,
     };
-    use crate::SCHEMA_VERSION;
+    use crate::{SCHEMA_VERSION, read_built_in_registry_source};
 
     fn valid_contract() -> ThemeContract {
         ThemeContract {
@@ -359,5 +359,37 @@ mod tests {
         .expect("parse public schema");
 
         assert_eq!(package_value, public_value);
+    }
+
+    #[test]
+    fn tokens_css_defaults_match_the_contract() {
+        let contract = load_built_in_theme_contract().expect("load built-in contract");
+        let css = read_built_in_registry_source("styles/tokens.css").expect("read tokens CSS");
+        let defaults = css_token_defaults(&css);
+        let contract_defaults = contract
+            .tokens
+            .into_iter()
+            .map(|token| (token.name, token.default_value))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(defaults, contract_defaults);
+        assert_eq!(css.matches(":root").count(), 1);
+        assert!(css.contains("color-scheme: light;"));
+    }
+
+    fn css_token_defaults(input: &str) -> BTreeMap<String, String> {
+        input
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let (name, value) = line.split_once(':')?;
+                name.starts_with("--kit-").then(|| {
+                    (
+                        name.to_owned(),
+                        value.trim().trim_end_matches(';').trim().to_owned(),
+                    )
+                })
+            })
+            .collect()
     }
 }

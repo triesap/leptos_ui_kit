@@ -42,6 +42,10 @@
     {
       "name": "tabs",
       "path": "ui/tabs.json"
+    },
+    {
+      "name": "tokens",
+      "path": "foundation/tokens.json"
     }
   ]
 }

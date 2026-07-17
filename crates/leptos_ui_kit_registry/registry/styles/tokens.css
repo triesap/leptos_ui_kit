@@ -1,0 +1,48 @@
+/* leptos-ui-kit:start tokens */
+:root {
+  color-scheme: light;
+  --kit-color-canvas: #f8fafc;
+  --kit-color-surface: #ffffff;
+  --kit-color-surface-raised: #ffffff;
+  --kit-color-surface-hover: #f3f4f6;
+  --kit-color-surface-active: #e5e7eb;
+  --kit-color-text: #111827;
+  --kit-color-text-secondary: #374151;
+  --kit-color-text-muted: #4b5563;
+  --kit-color-border: #d1d5db;
+  --kit-color-border-strong: #9ca3af;
+  --kit-color-primary: #111827;
+  --kit-color-primary-hover: #1f2937;
+  --kit-color-primary-foreground: #ffffff;
+  --kit-color-secondary: #ffffff;
+  --kit-color-secondary-hover: #f3f4f6;
+  --kit-color-secondary-foreground: #111827;
+  --kit-color-accent: #2563eb;
+  --kit-color-accent-hover: #1d4ed8;
+  --kit-color-accent-foreground: #ffffff;
+  --kit-color-info: #0284c7;
+  --kit-color-info-foreground: #ffffff;
+  --kit-color-success: #16a34a;
+  --kit-color-success-foreground: #ffffff;
+  --kit-color-warning: #d97706;
+  --kit-color-warning-foreground: #111827;
+  --kit-color-danger: #dc2626;
+  --kit-color-danger-hover: #b91c1c;
+  --kit-color-danger-foreground: #ffffff;
+  --kit-color-link: currentColor;
+  --kit-color-link-hover: currentColor;
+  --kit-focus-ring: #2563eb;
+  --kit-radius-sm: 0.25rem;
+  --kit-radius-md: 0.375rem;
+  --kit-radius-lg: 0.5rem;
+  --kit-radius-full: 999px;
+  --kit-border-width: 1px;
+  --kit-shadow-sm: 0 1px 2px rgb(15 23 42 / 8%);
+  --kit-shadow-md: 0 12px 28px rgb(15 23 42 / 14%);
+  --kit-shadow-lg: 0 20px 40px rgb(15 23 42 / 18%);
+  --kit-duration-fast: 120ms;
+  --kit-duration-normal: 140ms;
+  --kit-easing-standard: ease;
+  --kit-disabled-opacity: 0.55;
+}
+/* leptos-ui-kit:end tokens */

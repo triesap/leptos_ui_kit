@@ -16,9 +16,9 @@ use leptos_ui_kit_registry::{
     SCHEMA_VERSION, canonical_kit_json, desired_builtin_anchor_item, desired_builtin_button_item,
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
     desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
-    desired_builtin_status_item, desired_builtin_tabs_item, kit_config_to_json,
-    kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
-    read_built_in_registry_source, resolve_built_in_registry_items,
+    desired_builtin_status_item, desired_builtin_tabs_item, desired_builtin_tokens_item,
+    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
+    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -562,6 +562,7 @@ fn desired_builtin_item(
         "spinner" => Ok(desired_builtin_spinner_item()),
         "status" => Ok(desired_builtin_status_item()),
         "tabs" => Ok(desired_builtin_tabs_item()),
+        "tokens" => Ok(desired_builtin_tokens_item()),
         _ => Err(RegistryError::BuiltInNotFound(name.to_owned())),
     }
 }
@@ -709,29 +710,32 @@ fn plan_built_in_item(
         lock.files_by_path.insert(logical_path, item_id.clone());
     }
 
-    let components_mod = planned_or_existing_content(files, project_root, "src/components/mod.rs")?;
-    let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
-    upsert_planned_file(
-        project_root,
-        files,
-        changes,
-        "src/components/mod.rs",
-        patched_components_mod,
-        ChangeKind::UpdateFile,
-        Some(&item_id),
-    )?;
+    if !item.targets.ui_files.is_empty() {
+        let components_mod =
+            planned_or_existing_content(files, project_root, "src/components/mod.rs")?;
+        let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
+        upsert_planned_file(
+            project_root,
+            files,
+            changes,
+            "src/components/mod.rs",
+            patched_components_mod,
+            ChangeKind::UpdateFile,
+            Some(&item_id),
+        )?;
 
-    let ui_mod = planned_or_existing_content(files, project_root, "src/components/ui/mod.rs")?;
-    let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item)?)?;
-    upsert_planned_file(
-        project_root,
-        files,
-        changes,
-        "src/components/ui/mod.rs",
-        patched_ui_mod,
-        ChangeKind::UpdateFile,
-        Some(&item_id),
-    )?;
+        let ui_mod = planned_or_existing_content(files, project_root, "src/components/ui/mod.rs")?;
+        let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item)?)?;
+        upsert_planned_file(
+            project_root,
+            files,
+            changes,
+            "src/components/ui/mod.rs",
+            patched_ui_mod,
+            ChangeKind::UpdateFile,
+            Some(&item_id),
+        )?;
+    }
 
     for style in &item.targets.style_blocks {
         let generated = read_built_in_registry_source(&style.source)?;
@@ -2411,6 +2415,59 @@ mod tests {
         assert_eq!(
             lock.files_by_path.get("src/components/ui/nested/root.rs"),
             Some(&"builtin:nested".to_owned())
+        );
+    }
+
+    #[test]
+    fn add_tokens_updates_only_css_config_and_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        let components_mod =
+            fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod");
+        let ui_mod =
+            fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod");
+
+        let plan = plan_add(root, "tokens").expect("plan tokens");
+        let paths = plan
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&DEFAULT_KIT_CONFIG_PATH));
+        assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
+        assert!(paths.contains(&"styles/kit.css"));
+        assert!(!paths.contains(&"src/components/mod.rs"));
+        assert!(!paths.contains(&"src/components/ui/mod.rs"));
+        assert!(!paths.contains(&"src/components/ui/tokens.rs"));
+        assert!(plan.lock.items["builtin:tokens"].files.is_empty());
+        assert_eq!(plan.lock.items["builtin:tokens"].style_blocks.len(), 1);
+
+        apply_add(root, "tokens").expect("apply tokens");
+        assert_eq!(
+            fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod"),
+            components_mod
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod"),
+            ui_mod
+        );
+        assert!(
+            fs::read_to_string(root.join("styles/kit.css"))
+                .expect("read css")
+                .contains("/* leptos-ui-kit:start tokens */")
+        );
+        assert!(
+            apply_add(root, "tokens")
+                .expect("second tokens add")
+                .is_empty()
         );
     }
 

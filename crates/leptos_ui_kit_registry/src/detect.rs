@@ -8,9 +8,8 @@ use toml::Value as TomlValue;
 
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
-    DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, NormalizeOptions,
-    NormalizedProjectConfig, RenderMode, WorkspaceMode, normalize_single_crate_project,
-    parse_kit_json_str,
+    DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
+    RenderMode, WorkspaceMode, normalize_single_crate_project, parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -69,7 +68,6 @@ pub struct DetectedProject {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyPlan {
     pub leptos: DependencyRequirement,
-    pub leptos_router: DependencyRequirement,
 }
 
 impl DependencyPlan {
@@ -83,20 +81,7 @@ impl DependencyPlan {
                 required: true,
             },
         );
-        let leptos_router = dependency_requirement_for_cargo_plan(
-            manifest,
-            &CargoPlanEntry {
-                crate_name: "leptos_router".to_owned(),
-                source: CargoPlanSource::version(LEPTOS_ROUTER_VERSION),
-                features: Vec::new(),
-                required: true,
-            },
-        );
-
-        Self {
-            leptos,
-            leptos_router,
-        }
+        Self { leptos }
     }
 }
 
@@ -463,10 +448,6 @@ leptos_router = "0.9.0-alpha"
             detected.dependency_plan.leptos.status,
             DependencyStatus::Satisfied
         );
-        assert_eq!(
-            detected.dependency_plan.leptos_router.status,
-            DependencyStatus::Satisfied
-        );
         assert_eq!(detected.kit_config_path, None);
     }
 
@@ -542,10 +523,6 @@ edition = "2024"
 
         assert_eq!(
             detected.dependency_plan.leptos.status,
-            DependencyStatus::Missing
-        );
-        assert_eq!(
-            detected.dependency_plan.leptos_router.status,
             DependencyStatus::Missing
         );
         assert_eq!(detected.render_mode, None);
