@@ -1,0 +1,309 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/theme-contract.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "contractVersion": "1",
+  "name": "leptos-ui-kit-semantic",
+  "tokens": [
+    {
+      "name": "--kit-color-canvas",
+      "category": "color",
+      "required": true,
+      "default": "#f8fafc",
+      "description": "Application canvas or page background."
+    },
+    {
+      "name": "--kit-color-surface",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Default component and control surface."
+    },
+    {
+      "name": "--kit-color-surface-raised",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Elevated overlay, menu, and dialog surface."
+    },
+    {
+      "name": "--kit-color-surface-hover",
+      "category": "color",
+      "required": true,
+      "default": "#f3f4f6",
+      "description": "Hover surface for neutral interactive controls."
+    },
+    {
+      "name": "--kit-color-surface-active",
+      "category": "color",
+      "required": true,
+      "default": "#e5e7eb",
+      "description": "Pressed or selected neutral surface."
+    },
+    {
+      "name": "--kit-color-text",
+      "category": "color",
+      "required": true,
+      "default": "#111827",
+      "description": "Primary foreground text and icon color."
+    },
+    {
+      "name": "--kit-color-text-secondary",
+      "category": "color",
+      "required": true,
+      "default": "#374151",
+      "description": "Secondary but still prominent foreground."
+    },
+    {
+      "name": "--kit-color-text-muted",
+      "category": "color",
+      "required": true,
+      "default": "#4b5563",
+      "description": "Descriptions, hints, and muted foreground."
+    },
+    {
+      "name": "--kit-color-border",
+      "category": "color",
+      "required": true,
+      "default": "#d1d5db",
+      "description": "Default component border and separator."
+    },
+    {
+      "name": "--kit-color-border-strong",
+      "category": "color",
+      "required": true,
+      "default": "#9ca3af",
+      "description": "Emphasized border or separator."
+    },
+    {
+      "name": "--kit-color-primary",
+      "category": "color",
+      "required": true,
+      "default": "#111827",
+      "description": "Primary action background or emphasis color."
+    },
+    {
+      "name": "--kit-color-primary-hover",
+      "category": "color",
+      "required": true,
+      "default": "#1f2937",
+      "description": "Primary action hover color."
+    },
+    {
+      "name": "--kit-color-primary-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Foreground rendered on the primary color."
+    },
+    {
+      "name": "--kit-color-secondary",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Secondary action background color."
+    },
+    {
+      "name": "--kit-color-secondary-hover",
+      "category": "color",
+      "required": true,
+      "default": "#f3f4f6",
+      "description": "Secondary action hover color."
+    },
+    {
+      "name": "--kit-color-secondary-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#111827",
+      "description": "Foreground rendered on the secondary color."
+    },
+    {
+      "name": "--kit-color-accent",
+      "category": "color",
+      "required": true,
+      "default": "#2563eb",
+      "description": "Accent emphasis color."
+    },
+    {
+      "name": "--kit-color-accent-hover",
+      "category": "color",
+      "required": true,
+      "default": "#1d4ed8",
+      "description": "Accent hover color."
+    },
+    {
+      "name": "--kit-color-accent-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Foreground rendered on the accent color."
+    },
+    {
+      "name": "--kit-color-info",
+      "category": "color",
+      "required": true,
+      "default": "#0284c7",
+      "description": "Informational feedback background or emphasis."
+    },
+    {
+      "name": "--kit-color-info-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Foreground rendered on the info color."
+    },
+    {
+      "name": "--kit-color-success",
+      "category": "color",
+      "required": true,
+      "default": "#16a34a",
+      "description": "Success feedback background or emphasis."
+    },
+    {
+      "name": "--kit-color-success-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Foreground rendered on the success color."
+    },
+    {
+      "name": "--kit-color-warning",
+      "category": "color",
+      "required": true,
+      "default": "#d97706",
+      "description": "Warning feedback background or emphasis."
+    },
+    {
+      "name": "--kit-color-warning-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#111827",
+      "description": "Foreground rendered on the warning color."
+    },
+    {
+      "name": "--kit-color-danger",
+      "category": "color",
+      "required": true,
+      "default": "#dc2626",
+      "description": "Danger, destructive, invalid, or error emphasis."
+    },
+    {
+      "name": "--kit-color-danger-hover",
+      "category": "color",
+      "required": true,
+      "default": "#b91c1c",
+      "description": "Danger action hover color."
+    },
+    {
+      "name": "--kit-color-danger-foreground",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Foreground rendered on the danger color."
+    },
+    {
+      "name": "--kit-color-link",
+      "category": "color",
+      "required": true,
+      "default": "currentColor",
+      "description": "Default inline-link foreground."
+    },
+    {
+      "name": "--kit-color-link-hover",
+      "category": "color",
+      "required": true,
+      "default": "currentColor",
+      "description": "Inline-link hover foreground."
+    },
+    {
+      "name": "--kit-focus-ring",
+      "category": "color",
+      "required": true,
+      "default": "#2563eb",
+      "description": "Keyboard focus ring color."
+    },
+    {
+      "name": "--kit-radius-sm",
+      "category": "shape",
+      "required": true,
+      "default": "0.25rem",
+      "description": "Small control or inner radius."
+    },
+    {
+      "name": "--kit-radius-md",
+      "category": "shape",
+      "required": true,
+      "default": "0.375rem",
+      "description": "Default component radius."
+    },
+    {
+      "name": "--kit-radius-lg",
+      "category": "shape",
+      "required": true,
+      "default": "0.5rem",
+      "description": "Large surface radius."
+    },
+    {
+      "name": "--kit-radius-full",
+      "category": "shape",
+      "required": true,
+      "default": "999px",
+      "description": "Fully rounded shape radius."
+    },
+    {
+      "name": "--kit-border-width",
+      "category": "shape",
+      "required": true,
+      "default": "1px",
+      "description": "Default component border width."
+    },
+    {
+      "name": "--kit-shadow-sm",
+      "category": "elevation",
+      "required": true,
+      "default": "0 1px 2px rgb(15 23 42 / 8%)",
+      "description": "Subtle low elevation shadow."
+    },
+    {
+      "name": "--kit-shadow-md",
+      "category": "elevation",
+      "required": true,
+      "default": "0 12px 28px rgb(15 23 42 / 14%)",
+      "description": "Menu and popover elevation shadow."
+    },
+    {
+      "name": "--kit-shadow-lg",
+      "category": "elevation",
+      "required": true,
+      "default": "0 20px 40px rgb(15 23 42 / 18%)",
+      "description": "Dialog and prominent overlay elevation shadow."
+    },
+    {
+      "name": "--kit-duration-fast",
+      "category": "motion",
+      "required": true,
+      "default": "120ms",
+      "description": "Fast UI state transition duration."
+    },
+    {
+      "name": "--kit-duration-normal",
+      "category": "motion",
+      "required": true,
+      "default": "140ms",
+      "description": "Normal overlay or surface transition duration."
+    },
+    {
+      "name": "--kit-easing-standard",
+      "category": "motion",
+      "required": true,
+      "default": "ease",
+      "description": "Default UI transition timing function."
+    },
+    {
+      "name": "--kit-disabled-opacity",
+      "category": "state",
+      "required": true,
+      "default": "0.55",
+      "description": "Default opacity for disabled controls."
+    }
+  ]
+}

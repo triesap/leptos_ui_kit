@@ -5,6 +5,7 @@
 mod config;
 mod detect;
 mod item;
+mod theme_contract;
 
 pub use config::{
     ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_KIT_DIR, DEFAULT_UI_DIR,
@@ -36,4 +37,9 @@ pub use item::{
     parse_registry_item_str, parse_registry_root_str, read_built_in_registry_source,
     registry_item_content_hash, resolve_built_in_registry_items, resolve_registry_targets,
     validate_registry_graph,
+};
+pub use theme_contract::{
+    THEME_CONTRACT_NAME, THEME_CONTRACT_SCHEMA_URL, THEME_CONTRACT_VERSION, ThemeContract,
+    ThemeContractError, ThemeToken, ThemeTokenCategory, load_built_in_theme_contract,
+    parse_theme_contract_str,
 };
