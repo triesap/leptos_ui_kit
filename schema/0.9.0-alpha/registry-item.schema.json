@@ -29,7 +29,10 @@
       "pattern": "^[a-z][a-z0-9-]*$"
     },
     "kind": {
-      "const": "ui"
+      "enum": [
+        "ui",
+        "foundation"
+      ]
     },
     "version": {
       "const": "0.9.0-alpha"
@@ -257,5 +260,29 @@
     "extra": {
       "type": "object"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "foundation"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "maxItems": 0
+          },
+          "styles": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
 }

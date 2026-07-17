@@ -190,7 +190,26 @@ impl RegistryItem {
             entry.validate()?;
         }
 
-        Ok(())
+        match self.kind {
+            RegistryItemKind::Ui => Ok(()),
+            RegistryItemKind::Foundation => {
+                if !self.files.is_empty() {
+                    return Err(RegistryError::InvalidValue {
+                        field: "files",
+                        expected: "no Rust UI files for a foundation item".to_owned(),
+                        actual: format!("{} file targets", self.files.len()),
+                    });
+                }
+                if self.styles.is_empty() {
+                    return Err(RegistryError::InvalidValue {
+                        field: "styles",
+                        expected: "at least one managed CSS style for a foundation item".to_owned(),
+                        actual: "empty array".to_owned(),
+                    });
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -198,12 +217,14 @@ impl RegistryItem {
 #[serde(rename_all = "kebab-case")]
 pub enum RegistryItemKind {
     Ui,
+    Foundation,
 }
 
 impl fmt::Display for RegistryItemKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ui => write!(f, "ui"),
+            Self::Foundation => write!(f, "foundation"),
         }
     }
 }
@@ -1926,6 +1947,53 @@ mod tests {
     }
 
     #[test]
+    fn foundation_items_require_styles_and_forbid_ui_files() {
+        foundation_item()
+            .validate()
+            .expect("foundation CSS item should validate");
+
+        let mut no_styles = foundation_item();
+        no_styles.styles.clear();
+        assert!(matches!(
+            no_styles.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "styles",
+                ..
+            })
+        ));
+
+        let mut with_ui_file = foundation_item();
+        with_ui_file.files = item_with_name_and_target("ui", "ui.rs", "ui", &[]).files;
+        assert!(matches!(
+            with_ui_file.validate(),
+            Err(RegistryError::InvalidValue { field: "files", .. })
+        ));
+    }
+
+    #[test]
+    fn public_item_schema_declares_foundation_invariants() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/0.9.0-alpha/registry-item.schema.json");
+        let schema = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(path).expect("read schema"),
+        )
+        .expect("parse schema");
+
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            serde_json::json!(["ui", "foundation"])
+        );
+        assert_eq!(
+            schema["allOf"][0]["then"]["properties"]["files"]["maxItems"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            schema["allOf"][0]["then"]["properties"]["styles"]["minItems"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[test]
     fn graph_validates_registry_dependency_order() {
         let dependency = item_with_name_and_target("base", "base.rs", "base", &[]);
         let dependent = item_with_name_and_target("button", "button.rs", "button", &["base"]);
@@ -2030,5 +2098,12 @@ mod tests {
             cargo_plan: vec![],
             extra: BTreeMap::new(),
         }
+    }
+
+    fn foundation_item() -> RegistryItem {
+        let mut item = item_with_name_and_target("foundation", "unused.rs", "foundation", &[]);
+        item.kind = RegistryItemKind::Foundation;
+        item.files.clear();
+        item
     }
 }

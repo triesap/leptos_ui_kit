@@ -173,8 +173,11 @@
               "dialog",
               "field",
               "menu",
+              "router-link",
               "spinner",
-              "tabs"
+              "status",
+              "tabs",
+              "tokens"
             ]
           },
           "source": {

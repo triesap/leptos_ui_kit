@@ -292,6 +292,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Status, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Tokens, RegistrySource::Builtin) => Ok(()),
         }
     }
 
@@ -313,6 +314,7 @@ pub enum DesiredItemName {
     Spinner,
     Status,
     Tabs,
+    Tokens,
 }
 
 impl DesiredItemName {
@@ -328,6 +330,7 @@ impl DesiredItemName {
             Self::Spinner => "spinner",
             Self::Status => "status",
             Self::Tabs => "tabs",
+            Self::Tokens => "tokens",
         }
     }
 }
@@ -501,6 +504,13 @@ pub fn desired_builtin_status_item() -> DesiredItemConfig {
 pub fn desired_builtin_tabs_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Tabs,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_tokens_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Tokens,
         source: RegistrySource::Builtin,
     }
 }
@@ -746,6 +756,51 @@ mod tests {
         assert_eq!(config.items.len(), 1);
         assert_eq!(config.items[0].name, DesiredItemName::Button);
         assert_eq!(config.items[0].source, RegistrySource::Builtin);
+    }
+
+    #[test]
+    fn records_desired_builtin_tokens_item() {
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        let config =
+            kit_config_with_desired_item(config, desired_builtin_tokens_item()).expect("add item");
+
+        assert_eq!(config.items.len(), 1);
+        assert_eq!(config.items[0].name, DesiredItemName::Tokens);
+        assert_eq!(config.items[0].source, RegistrySource::Builtin);
+    }
+
+    #[test]
+    fn public_schema_matches_desired_item_vocabulary() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/0.9.0-alpha/kit.schema.json");
+        let schema = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(path).expect("read schema"),
+        )
+        .expect("parse schema");
+        let names = schema["properties"]["items"]["items"]["properties"]["name"]["enum"]
+            .as_array()
+            .expect("desired item enum")
+            .iter()
+            .map(|value| value.as_str().expect("desired item name"))
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            DesiredItemName::Anchor,
+            DesiredItemName::Button,
+            DesiredItemName::Collapsible,
+            DesiredItemName::Dialog,
+            DesiredItemName::Field,
+            DesiredItemName::Menu,
+            DesiredItemName::RouterLink,
+            DesiredItemName::Spinner,
+            DesiredItemName::Status,
+            DesiredItemName::Tabs,
+            DesiredItemName::Tokens,
+        ]
+        .into_iter()
+        .map(DesiredItemName::as_str)
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(names, expected);
     }
 
     #[test]
