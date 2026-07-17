@@ -53,6 +53,7 @@
     }
   ],
   "registryDependencies": [
+    "tokens",
     "spinner"
   ],
   "cargoPlan": [

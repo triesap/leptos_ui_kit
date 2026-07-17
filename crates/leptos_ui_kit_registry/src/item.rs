@@ -1329,7 +1329,7 @@ mod tests {
                 .iter()
                 .any(|behavior| behavior.name == "loading-busy-state" && behavior.required)
         );
-        assert_eq!(item.item.registry_dependencies, ["spinner"]);
+        assert_eq!(item.item.registry_dependencies, ["tokens", "spinner"]);
         assert_eq!(
             item.item.files[0].target.exports,
             ["Button", "ButtonSize", "ButtonType", "ButtonVariant"]
@@ -1400,10 +1400,10 @@ mod tests {
             item.item.accessibility.behaviors[0].name,
             "router-link-semantics"
         );
-        assert_eq!(item.item.registry_dependencies, ["anchor"]);
+        assert_eq!(item.item.registry_dependencies, ["tokens", "anchor"]);
         assert!(item.item.styles.is_empty());
         assert_eq!(item.item.files[0].target.exports, ["RouterLink"]);
-        assert_eq!(resolved_names, ["anchor", "router-link"]);
+        assert_eq!(resolved_names, ["tokens", "anchor", "router-link"]);
     }
 
     #[test]
@@ -2002,6 +2002,37 @@ mod tests {
         let order = validate_registry_graph(&[dependent, dependency]).expect("graph");
 
         assert_eq!(order, vec!["base".to_owned(), "button".to_owned()]);
+    }
+
+    #[test]
+    fn styled_built_in_items_depend_directly_on_tokens() {
+        let root = load_built_in_registry_root().expect("load root");
+
+        for entry in root.items {
+            let item = load_built_in_registry_item(&entry.name).expect("load item");
+            if item.item.name != "tokens" && !item.item.styles.is_empty() {
+                assert!(
+                    item.item
+                        .registry_dependencies
+                        .iter()
+                        .any(|dependency| dependency == "tokens"),
+                    "{} should depend directly on tokens",
+                    item.item.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn button_resolution_is_tokens_spinner_then_button() {
+        let items = resolve_built_in_registry_items(&["button".to_owned()])
+            .expect("resolve button dependencies");
+        let names = items
+            .iter()
+            .map(|item| item.item.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["tokens", "spinner", "button"]);
     }
 
     #[test]

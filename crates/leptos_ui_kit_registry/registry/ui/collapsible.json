@@ -75,7 +75,9 @@
       }
     }
   ],
-  "registryDependencies": [],
+  "registryDependencies": [
+    "tokens"
+  ],
   "cargoPlan": [
     {
       "crate": "leptos",

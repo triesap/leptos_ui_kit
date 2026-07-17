@@ -608,10 +608,36 @@ fn plan_sync_from_config(
     project_root: &Path,
     mut files: Vec<PlannedFile>,
     mut changes: Vec<ChangeRecord>,
-    config: KitConfig,
-    config_content: String,
+    mut config: KitConfig,
+    mut config_content: String,
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
+    let mut requested_names = config
+        .items
+        .iter()
+        .map(|item| item.item_name().to_owned())
+        .collect::<Vec<_>>();
+    requested_names.sort();
+    let resolved_items = resolve_built_in_registry_items(&requested_names)?;
+    let resolved_desired_items = resolved_items
+        .iter()
+        .map(|item| desired_builtin_item(&item.item.name))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if config.items != resolved_desired_items {
+        config.items = resolved_desired_items;
+        config_content = kit_config_to_json(&config)?;
+        upsert_planned_file(
+            project_root,
+            &mut files,
+            &mut changes,
+            DEFAULT_KIT_CONFIG_PATH,
+            config_content.clone(),
+            ChangeKind::UpdateFile,
+            None,
+        )?;
+    }
+
     let config_hash = hash_bytes(config_content.as_bytes());
     let lock_path = install_lock_path(&config);
     let mut lock = load_or_empty_lock(project_root, &lock_path, config_hash.clone())?;
@@ -619,8 +645,7 @@ fn plan_sync_from_config(
     let mut item_ids = Vec::new();
     let mut cargo_plan = Vec::new();
 
-    for desired_item in &config.items {
-        let item = load_built_in_registry_item(desired_item.item_name())?;
+    for item in &resolved_items {
         let item_id = plan_built_in_item(
             project_root,
             &mut files,
@@ -2513,13 +2538,15 @@ mod tests {
             Path::new(DEFAULT_KIT_LOCK_PATH),
         )
         .expect("parse lock");
+        assert!(lock.items.contains_key("builtin:tokens"));
         assert!(lock.items.contains_key("builtin:button"));
         assert!(lock.items.contains_key("builtin:spinner"));
         let config = parse_kit_json_str(
             &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
-        assert_eq!(config.items.len(), 2);
+        assert_eq!(config.items.len(), 3);
+        assert!(config.items.iter().any(|item| item.item_name() == "tokens"));
         assert!(config.items.iter().any(|item| item.item_name() == "button"));
         assert!(
             config
@@ -2555,7 +2582,14 @@ mod tests {
         assert!(paths.contains(&"styles/kit.css"));
         assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
         assert!(!root.join("src/components/ui/button.rs").exists());
-        assert_eq!(plan.item_ids, vec!["builtin:button".to_owned()]);
+        assert_eq!(
+            plan.item_ids,
+            vec![
+                "builtin:tokens".to_owned(),
+                "builtin:spinner".to_owned(),
+                "builtin:button".to_owned()
+            ]
+        );
     }
 
     #[test]
@@ -2577,6 +2611,82 @@ mod tests {
         assert!(!first.is_empty());
         assert!(second.is_empty());
         assert!(root.join("src/components/ui/button.rs").is_file());
+    }
+
+    #[test]
+    fn sync_migrates_an_untouched_legacy_install_with_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        apply_add(root, "button").expect("install button");
+        remove_tokens_from_install(root);
+
+        let first = apply_sync(root).expect("migrate legacy install");
+        let second = apply_sync(root).expect("second sync");
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+        )
+        .expect("parse config");
+
+        assert!(first.item_ids.contains(&"builtin:tokens".to_owned()));
+        assert!(second.is_empty());
+        assert_eq!(
+            config
+                .items
+                .iter()
+                .map(|item| item.item_name())
+                .collect::<Vec<_>>(),
+            ["tokens", "spinner", "button"]
+        );
+        assert!(
+            fs::read_to_string(root.join("styles/kit.css"))
+                .expect("read CSS")
+                .contains("/* leptos-ui-kit:start tokens */")
+        );
+    }
+
+    #[test]
+    fn sync_refuses_edited_legacy_blocks_without_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        apply_init(root).expect("init");
+        apply_add(root, "button").expect("install button");
+        remove_tokens_from_install(root);
+        let css_path = root.join("styles/kit.css");
+        let edited_css = fs::read_to_string(&css_path)
+            .expect("read CSS")
+            .replace("display: inline-flex;", "display: flex;");
+        fs::write(&css_path, edited_css).expect("edit CSS");
+        let css_before = fs::read_to_string(&css_path).expect("read edited CSS");
+        let config_before =
+            fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config");
+        let lock_before = fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read lock");
+
+        let error = plan_sync(root).expect_err("edited block should conflict");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }));
+        assert_eq!(fs::read_to_string(&css_path).expect("read CSS"), css_before);
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+            config_before
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read lock"),
+            lock_before
+        );
+        assert!(!css_before.contains("/* leptos-ui-kit:start tokens */"));
     }
 
     #[test]
@@ -2620,13 +2730,14 @@ mod tests {
             .map(|item| item.item_name())
             .collect::<Vec<_>>();
 
-        assert_eq!(item_names, ["anchor", "router-link"]);
+        assert_eq!(item_names, ["tokens", "anchor", "router-link"]);
         assert_eq!(plan.item_id, "builtin:router-link");
         assert_eq!(
             plan.lock.items.keys().cloned().collect::<Vec<_>>(),
             vec![
                 "builtin:anchor".to_owned(),
-                "builtin:router-link".to_owned()
+                "builtin:router-link".to_owned(),
+                "builtin:tokens".to_owned()
             ]
         );
         assert!(root.join("src/components/ui/anchor.rs").is_file());
@@ -2685,6 +2796,38 @@ mod tests {
         let config = kit_config_with_desired_item(config, desired_builtin_button_item())
             .expect("add desired item");
         write_kit_config(root, kit_config_to_json(&config).expect("serialize config"));
+    }
+
+    fn remove_tokens_from_install(root: &Path) {
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read config"))
+                .expect("parse config");
+        config.items.retain(|item| item.item_name() != "tokens");
+        let config_content = kit_config_to_json(&config).expect("serialize config");
+        fs::write(&config_path, &config_content).expect("write legacy config");
+
+        let css_path = root.join("styles/kit.css");
+        let css = fs::read_to_string(&css_path).expect("read CSS");
+        let tokens = extract_managed_css_block(&css, "tokens")
+            .expect("extract tokens")
+            .expect("tokens block");
+        fs::write(&css_path, css.replacen(&tokens, "", 1)).expect("remove tokens CSS");
+
+        let lock_path = root.join(DEFAULT_KIT_LOCK_PATH);
+        let mut lock = parse_install_lock_str_at_path(
+            &fs::read_to_string(&lock_path).expect("read lock"),
+            Path::new(DEFAULT_KIT_LOCK_PATH),
+        )
+        .expect("parse lock");
+        lock.items.remove("builtin:tokens");
+        lock.style_blocks_by_id.remove("tokens");
+        lock.project.config_hash = hash_bytes(config_content.as_bytes());
+        fs::write(
+            &lock_path,
+            lock_to_json(&lock).expect("serialize legacy lock"),
+        )
+        .expect("write legacy lock");
     }
 
     #[test]
