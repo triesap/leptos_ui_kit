@@ -1,62 +1,47 @@
 /* leptos-ui-kit:start collapsible */
-:root {
-  --kit-collapsible-gap: 0.5rem;
-  --kit-collapsible-trigger-background: transparent;
-  --kit-collapsible-trigger-background-hover: #f3f4f6;
-  --kit-collapsible-trigger-border-color: #d1d5db;
-  --kit-collapsible-trigger-color: #111827;
-  --kit-collapsible-trigger-disabled-opacity: 0.55;
-  --kit-collapsible-trigger-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-collapsible-trigger-focus-outline-offset: 2px;
-  --kit-collapsible-trigger-focus-outline-width: 2px;
-  --kit-collapsible-trigger-font-weight: 600;
-  --kit-collapsible-trigger-min-height: 2.5rem;
-  --kit-collapsible-trigger-padding-block: 0.5rem;
-  --kit-collapsible-trigger-padding-inline: 0.75rem;
-  --kit-collapsible-trigger-radius: var(--kit-radius-md, 0.375rem);
-  --kit-collapsible-content-padding-block: 0.5rem;
-  --kit-collapsible-content-padding-inline: 0;
-}
-
 .kit-collapsible {
   display: grid;
-  gap: var(--kit-collapsible-gap);
+  gap: var(--kit-collapsible-gap, 0.5rem);
 }
 
 .kit-collapsible-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-collapsible-trigger-border-color);
-  border-radius: var(--kit-collapsible-trigger-radius);
-  min-height: var(--kit-collapsible-trigger-min-height);
+  border: 1px solid var(--kit-collapsible-trigger-border-color, var(--kit-color-border));
+  border-radius: var(--kit-collapsible-trigger-radius, var(--kit-radius-md));
+  min-height: var(--kit-collapsible-trigger-min-height, 2.5rem);
   padding:
-    var(--kit-collapsible-trigger-padding-block)
-    var(--kit-collapsible-trigger-padding-inline);
-  background: var(--kit-collapsible-trigger-background);
-  color: var(--kit-collapsible-trigger-color);
+    var(--kit-collapsible-trigger-padding-block, 0.5rem)
+    var(--kit-collapsible-trigger-padding-inline, 0.75rem);
+  background: var(--kit-collapsible-trigger-background, transparent);
+  color: var(--kit-collapsible-trigger-color, var(--kit-color-text));
   font: inherit;
-  font-weight: var(--kit-collapsible-trigger-font-weight);
+  font-weight: var(--kit-collapsible-trigger-font-weight, 600);
   cursor: pointer;
 }
 
 .kit-collapsible-trigger:hover:not(:disabled) {
-  background: var(--kit-collapsible-trigger-background-hover);
+  background: var(
+    --kit-collapsible-trigger-background-hover,
+    var(--kit-color-surface-hover)
+  );
 }
 
 .kit-collapsible-trigger:focus-visible {
-  outline: var(--kit-collapsible-trigger-focus-outline-width) solid var(--kit-collapsible-trigger-focus-ring);
-  outline-offset: var(--kit-collapsible-trigger-focus-outline-offset);
+  outline: var(--kit-collapsible-trigger-focus-outline-width, 2px) solid
+    var(--kit-collapsible-trigger-focus-ring, var(--kit-focus-ring));
+  outline-offset: var(--kit-collapsible-trigger-focus-outline-offset, 2px);
 }
 
 .kit-collapsible-trigger:disabled {
   cursor: not-allowed;
-  opacity: var(--kit-collapsible-trigger-disabled-opacity);
+  opacity: var(--kit-collapsible-trigger-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-collapsible-content {
   padding:
-    var(--kit-collapsible-content-padding-block)
-    var(--kit-collapsible-content-padding-inline);
+    var(--kit-collapsible-content-padding-block, 0.5rem)
+    var(--kit-collapsible-content-padding-inline, 0);
 }
 /* leptos-ui-kit:end collapsible */

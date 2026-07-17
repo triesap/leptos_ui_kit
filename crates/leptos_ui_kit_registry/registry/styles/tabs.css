@@ -1,40 +1,13 @@
 /* leptos-ui-kit:start tabs */
-:root {
-  --kit-tabs-gap: 1rem;
-  --kit-tabs-list-gap: 0.25rem;
-  --kit-tabs-panel-background: transparent;
-  --kit-tabs-panel-color: inherit;
-  --kit-tabs-panel-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-tabs-panel-focus-outline-offset: 2px;
-  --kit-tabs-panel-focus-outline-width: 2px;
-  --kit-tabs-panel-padding-block: 0.75rem;
-  --kit-tabs-panel-padding-inline: 0;
-  --kit-tabs-trigger-background: transparent;
-  --kit-tabs-trigger-background-active: #ffffff;
-  --kit-tabs-trigger-background-hover: #f3f4f6;
-  --kit-tabs-trigger-border-color: #d1d5db;
-  --kit-tabs-trigger-color: #111827;
-  --kit-tabs-trigger-color-inactive: #374151;
-  --kit-tabs-trigger-disabled-opacity: 0.55;
-  --kit-tabs-trigger-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-tabs-trigger-focus-outline-offset: 2px;
-  --kit-tabs-trigger-focus-outline-width: 2px;
-  --kit-tabs-trigger-font-weight: 600;
-  --kit-tabs-trigger-min-height: 2.5rem;
-  --kit-tabs-trigger-padding-block: 0.5rem;
-  --kit-tabs-trigger-padding-inline: 0.75rem;
-  --kit-tabs-trigger-radius: var(--kit-radius-md, 0.375rem);
-}
-
 .kit-tabs {
   display: grid;
-  gap: var(--kit-tabs-gap);
+  gap: var(--kit-tabs-gap, 1rem);
 }
 
 .kit-tabs-list {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--kit-tabs-list-gap);
+  gap: var(--kit-tabs-list-gap, 0.25rem);
 }
 
 .kit-tabs-list[aria-orientation="vertical"] {
@@ -46,48 +19,50 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-tabs-trigger-border-color);
-  border-radius: var(--kit-tabs-trigger-radius);
-  min-height: var(--kit-tabs-trigger-min-height);
+  border: 1px solid var(--kit-tabs-trigger-border-color, var(--kit-color-border));
+  border-radius: var(--kit-tabs-trigger-radius, var(--kit-radius-md));
+  min-height: var(--kit-tabs-trigger-min-height, 2.5rem);
   padding:
-    var(--kit-tabs-trigger-padding-block)
-    var(--kit-tabs-trigger-padding-inline);
-  background: var(--kit-tabs-trigger-background);
-  color: var(--kit-tabs-trigger-color-inactive);
+    var(--kit-tabs-trigger-padding-block, 0.5rem)
+    var(--kit-tabs-trigger-padding-inline, 0.75rem);
+  background: var(--kit-tabs-trigger-background, transparent);
+  color: var(--kit-tabs-trigger-color-inactive, var(--kit-color-text-secondary));
   font: inherit;
-  font-weight: var(--kit-tabs-trigger-font-weight);
+  font-weight: var(--kit-tabs-trigger-font-weight, 600);
   cursor: pointer;
 }
 
 .kit-tabs-trigger[data-state="active"] {
-  background: var(--kit-tabs-trigger-background-active);
-  color: var(--kit-tabs-trigger-color);
+  background: var(--kit-tabs-trigger-background-active, var(--kit-color-surface));
+  color: var(--kit-tabs-trigger-color, var(--kit-color-text));
 }
 
 .kit-tabs-trigger:hover:not(:disabled) {
-  background: var(--kit-tabs-trigger-background-hover);
+  background: var(--kit-tabs-trigger-background-hover, var(--kit-color-surface-hover));
 }
 
 .kit-tabs-trigger:focus-visible {
-  outline: var(--kit-tabs-trigger-focus-outline-width) solid var(--kit-tabs-trigger-focus-ring);
-  outline-offset: var(--kit-tabs-trigger-focus-outline-offset);
+  outline: var(--kit-tabs-trigger-focus-outline-width, 2px) solid
+    var(--kit-tabs-trigger-focus-ring, var(--kit-focus-ring));
+  outline-offset: var(--kit-tabs-trigger-focus-outline-offset, 2px);
 }
 
 .kit-tabs-trigger:disabled {
   cursor: not-allowed;
-  opacity: var(--kit-tabs-trigger-disabled-opacity);
+  opacity: var(--kit-tabs-trigger-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-tabs-panel {
   padding:
-    var(--kit-tabs-panel-padding-block)
-    var(--kit-tabs-panel-padding-inline);
-  background: var(--kit-tabs-panel-background);
-  color: var(--kit-tabs-panel-color);
+    var(--kit-tabs-panel-padding-block, 0.75rem)
+    var(--kit-tabs-panel-padding-inline, 0);
+  background: var(--kit-tabs-panel-background, transparent);
+  color: var(--kit-tabs-panel-color, inherit);
 }
 
 .kit-tabs-panel:focus-visible {
-  outline: var(--kit-tabs-panel-focus-outline-width) solid var(--kit-tabs-panel-focus-ring);
-  outline-offset: var(--kit-tabs-panel-focus-outline-offset);
+  outline: var(--kit-tabs-panel-focus-outline-width, 2px) solid
+    var(--kit-tabs-panel-focus-ring, var(--kit-focus-ring));
+  outline-offset: var(--kit-tabs-panel-focus-outline-offset, 2px);
 }
 /* leptos-ui-kit:end tabs */

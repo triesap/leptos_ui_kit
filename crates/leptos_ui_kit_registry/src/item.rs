@@ -1453,6 +1453,26 @@ mod tests {
     }
 
     #[test]
+    fn collapsible_css_uses_property_local_theme_fallbacks() {
+        let root = built_in_registry_root();
+        let css =
+            fs::read_to_string(root.join("styles/collapsible.css")).expect("read collapsible css");
+
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(css.contains("var(--kit-collapsible-trigger-background, transparent)"));
+        assert!(
+            css.contains("var(--kit-collapsible-trigger-border-color, var(--kit-color-border))")
+        );
+        assert!(css.contains("var(--kit-collapsible-trigger-color, var(--kit-color-text))"));
+        assert!(css.contains(
+            "var(--kit-collapsible-trigger-disabled-opacity, var(--kit-disabled-opacity))"
+        ));
+        assert!(css.contains("var(--kit-collapsible-trigger-focus-ring, var(--kit-focus-ring))"));
+        assert!(css.contains("var(--kit-collapsible-trigger-radius, var(--kit-radius-md))"));
+    }
+
+    #[test]
     fn form_field_source_and_css_encode_label_message_structure() {
         let root = built_in_registry_root();
         let root_source =
@@ -1590,6 +1610,19 @@ mod tests {
         assert!(css.contains(".kit-select-icon"));
         assert!(css.contains(".kit-field-message"));
         assert!(css.contains("--kit-field-required-color"));
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(css.contains("var(--kit-field-control-background, var(--kit-color-surface))"));
+        assert!(css.contains("var(--kit-field-control-border-color, var(--kit-color-border))"));
+        assert!(css.contains("var(--kit-field-control-focus-ring, var(--kit-focus-ring))"));
+        assert!(css.contains("var(--kit-field-message-color, var(--kit-color-text-muted))"));
+        assert!(css.contains("var(--kit-field-required-color, var(--kit-color-danger))"));
+        assert!(css.contains(
+            "--kit-field-surface-background,\n    var(--kit-field-control-background, var(--kit-color-surface))"
+        ));
+        assert!(css.contains(
+            "--kit-field-surface-radius,\n    var(--kit-field-control-radius, var(--kit-radius-md))"
+        ));
         assert!(
             item.item
                 .accessibility
@@ -1896,12 +1929,30 @@ mod tests {
         let root = built_in_registry_root();
         let trigger =
             fs::read_to_string(root.join("ui/tabs/trigger.rs")).expect("read tabs trigger source");
+        let css = fs::read_to_string(root.join("styles/tabs.css")).expect("read tabs css");
         let item = load_built_in_registry_item("tabs").expect("load tabs");
 
         assert!(trigger.contains("on:keydown"));
         assert!(trigger.contains("focus_by_key"));
         assert!(trigger.contains("activate_focused"));
         assert!(trigger.contains("focus_trigger"));
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(css.contains("var(--kit-tabs-panel-background, transparent)"));
+        assert!(css.contains("var(--kit-tabs-panel-color, inherit)"));
+        assert!(
+            css.contains("var(--kit-tabs-trigger-background-active, var(--kit-color-surface))")
+        );
+        assert!(
+            css.contains(
+                "var(--kit-tabs-trigger-background-hover, var(--kit-color-surface-hover))"
+            )
+        );
+        assert!(css.contains("var(--kit-tabs-trigger-border-color, var(--kit-color-border))"));
+        assert!(css.contains("var(--kit-tabs-trigger-color, var(--kit-color-text))"));
+        assert!(
+            css.contains("var(--kit-tabs-trigger-color-inactive, var(--kit-color-text-secondary))")
+        );
         assert!(
             item.item
                 .accessibility

@@ -1,117 +1,87 @@
 /* leptos-ui-kit:start field */
-:root {
-  --kit-field-disabled-opacity: 0.55;
-  --kit-field-gap: 0.5rem;
-  --kit-field-control-background: #ffffff;
-  --kit-field-control-border-color: var(--kit-color-border, #d1d5db);
-  --kit-field-control-border-width: 1px;
-  --kit-field-control-color: #111827;
-  --kit-field-control-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-field-control-font-size: 1rem;
-  --kit-field-control-font-weight: 400;
-  --kit-field-control-invalid-border-color: #dc2626;
-  --kit-field-control-line-height: 1.35;
-  --kit-field-control-min-height: 2.75rem;
-  --kit-field-control-padding-block: 0.625rem;
-  --kit-field-control-padding-inline: 0.75rem;
-  --kit-field-control-radius: var(--kit-radius-md, 0.375rem);
-  --kit-field-control-transition-duration: 120ms;
-  --kit-field-control-transition-timing: ease;
-  --kit-field-label-color: #111827;
-  --kit-field-label-font-size: 0.9375rem;
-  --kit-field-label-font-weight: 500;
-  --kit-field-label-gap: 0.25rem;
-  --kit-field-message-color: #4b5563;
-  --kit-field-message-font-size: 0.875rem;
-  --kit-field-message-font-weight: 400;
-  --kit-field-message-line-height: 1.35;
-  --kit-field-message-invalid-color: #dc2626;
-  --kit-field-required-color: #dc2626;
-  --kit-field-surface-background: var(--kit-field-control-background);
-  --kit-field-surface-border-color: transparent;
-  --kit-field-surface-border-width: 0;
-  --kit-field-surface-radius: var(--kit-field-control-radius);
-  --kit-field-surface-padding-block: var(--kit-field-control-padding-block);
-  --kit-field-surface-padding-inline: var(--kit-field-control-padding-inline);
-  --kit-select-icon-color: currentColor;
-  --kit-select-icon-inline-end: var(--kit-field-control-padding-inline);
-  --kit-select-icon-size: 1rem;
-  --kit-text-area-min-block-size: 7rem;
-}
-
 .kit-field {
   display: grid;
-  gap: var(--kit-field-gap);
+  gap: var(--kit-field-gap, 0.5rem);
   position: relative;
 }
 
 .kit-field[data-disabled] {
-  opacity: var(--kit-field-disabled-opacity);
+  opacity: var(--kit-field-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-field-surface {
   box-sizing: border-box;
   display: grid;
-  gap: var(--kit-field-gap);
+  gap: var(--kit-field-gap, 0.5rem);
   min-inline-size: 0;
-  border: var(--kit-field-surface-border-width) solid var(--kit-field-surface-border-color);
-  border-radius: var(--kit-field-surface-radius);
+  border: var(--kit-field-surface-border-width, 0) solid
+    var(--kit-field-surface-border-color, transparent);
+  border-radius: var(
+    --kit-field-surface-radius,
+    var(--kit-field-control-radius, var(--kit-radius-md))
+  );
   padding:
-    var(--kit-field-surface-padding-block)
-    var(--kit-field-surface-padding-inline);
-  background: var(--kit-field-surface-background);
+    var(--kit-field-surface-padding-block, var(--kit-field-control-padding-block, 0.625rem))
+    var(--kit-field-surface-padding-inline, var(--kit-field-control-padding-inline, 0.75rem));
+  background: var(
+    --kit-field-surface-background,
+    var(--kit-field-control-background, var(--kit-color-surface))
+  );
   position: relative;
 }
 
 .kit-field-label {
   display: inline-flex;
   align-items: baseline;
-  gap: var(--kit-field-label-gap);
-  color: var(--kit-field-label-color);
+  gap: var(--kit-field-label-gap, 0.25rem);
+  color: var(--kit-field-label-color, var(--kit-color-text));
   font: inherit;
-  font-size: var(--kit-field-label-font-size);
-  font-weight: var(--kit-field-label-font-weight);
+  font-size: var(--kit-field-label-font-size, 0.9375rem);
+  font-weight: var(--kit-field-label-font-weight, 500);
   line-height: 1;
 }
 
 .kit-field-label-row {
   display: inline-flex;
   align-items: baseline;
-  gap: var(--kit-field-label-gap);
+  gap: var(--kit-field-label-gap, 0.25rem);
   min-inline-size: 0;
 }
 
 .kit-field-required {
-  color: var(--kit-field-required-color);
+  color: var(--kit-field-required-color, var(--kit-color-danger));
 }
 
 .kit-field-control {
   box-sizing: border-box;
   inline-size: 100%;
-  border: var(--kit-field-control-border-width) solid var(--kit-field-control-border-color);
-  border-radius: var(--kit-field-control-radius);
-  min-block-size: var(--kit-field-control-min-height);
+  border: var(--kit-field-control-border-width, var(--kit-border-width)) solid
+    var(--kit-field-control-border-color, var(--kit-color-border));
+  border-radius: var(--kit-field-control-radius, var(--kit-radius-md));
+  min-block-size: var(--kit-field-control-min-height, 2.75rem);
   padding:
-    var(--kit-field-control-padding-block)
-    var(--kit-field-control-padding-inline);
-  background: var(--kit-field-control-background);
-  color: var(--kit-field-control-color);
+    var(--kit-field-control-padding-block, 0.625rem)
+    var(--kit-field-control-padding-inline, 0.75rem);
+  background: var(--kit-field-control-background, var(--kit-color-surface));
+  color: var(--kit-field-control-color, var(--kit-color-text));
   font: inherit;
-  font-size: var(--kit-field-control-font-size);
-  font-weight: var(--kit-field-control-font-weight);
-  line-height: var(--kit-field-control-line-height);
+  font-size: var(--kit-field-control-font-size, 1rem);
+  font-weight: var(--kit-field-control-font-weight, 400);
+  line-height: var(--kit-field-control-line-height, 1.35);
   transition:
-    border-color var(--kit-field-control-transition-duration) var(--kit-field-control-transition-timing),
-    box-shadow var(--kit-field-control-transition-duration) var(--kit-field-control-transition-timing);
+    border-color var(--kit-field-control-transition-duration, var(--kit-duration-fast))
+      var(--kit-field-control-transition-timing, var(--kit-easing-standard)),
+    box-shadow var(--kit-field-control-transition-duration, var(--kit-duration-fast))
+      var(--kit-field-control-transition-timing, var(--kit-easing-standard));
 }
 
 .kit-field-control:focus-visible {
-  outline: 2px solid var(--kit-field-control-focus-ring);
+  outline: 2px solid var(--kit-field-control-focus-ring, var(--kit-focus-ring));
   outline-offset: 2px;
 }
 
 .kit-field-control[data-invalid] {
-  border-color: var(--kit-field-control-invalid-border-color);
+  border-color: var(--kit-field-control-invalid-border-color, var(--kit-color-danger));
 }
 
 .kit-field-control[data-disabled] {
@@ -119,13 +89,16 @@
 }
 
 .kit-text-area {
-  min-block-size: var(--kit-text-area-min-block-size);
+  min-block-size: var(--kit-text-area-min-block-size, 7rem);
   resize: vertical;
 }
 
 .kit-native-select {
   appearance: none;
-  padding-inline-end: calc(var(--kit-select-icon-inline-end) * 2 + var(--kit-select-icon-size));
+  padding-inline-end: calc(
+    var(--kit-select-icon-inline-end, var(--kit-field-control-padding-inline, 0.75rem)) * 2 +
+      var(--kit-select-icon-size, 1rem)
+  );
 }
 
 .kit-select-field-surface {
@@ -151,7 +124,10 @@
   display: inline-flex;
   align-items: baseline;
   min-inline-size: 0;
-  padding-inline-end: calc(var(--kit-select-icon-inline-end) + var(--kit-select-icon-size));
+  padding-inline-end: calc(
+    var(--kit-select-icon-inline-end, var(--kit-field-control-padding-inline, 0.75rem)) +
+      var(--kit-select-icon-size, 1rem)
+  );
   pointer-events: none;
   position: relative;
   z-index: 2;
@@ -159,11 +135,11 @@
 
 .kit-select-field-value {
   overflow: hidden;
-  color: var(--kit-field-control-color);
+  color: var(--kit-field-control-color, var(--kit-color-text));
   font: inherit;
-  font-size: var(--kit-field-control-font-size);
-  font-weight: var(--kit-field-control-font-weight);
-  line-height: var(--kit-field-control-line-height);
+  font-size: var(--kit-field-control-font-size, 1rem);
+  font-weight: var(--kit-field-control-font-weight, 400);
+  line-height: var(--kit-field-control-line-height, 1.35);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -171,13 +147,16 @@
 .kit-select-icon {
   position: absolute;
   inset-block-start: 50%;
-  inset-inline-end: var(--kit-select-icon-inline-end);
+  inset-inline-end: var(
+    --kit-select-icon-inline-end,
+    var(--kit-field-control-padding-inline, 0.75rem)
+  );
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: var(--kit-select-icon-size);
-  block-size: var(--kit-select-icon-size);
-  color: var(--kit-select-icon-color);
+  inline-size: var(--kit-select-icon-size, 1rem);
+  block-size: var(--kit-select-icon-size, 1rem);
+  color: var(--kit-select-icon-color, currentColor);
   pointer-events: none;
   transform: translateY(-50%);
   z-index: 2;
@@ -185,15 +164,15 @@
 
 .kit-field-message {
   margin: 0;
-  color: var(--kit-field-message-color);
+  color: var(--kit-field-message-color, var(--kit-color-text-muted));
   font: inherit;
-  font-size: var(--kit-field-message-font-size);
-  font-weight: var(--kit-field-message-font-weight);
-  line-height: var(--kit-field-message-line-height);
+  font-size: var(--kit-field-message-font-size, 0.875rem);
+  font-weight: var(--kit-field-message-font-weight, 400);
+  line-height: var(--kit-field-message-line-height, 1.35);
 }
 
 .kit-field-message[data-invalid],
 .kit-field[data-invalid] .kit-field-message {
-  color: var(--kit-field-message-invalid-color);
+  color: var(--kit-field-message-invalid-color, var(--kit-color-danger));
 }
 /* leptos-ui-kit:end field */
