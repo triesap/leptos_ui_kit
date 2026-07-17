@@ -1,130 +1,102 @@
 /* leptos-ui-kit:start dialog */
-:root {
-  --kit-dialog-background: #ffffff;
-  --kit-dialog-border-color: var(--kit-color-border, #d1d5db);
-  --kit-dialog-border-width: 1px;
-  --kit-dialog-close-background: transparent;
-  --kit-dialog-close-background-hover: #f3f4f6;
-  --kit-dialog-close-border-color: var(--kit-color-border, #d1d5db);
-  --kit-dialog-close-color: #111827;
-  --kit-dialog-close-disabled-opacity: 0.55;
-  --kit-dialog-close-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-dialog-close-font-weight: 600;
-  --kit-dialog-close-min-height: 2.5rem;
-  --kit-dialog-close-padding-block: 0.5rem;
-  --kit-dialog-close-padding-inline: 0.75rem;
-  --kit-dialog-close-radius: var(--kit-radius-md, 0.375rem);
-  --kit-dialog-color: #111827;
-  --kit-dialog-description-color: #4b5563;
-  --kit-dialog-description-font-size: 0.9375rem;
-  --kit-dialog-description-line-height: 1.5;
-  --kit-dialog-elevation: 0 20px 40px rgb(15 23 42 / 18%);
-  --kit-dialog-focus-outline-offset: 2px;
-  --kit-dialog-focus-outline-width: 2px;
-  --kit-dialog-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-dialog-gap: 1rem;
-  --kit-dialog-max-block-size: min(42rem, calc(100vh - 2rem));
-  --kit-dialog-max-inline-size: min(32rem, calc(100vw - 2rem));
-  --kit-dialog-padding-block: 1.25rem;
-  --kit-dialog-padding-inline: 1.25rem;
-  --kit-dialog-radius: var(--kit-radius-md, 0.375rem);
-  --kit-dialog-title-font-size: 1.125rem;
-  --kit-dialog-title-font-weight: 700;
-  --kit-dialog-title-line-height: 1.25;
-  --kit-dialog-transition-duration: 140ms;
-  --kit-dialog-transition-timing: ease;
-  --kit-dialog-trigger-background: transparent;
-  --kit-dialog-trigger-background-hover: #f3f4f6;
-  --kit-dialog-trigger-border-color: var(--kit-color-border, #d1d5db);
-  --kit-dialog-trigger-color: #111827;
-  --kit-dialog-trigger-disabled-opacity: 0.55;
-  --kit-dialog-trigger-focus-ring: var(--kit-focus-ring, #2563eb);
-  --kit-dialog-trigger-font-weight: 600;
-  --kit-dialog-trigger-min-height: 2.5rem;
-  --kit-dialog-trigger-padding-block: 0.5rem;
-  --kit-dialog-trigger-padding-inline: 0.75rem;
-  --kit-dialog-trigger-radius: var(--kit-radius-md, 0.375rem);
-  --kit-dialog-z-index: 50;
-}
-
 .kit-dialog-trigger,
 .kit-dialog-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-dialog-trigger-border-color);
-  border-radius: var(--kit-dialog-trigger-radius);
-  min-height: var(--kit-dialog-trigger-min-height);
+  border: 1px solid var(--kit-dialog-trigger-border-color, var(--kit-color-border));
+  border-radius: var(--kit-dialog-trigger-radius, var(--kit-radius-md));
+  min-height: var(--kit-dialog-trigger-min-height, 2.5rem);
   padding:
-    var(--kit-dialog-trigger-padding-block)
-    var(--kit-dialog-trigger-padding-inline);
-  background: var(--kit-dialog-trigger-background);
-  color: var(--kit-dialog-trigger-color);
+    var(--kit-dialog-trigger-padding-block, 0.5rem)
+    var(--kit-dialog-trigger-padding-inline, 0.75rem);
+  background: var(--kit-dialog-trigger-background, transparent);
+  color: var(--kit-dialog-trigger-color, var(--kit-color-text));
   font: inherit;
-  font-weight: var(--kit-dialog-trigger-font-weight);
+  font-weight: var(--kit-dialog-trigger-font-weight, 600);
   cursor: pointer;
 }
 
 .kit-dialog-close {
-  border-color: var(--kit-dialog-close-border-color);
-  border-radius: var(--kit-dialog-close-radius);
-  min-height: var(--kit-dialog-close-min-height);
+  border-color: var(--kit-dialog-close-border-color, var(--kit-color-border));
+  border-radius: var(--kit-dialog-close-radius, var(--kit-radius-md));
+  min-height: var(--kit-dialog-close-min-height, 2.5rem);
   padding:
-    var(--kit-dialog-close-padding-block)
-    var(--kit-dialog-close-padding-inline);
-  background: var(--kit-dialog-close-background);
-  color: var(--kit-dialog-close-color);
-  font-weight: var(--kit-dialog-close-font-weight);
+    var(--kit-dialog-close-padding-block, 0.5rem)
+    var(--kit-dialog-close-padding-inline, 0.75rem);
+  background: var(--kit-dialog-close-background, transparent);
+  color: var(--kit-dialog-close-color, var(--kit-color-text));
+  font-weight: var(--kit-dialog-close-font-weight, 600);
 }
 
 .kit-dialog-trigger:hover:not(:disabled) {
-  background: var(--kit-dialog-trigger-background-hover);
+  background: var(--kit-dialog-trigger-background-hover, var(--kit-color-surface-hover));
 }
 
 .kit-dialog-close:hover:not(:disabled) {
-  background: var(--kit-dialog-close-background-hover);
+  background: var(--kit-dialog-close-background-hover, var(--kit-color-surface-hover));
 }
 
-.kit-dialog-trigger:focus-visible,
-.kit-dialog-close:focus-visible,
+.kit-dialog-trigger:focus-visible {
+  outline: var(--kit-dialog-focus-outline-width, 2px) solid
+    var(
+      --kit-dialog-trigger-focus-ring,
+      var(--kit-dialog-focus-ring, var(--kit-focus-ring))
+    );
+  outline-offset: var(--kit-dialog-focus-outline-offset, 2px);
+}
+
+.kit-dialog-close:focus-visible {
+  outline: var(--kit-dialog-focus-outline-width, 2px) solid
+    var(
+      --kit-dialog-close-focus-ring,
+      var(--kit-dialog-focus-ring, var(--kit-focus-ring))
+    );
+  outline-offset: var(--kit-dialog-focus-outline-offset, 2px);
+}
+
 .kit-dialog-content:focus-visible {
-  outline: var(--kit-dialog-focus-outline-width) solid var(--kit-dialog-focus-ring);
-  outline-offset: var(--kit-dialog-focus-outline-offset);
+  outline: var(--kit-dialog-focus-outline-width, 2px) solid
+    var(--kit-dialog-focus-ring, var(--kit-focus-ring));
+  outline-offset: var(--kit-dialog-focus-outline-offset, 2px);
 }
 
 .kit-dialog-trigger:disabled {
   cursor: not-allowed;
-  opacity: var(--kit-dialog-trigger-disabled-opacity);
+  opacity: var(--kit-dialog-trigger-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-dialog-close:disabled {
   cursor: not-allowed;
-  opacity: var(--kit-dialog-close-disabled-opacity);
+  opacity: var(--kit-dialog-close-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-dialog-content {
   position: fixed;
   inset-block-start: 50%;
   inset-inline-start: 50%;
-  z-index: var(--kit-dialog-z-index);
+  z-index: var(--kit-dialog-z-index, 50);
   display: grid;
-  gap: var(--kit-dialog-gap);
+  gap: var(--kit-dialog-gap, 1rem);
   box-sizing: border-box;
-  inline-size: var(--kit-dialog-max-inline-size);
-  max-block-size: var(--kit-dialog-max-block-size);
+  inline-size: var(--kit-dialog-max-inline-size, min(32rem, calc(100vw - 2rem)));
+  max-block-size: var(--kit-dialog-max-block-size, min(42rem, calc(100vh - 2rem)));
   overflow: auto;
-  border: var(--kit-dialog-border-width) solid var(--kit-dialog-border-color);
-  border-radius: var(--kit-dialog-radius);
+  border: var(--kit-dialog-border-width, var(--kit-border-width)) solid
+    var(--kit-dialog-border-color, var(--kit-color-border));
+  border-radius: var(--kit-dialog-radius, var(--kit-radius-md));
   padding:
-    var(--kit-dialog-padding-block)
-    var(--kit-dialog-padding-inline);
-  background: var(--kit-dialog-background);
-  color: var(--kit-dialog-color);
-  box-shadow: var(--kit-dialog-elevation);
+    var(--kit-dialog-padding-block, 1.25rem)
+    var(--kit-dialog-padding-inline, 1.25rem);
+  background: var(--kit-dialog-background, var(--kit-color-surface-raised));
+  color: var(--kit-dialog-color, var(--kit-color-text));
+  box-shadow: var(--kit-dialog-elevation, var(--kit-shadow-lg));
   transform: translate(-50%, -50%);
   transition:
-    opacity var(--kit-dialog-transition-duration) var(--kit-dialog-transition-timing),
-    transform var(--kit-dialog-transition-duration) var(--kit-dialog-transition-timing);
+    opacity var(--kit-dialog-transition-duration, var(--kit-duration-normal))
+      var(--kit-dialog-transition-timing, var(--kit-easing-standard)),
+    transform var(--kit-dialog-transition-duration, var(--kit-duration-normal))
+      var(--kit-dialog-transition-timing, var(--kit-easing-standard));
 }
 
 .kit-dialog-content[data-state="closed"] {
@@ -138,14 +110,14 @@
 }
 
 .kit-dialog-title {
-  font-size: var(--kit-dialog-title-font-size);
-  font-weight: var(--kit-dialog-title-font-weight);
-  line-height: var(--kit-dialog-title-line-height);
+  font-size: var(--kit-dialog-title-font-size, 1.125rem);
+  font-weight: var(--kit-dialog-title-font-weight, 700);
+  line-height: var(--kit-dialog-title-line-height, 1.25);
 }
 
 .kit-dialog-description {
-  color: var(--kit-dialog-description-color);
-  font-size: var(--kit-dialog-description-font-size);
-  line-height: var(--kit-dialog-description-line-height);
+  color: var(--kit-dialog-description-color, var(--kit-color-text-muted));
+  font-size: var(--kit-dialog-description-font-size, 0.9375rem);
+  line-height: var(--kit-dialog-description-line-height, 1.5);
 }
 /* leptos-ui-kit:end dialog */

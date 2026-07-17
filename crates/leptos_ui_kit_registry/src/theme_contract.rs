@@ -204,7 +204,11 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ThemeContr
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::Path,
+    };
 
     use serde_json::json;
 
@@ -377,6 +381,74 @@ mod tests {
         assert!(css.contains("color-scheme: light;"));
     }
 
+    #[test]
+    fn built_in_component_css_enforces_theme_token_boundaries() {
+        const COMPONENT_STYLES: [&str; 9] = [
+            "anchor",
+            "button",
+            "collapsible",
+            "dialog",
+            "field",
+            "menu",
+            "spinner",
+            "status",
+            "tabs",
+        ];
+
+        let contract = load_built_in_theme_contract().expect("load built-in contract");
+        let canonical_tokens = contract
+            .tokens
+            .iter()
+            .map(|token| token.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let tokens_css =
+            read_built_in_registry_source("styles/tokens.css").expect("read tokens CSS");
+        let token_declarations = css_custom_property_declarations(&tokens_css);
+
+        assert_eq!(tokens_css.matches(":root").count(), 1);
+        for token in &canonical_tokens {
+            assert_eq!(
+                token_declarations
+                    .iter()
+                    .filter(|name| name == token)
+                    .count(),
+                1,
+                "tokens.css must declare {token} exactly once"
+            );
+        }
+
+        for name in COMPONENT_STYLES {
+            let css = read_built_in_registry_source(&format!("styles/{name}.css"))
+                .unwrap_or_else(|error| panic!("read {name} CSS: {error}"));
+            let declared_canonical_tokens = css_custom_property_declarations(&css)
+                .into_iter()
+                .filter(|token| canonical_tokens.contains(token.as_str()))
+                .collect::<Vec<_>>();
+
+            assert!(!css.contains(":root"), "{name}.css must not define :root");
+            assert!(
+                declared_canonical_tokens.is_empty(),
+                "{name}.css redeclares canonical tokens: {declared_canonical_tokens:?}"
+            );
+            assert!(
+                !contains_disallowed_theme_color_literal(&css),
+                "{name}.css contains a literal theme color"
+            );
+            assert_eq!(
+                css.matches(&format!("/* leptos-ui-kit:start {name} */"))
+                    .count(),
+                1,
+                "{name}.css must contain one managed start marker"
+            );
+            assert_eq!(
+                css.matches(&format!("/* leptos-ui-kit:end {name} */"))
+                    .count(),
+                1,
+                "{name}.css must contain one managed end marker"
+            );
+        }
+    }
+
     fn css_token_defaults(input: &str) -> BTreeMap<String, String> {
         input
             .lines()
@@ -391,5 +463,32 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn css_custom_property_declarations(input: &str) -> Vec<String> {
+        input
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let (name, _) = line.split_once(':')?;
+                name.starts_with("--kit-").then(|| name.to_owned())
+            })
+            .collect()
+    }
+
+    fn contains_disallowed_theme_color_literal(input: &str) -> bool {
+        let without_comments = input
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("/*"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+
+        without_comments.contains('#')
+            || [
+                "rgb(", "rgba(", "hsl(", "hsla(", "oklch(", "oklab(", "lab(", "lch(",
+            ]
+            .iter()
+            .any(|syntax| without_comments.contains(syntax))
     }
 }

@@ -1746,6 +1746,17 @@ mod tests {
         assert!(css.contains(".kit-menu-radio-item-label"));
         assert!(css.contains(".kit-menu-item-indicator[hidden]"));
         assert!(css.contains("display: none;"));
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(
+            css.contains("var(--kit-menu-content-background, var(--kit-color-surface-raised))")
+        );
+        assert!(css.contains("var(--kit-menu-content-elevation, var(--kit-shadow-md))"));
+        assert!(css.contains(
+            "var(--kit-menu-item-background-highlighted, var(--kit-color-surface-hover))"
+        ));
+        assert!(css.contains("--kit-menu-content-translate-x: 0;"));
+        assert!(css.contains("--kit-menu-content-translate-y: 0;"));
         assert!(
             item.item
                 .accessibility
@@ -1967,12 +1978,21 @@ mod tests {
         let root = built_in_registry_root();
         let content = fs::read_to_string(root.join("ui/dialog/content.rs"))
             .expect("read dialog content source");
+        let css = fs::read_to_string(root.join("styles/dialog.css")).expect("read dialog css");
         let item = load_built_in_registry_item("dialog").expect("load dialog");
 
         assert!(content.contains("use_dialog_layer_with_node_ref"));
         assert!(content.contains("aria-labelledby"));
         assert!(content.contains("aria-describedby"));
         assert!(content.contains("DialogLayerOptions"));
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(css.contains("var(--kit-dialog-background, var(--kit-color-surface-raised))"));
+        assert!(css.contains("var(--kit-dialog-color, var(--kit-color-text))"));
+        assert!(css.contains("var(--kit-dialog-description-color, var(--kit-color-text-muted))"));
+        assert!(css.contains("var(--kit-dialog-elevation, var(--kit-shadow-lg))"));
+        assert!(css.contains("var(--kit-dialog-trigger-background, transparent)"));
+        assert!(css.contains("var(--kit-dialog-close-background, transparent)"));
         assert!(
             item.item
                 .accessibility
