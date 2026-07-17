@@ -61,7 +61,8 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert_success(&project, &["sync"]);
     assert_success(&project, &["doctor", "--strict", "--json"]);
     assert_cargo_subcommand_success(&project, &["doctor", "--strict", "--json"]);
-    assert_cargo_check(&project);
+    assert_cargo_check(&project, None);
+    assert_cargo_check(&project, Some("wasm32-unknown-unknown"));
 
     assert!(project.join("src/components/ui/anchor.rs").is_file());
     assert!(project.join("src/components/ui/button.rs").is_file());
@@ -126,11 +127,32 @@ fn homepage_fixture_cli_workflow_smoke() {
             .join("src/components/ui/_kit/kit.lock.json")
             .is_file()
     );
+
+    let index = fs::read_to_string(project.join("index.html")).expect("read fixture index");
+    let kit_css = index.find("styles/kit.css").expect("kit stylesheet link");
+    let themes_css = index
+        .find("styles/themes.css")
+        .expect("themes stylesheet link");
+    let app_css = index.find("styles/app.css").expect("app stylesheet link");
+    assert!(kit_css < themes_css && themes_css < app_css);
+    assert!(index.contains("dark-theme-portal-root"));
+    assert!(index.contains("data-ui-theme=\"dark\""));
+    assert!(
+        fs::read_to_string(project.join("styles/themes.css"))
+            .expect("read fixture theme stylesheet")
+            .contains(".preview-pane[data-ui-theme=\"dark\"]")
+    );
+    assert!(
+        fs::read_to_string(project.join("src/main.rs"))
+            .expect("read fixture source")
+            .contains("portal_mount=portal_mount")
+    );
 }
 
-fn assert_cargo_check(project: &Path) {
+fn assert_cargo_check(project: &Path, target: Option<&str>) {
     let rustc = rustup_tool("1.92.0", "rustc");
-    let output = Command::new("rustup")
+    let mut command = Command::new("rustup");
+    command
         .current_dir(project)
         .env("CARGO_TARGET_DIR", project.join(".target"))
         .env_remove("CARGO_BUILD_TARGET")
@@ -140,20 +162,15 @@ fn assert_cargo_check(project: &Path) {
         .env_remove("RUSTFLAGS")
         .env("RUSTC", rustc)
         .env_remove("RUSTDOC")
-        .args([
-            "run",
-            "1.92.0",
-            "cargo",
-            "check",
-            "--target",
-            "wasm32-unknown-unknown",
-        ])
-        .output()
-        .expect("run cargo check");
+        .args(["run", "1.92.0", "cargo", "check"]);
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+    let output = command.output().expect("run cargo check");
 
     assert!(
         output.status.success(),
-        "cargo check failed\nstdout:\n{}\nstderr:\n{}",
+        "cargo check {target:?} failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

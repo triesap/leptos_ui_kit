@@ -1,7 +1,7 @@
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::leptos::{
-    DialogLayerOptions, DismissibleReason, Portal, use_dialog_layer_with_node_ref,
+    DialogLayerOptions, DismissibleReason, Portal, PortalMount, use_dialog_layer_with_node_ref,
 };
 
 use super::root::{DialogContext, class_with_base};
@@ -26,6 +26,7 @@ pub fn DialogContent(
     #[prop(optional, default = DialogContentRole::Dialog)] role: DialogContentRole,
     #[prop(optional, into)] label: Option<String>,
     #[prop(optional, into)] class: String,
+    #[prop(optional)] portal_mount: Option<PortalMount>,
     children: ChildrenFn,
 ) -> impl IntoView {
     let context =
@@ -74,27 +75,51 @@ pub fn DialogContent(
                 return ().into_any();
             }
 
-            view! {
-                <Portal>
-                    {move || {
-                        dialog_surface(
-                            node_ref,
-                            content_id,
-                            content_class,
-                            role,
-                            modal,
-                            label,
-                            labelled_by,
-                            described_by,
-                            data_state,
-                            transition_end.clone(),
-                            animation_end.clone(),
-                            children,
-                        )
-                    }}
-                </Portal>
+            if let Some(portal_mount) = portal_mount.clone() {
+                view! {
+                    <Portal mount=portal_mount>
+                        {move || {
+                            dialog_surface(
+                                node_ref,
+                                content_id,
+                                content_class,
+                                role,
+                                modal,
+                                label,
+                                labelled_by,
+                                described_by,
+                                data_state,
+                                transition_end.clone(),
+                                animation_end.clone(),
+                                children,
+                            )
+                        }}
+                    </Portal>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <Portal>
+                        {move || {
+                            dialog_surface(
+                                node_ref,
+                                content_id,
+                                content_class,
+                                role,
+                                modal,
+                                label,
+                                labelled_by,
+                                described_by,
+                                data_state,
+                                transition_end.clone(),
+                                animation_end.clone(),
+                                children,
+                            )
+                        }}
+                    </Portal>
+                }
+                .into_any()
             }
-            .into_any()
         }}
     }
 }

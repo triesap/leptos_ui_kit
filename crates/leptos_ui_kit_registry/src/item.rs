@@ -1985,6 +1985,11 @@ mod tests {
         assert!(content.contains("aria-labelledby"));
         assert!(content.contains("aria-describedby"));
         assert!(content.contains("DialogLayerOptions"));
+        assert!(content.contains("PortalMount"));
+        assert!(content.contains("#[prop(optional)] portal_mount: Option<PortalMount>"));
+        assert!(content.contains("if let Some(portal_mount) = portal_mount.clone()"));
+        assert!(content.contains("<Portal mount=portal_mount>"));
+        assert!(content.contains("<Portal>"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-dialog-background, var(--kit-color-surface-raised))"));
