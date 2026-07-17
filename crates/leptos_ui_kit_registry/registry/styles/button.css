@@ -1,72 +1,41 @@
 /* leptos-ui-kit:start button */
-:root {
-  --kit-color-primary: #111827;
-  --kit-color-primary-hover: #1f2937;
-  --kit-color-primary-foreground: #ffffff;
-  --kit-color-secondary: #ffffff;
-  --kit-color-secondary-hover: #f3f4f6;
-  --kit-color-secondary-foreground: #111827;
-  --kit-color-ghost: transparent;
-  --kit-color-ghost-hover: #f3f4f6;
-  --kit-color-ghost-foreground: #374151;
-  --kit-color-ghost-hover-foreground: #111827;
-  --kit-color-border: #d1d5db;
-  --kit-focus-ring: #2563eb;
-  --kit-radius-md: 0.375rem;
-  --kit-button-border-width: 1px;
-  --kit-button-disabled-opacity: 0.55;
-  --kit-button-focus-outline-width: 2px;
-  --kit-button-focus-outline-offset: 2px;
-  --kit-button-font-weight: 600;
-  --kit-button-gap: 0.375rem;
-  --kit-button-line-height: 1;
-  --kit-button-spinner-size: 1em;
-  --kit-button-transition-duration: 120ms;
-  --kit-button-transition-timing: ease;
-  --kit-button-sm-font-size: 0.875rem;
-  --kit-button-sm-min-height: 2rem;
-  --kit-button-sm-padding-inline: 0.75rem;
-  --kit-button-md-font-size: 0.9375rem;
-  --kit-button-md-min-height: 2.5rem;
-  --kit-button-md-padding-inline: 1rem;
-  --kit-button-lg-font-size: 1rem;
-  --kit-button-lg-min-height: 3rem;
-  --kit-button-lg-padding-inline: 1.25rem;
-}
-
 .kit-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--kit-button-gap);
-  border: var(--kit-button-border-width) solid transparent;
+  gap: var(--kit-button-gap, 0.375rem);
+  border: var(--kit-button-border-width, var(--kit-border-width)) solid transparent;
   border-radius: var(--kit-radius-md);
   font: inherit;
-  font-weight: var(--kit-button-font-weight);
-  line-height: var(--kit-button-line-height);
+  font-weight: var(--kit-button-font-weight, 600);
+  line-height: var(--kit-button-line-height, 1);
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
   transition:
-    background-color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
-    border-color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
-    color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
-    box-shadow var(--kit-button-transition-duration) var(--kit-button-transition-timing);
+    background-color var(--kit-button-transition-duration, var(--kit-duration-fast))
+      var(--kit-button-transition-timing, var(--kit-easing-standard)),
+    border-color var(--kit-button-transition-duration, var(--kit-duration-fast))
+      var(--kit-button-transition-timing, var(--kit-easing-standard)),
+    color var(--kit-button-transition-duration, var(--kit-duration-fast))
+      var(--kit-button-transition-timing, var(--kit-easing-standard)),
+    box-shadow var(--kit-button-transition-duration, var(--kit-duration-fast))
+      var(--kit-button-transition-timing, var(--kit-easing-standard));
 }
 
 .kit-button:focus-visible {
-  outline: var(--kit-button-focus-outline-width) solid var(--kit-focus-ring);
-  outline-offset: var(--kit-button-focus-outline-offset);
+  outline: var(--kit-button-focus-outline-width, 2px) solid var(--kit-focus-ring);
+  outline-offset: var(--kit-button-focus-outline-offset, 2px);
 }
 
 .kit-button:disabled {
   cursor: not-allowed;
-  opacity: var(--kit-button-disabled-opacity);
+  opacity: var(--kit-button-disabled-opacity, var(--kit-disabled-opacity));
 }
 
 .kit-button-spinner {
-  inline-size: var(--kit-button-spinner-size);
-  block-size: var(--kit-button-spinner-size);
+  inline-size: var(--kit-button-spinner-size, 1em);
+  block-size: var(--kit-button-spinner-size, 1em);
 }
 
 .kit-button-content {
@@ -97,30 +66,30 @@
 }
 
 .kit-button--ghost {
-  background: var(--kit-color-ghost);
-  color: var(--kit-color-ghost-foreground);
+  background: var(--kit-color-ghost, transparent);
+  color: var(--kit-color-ghost-foreground, var(--kit-color-text-secondary));
 }
 
 .kit-button--ghost:hover:not(:disabled) {
-  background: var(--kit-color-ghost-hover);
-  color: var(--kit-color-ghost-hover-foreground);
+  background: var(--kit-color-ghost-hover, var(--kit-color-surface-hover));
+  color: var(--kit-color-ghost-hover-foreground, var(--kit-color-text));
 }
 
 .kit-button--sm {
-  min-height: var(--kit-button-sm-min-height);
-  padding: 0 var(--kit-button-sm-padding-inline);
-  font-size: var(--kit-button-sm-font-size);
+  min-height: var(--kit-button-sm-min-height, 2rem);
+  padding: 0 var(--kit-button-sm-padding-inline, 0.75rem);
+  font-size: var(--kit-button-sm-font-size, 0.875rem);
 }
 
 .kit-button--md {
-  min-height: var(--kit-button-md-min-height);
-  padding: 0 var(--kit-button-md-padding-inline);
-  font-size: var(--kit-button-md-font-size);
+  min-height: var(--kit-button-md-min-height, 2.5rem);
+  padding: 0 var(--kit-button-md-padding-inline, 1rem);
+  font-size: var(--kit-button-md-font-size, 0.9375rem);
 }
 
 .kit-button--lg {
-  min-height: var(--kit-button-lg-min-height);
-  padding: 0 var(--kit-button-lg-padding-inline);
-  font-size: var(--kit-button-lg-font-size);
+  min-height: var(--kit-button-lg-min-height, 3rem);
+  padding: 0 var(--kit-button-lg-padding-inline, 1.25rem);
+  font-size: var(--kit-button-lg-font-size, 1rem);
 }
 /* leptos-ui-kit:end button */

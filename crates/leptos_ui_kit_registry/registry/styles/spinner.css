@@ -1,19 +1,10 @@
 /* leptos-ui-kit:start spinner */
-:root {
-  --kit-spinner-animation-duration: 900ms;
-  --kit-spinner-block-size: 1em;
-  --kit-spinner-border-width: 0.125em;
-  --kit-spinner-color: currentColor;
-  --kit-spinner-inline-size: 1em;
-  --kit-spinner-track-color: rgb(0 0 0 / 20%);
-}
-
 .kit-spinner {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: var(--kit-spinner-inline-size);
-  block-size: var(--kit-spinner-block-size);
+  inline-size: var(--kit-spinner-inline-size, 1em);
+  block-size: var(--kit-spinner-block-size, 1em);
   color: currentColor;
   line-height: 1;
 }
@@ -22,10 +13,11 @@
   box-sizing: border-box;
   inline-size: 100%;
   block-size: 100%;
-  border: var(--kit-spinner-border-width) solid var(--kit-spinner-track-color);
-  border-block-start-color: var(--kit-spinner-color);
-  border-radius: 999px;
-  animation: kit-spinner-rotate var(--kit-spinner-animation-duration) linear infinite;
+  border: var(--kit-spinner-border-width, 0.125em) solid
+    var(--kit-spinner-track-color, color-mix(in srgb, currentColor 20%, transparent));
+  border-block-start-color: var(--kit-spinner-color, currentColor);
+  border-radius: var(--kit-radius-full);
+  animation: kit-spinner-rotate var(--kit-spinner-animation-duration, 900ms) linear infinite;
 }
 
 .kit-spinner-label {

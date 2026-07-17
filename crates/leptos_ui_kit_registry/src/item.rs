@@ -1315,6 +1315,14 @@ mod tests {
         assert!(css.contains(".kit-button-content[data-loading]"));
         assert!(css.contains(":focus-visible"));
         assert!(!css.contains("@import"));
+        assert!(!css.contains(":root"));
+        assert!(!css.contains('#'));
+        assert!(css.contains("var(--kit-button-border-width, var(--kit-border-width))"));
+        assert!(css.contains("var(--kit-button-disabled-opacity, var(--kit-disabled-opacity))"));
+        assert!(css.contains("var(--kit-button-transition-duration, var(--kit-duration-fast))"));
+        assert!(css.contains("var(--kit-button-transition-timing, var(--kit-easing-standard))"));
+        assert!(css.contains("var(--kit-color-ghost, transparent)"));
+        assert!(css.contains("var(--kit-color-ghost-hover, var(--kit-color-surface-hover))"));
         assert!(
             item.item
                 .accessibility
@@ -1362,6 +1370,10 @@ mod tests {
         assert!(css.contains(".kit-anchor"));
         assert!(css.contains("--kit-anchor-color"));
         assert!(css.contains(":focus-visible"));
+        assert!(!css.contains(":root"));
+        assert!(css.contains("var(--kit-anchor-color, var(--kit-color-link))"));
+        assert!(css.contains("var(--kit-anchor-color-hover, var(--kit-color-link-hover))"));
+        assert!(css.contains("var(--kit-anchor-focus-outline-color, var(--kit-focus-ring))"));
         assert!(
             item.item
                 .accessibility
@@ -1823,6 +1835,11 @@ mod tests {
         assert!(css.contains(".kit-spinner"));
         assert!(css.contains("@keyframes kit-spinner-rotate"));
         assert!(css.contains("--kit-spinner-animation-duration"));
+        assert!(!css.contains(":root"));
+        assert!(css.contains("var(--kit-spinner-color, currentColor)"));
+        assert!(css.contains("color-mix(in srgb, currentColor 20%, transparent)"));
+        assert!(css.contains("border-radius: var(--kit-radius-full)"));
+        assert!(css.contains("var(--kit-spinner-animation-duration, 900ms)"));
         assert!(
             item.item
                 .accessibility
@@ -1858,6 +1875,9 @@ mod tests {
         assert!(source.contains("aria-atomic=if atomic"));
         assert!(css.contains(".kit-status"));
         assert!(css.contains("--kit-status-color"));
+        assert!(!css.contains(":root"));
+        assert!(css.contains("color: var(--kit-status-color, var(--kit-color-text))"));
+        assert!(css.contains("font-size: var(--kit-status-font-size, 1rem)"));
         assert!(
             item.item
                 .accessibility

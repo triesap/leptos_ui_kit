@@ -1,30 +1,19 @@
 /* leptos-ui-kit:start anchor */
-:root {
-  --kit-anchor-color: currentColor;
-  --kit-anchor-color-hover: currentColor;
-  --kit-anchor-focus-outline-color: var(--kit-focus-ring, currentColor);
-  --kit-anchor-focus-outline-offset: 0.125rem;
-  --kit-anchor-focus-outline-width: 0.125rem;
-  --kit-anchor-text-decoration-color: currentColor;
-  --kit-anchor-text-decoration-line: underline;
-  --kit-anchor-text-decoration-thickness: from-font;
-  --kit-anchor-text-underline-offset: 0.12em;
-}
-
 .kit-anchor {
-  color: var(--kit-anchor-color);
-  text-decoration-color: var(--kit-anchor-text-decoration-color);
-  text-decoration-line: var(--kit-anchor-text-decoration-line);
-  text-decoration-thickness: var(--kit-anchor-text-decoration-thickness);
-  text-underline-offset: var(--kit-anchor-text-underline-offset);
+  color: var(--kit-anchor-color, var(--kit-color-link));
+  text-decoration-color: var(--kit-anchor-text-decoration-color, currentColor);
+  text-decoration-line: var(--kit-anchor-text-decoration-line, underline);
+  text-decoration-thickness: var(--kit-anchor-text-decoration-thickness, from-font);
+  text-underline-offset: var(--kit-anchor-text-underline-offset, 0.12em);
 }
 
 .kit-anchor:hover {
-  color: var(--kit-anchor-color-hover);
+  color: var(--kit-anchor-color-hover, var(--kit-color-link-hover));
 }
 
 .kit-anchor:focus-visible {
-  outline: var(--kit-anchor-focus-outline-width) solid var(--kit-anchor-focus-outline-color);
-  outline-offset: var(--kit-anchor-focus-outline-offset);
+  outline: var(--kit-anchor-focus-outline-width, 0.125rem) solid
+    var(--kit-anchor-focus-outline-color, var(--kit-focus-ring));
+  outline-offset: var(--kit-anchor-focus-outline-offset, 0.125rem);
 }
 /* leptos-ui-kit:end anchor */
