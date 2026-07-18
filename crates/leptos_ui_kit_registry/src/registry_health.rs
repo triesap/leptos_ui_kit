@@ -199,11 +199,25 @@ impl std::error::Error for RegistryHealthError {
 
 /// Validates every runtime-relevant file in the packaged built-in registry.
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
-    validate_built_in_registry_health_at(&built_in_registry_root())
+    validate_built_in_registry_health_with_schema_at(
+        &built_in_registry_root(),
+        &built_in_theme_contract_schema_path(),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn validate_built_in_registry_health_at(
     registry_root: &Path,
+) -> Result<(), RegistryHealthError> {
+    validate_built_in_registry_health_with_schema_at(
+        registry_root,
+        &registry_root.join("contracts/theme-contract.schema.json"),
+    )
+}
+
+fn validate_built_in_registry_health_with_schema_at(
+    registry_root: &Path,
+    schema_path: &Path,
 ) -> Result<(), RegistryHealthError> {
     let root_path = registry_root.join("registry.json");
     let root_input = read_utf8(RegistryHealthFileKind::RegistryRoot, &root_path)?;
@@ -262,16 +276,15 @@ pub(crate) fn validate_built_in_registry_health_at(
         }
     })?;
 
-    let schema_path = registry_root.join("contracts/theme-contract.schema.json");
-    let schema_input = read_utf8(RegistryHealthFileKind::ThemeContractSchema, &schema_path)?;
+    let schema_input = read_utf8(RegistryHealthFileKind::ThemeContractSchema, schema_path)?;
     let schema = serde_json::from_str::<Value>(&schema_input).map_err(|source| {
         RegistryHealthError::ParseJson {
             kind: RegistryHealthFileKind::ThemeContractSchema,
-            path: schema_path.clone(),
+            path: schema_path.to_path_buf(),
             source,
         }
     })?;
-    validate_theme_contract_schema_shape(&schema_path, &schema)?;
+    validate_theme_contract_schema_shape(schema_path, &schema)?;
 
     let (tokens, tokens_path) = items
         .iter()
@@ -550,6 +563,10 @@ fn built_in_registry_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("registry")
 }
 
+fn built_in_theme_contract_schema_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/0.9.0-alpha/theme-contract.schema.json")
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -559,13 +576,19 @@ mod tests {
 
     use super::{
         RegistryHealthError, RegistryHealthFileKind, built_in_registry_root,
-        validate_built_in_registry_health, validate_built_in_registry_health_at,
+        built_in_theme_contract_schema_path, validate_built_in_registry_health,
+        validate_built_in_registry_health_at,
     };
 
     fn health_fixture() -> (TempDir, std::path::PathBuf) {
         let temp = tempfile::tempdir().expect("create registry health fixture");
         let root = temp.path().join("registry");
         copy_directory(&built_in_registry_root(), &root);
+        fs::copy(
+            built_in_theme_contract_schema_path(),
+            root.join("contracts/theme-contract.schema.json"),
+        )
+        .expect("copy package theme contract schema");
         (temp, root)
     }
 

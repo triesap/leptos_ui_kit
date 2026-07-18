@@ -771,8 +771,7 @@ mod tests {
 
     #[test]
     fn public_schema_matches_desired_item_vocabulary() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/0.9.0-alpha/kit.schema.json");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/0.9.0-alpha/kit.schema.json");
         let schema = serde_json::from_str::<serde_json::Value>(
             &std::fs::read_to_string(path).expect("read schema"),
         )

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json",
+  "title": "leptos_ui_kit registry root",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "name",
+    "items"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json"
+    },
+    "schemaVersion": {
+      "const": "0.9.0-alpha"
+    },
+    "name": {
+      "const": "leptos-ui-kit"
+    },
+    "items": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.json$"
+          }
+        }
+      }
+    }
+  }
+}

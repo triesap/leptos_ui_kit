@@ -1273,6 +1273,7 @@ mod tests {
 
                 let path = built_in_registry_root().join(file.source);
                 let output = Command::new("rustfmt")
+                    .args(["--edition", "2024", "--config", "newline_style=Unix"])
                     .arg("--check")
                     .arg(&path)
                     .output()
@@ -2430,7 +2431,7 @@ mod tests {
     #[test]
     fn public_item_schema_declares_foundation_invariants() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schema/0.9.0-alpha/registry-item.schema.json");
+            .join("schema/0.9.0-alpha/registry-item.schema.json");
         let schema = serde_json::from_str::<serde_json::Value>(
             &std::fs::read_to_string(path).expect("read schema"),
         )
@@ -2452,7 +2453,7 @@ mod tests {
 
     #[test]
     fn public_registry_schemas_declare_structural_integrity_constraints() {
-        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/0.9.0-alpha");
+        let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/0.9.0-alpha");
         let root_schema = serde_json::from_str::<serde_json::Value>(
             &std::fs::read_to_string(schema_root.join("registry.schema.json"))
                 .expect("read registry schema"),

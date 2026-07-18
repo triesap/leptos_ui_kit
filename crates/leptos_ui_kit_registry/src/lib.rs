@@ -4,6 +4,11 @@
 
 mod config;
 mod detect;
+#[allow(
+    dead_code,
+    reason = "the generated catalog becomes the runtime provider in the next checkpoint"
+)]
+mod embedded_assets;
 mod item;
 mod registry_health;
 mod theme_contract;

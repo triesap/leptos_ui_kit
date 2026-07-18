@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "title": "leptos_ui_kit registry item",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "name",
+    "kind",
+    "version",
+    "title",
+    "description",
+    "leptos",
+    "files",
+    "styles",
+    "cargoPlan"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json"
+    },
+    "schemaVersion": {
+      "const": "0.9.0-alpha"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "kind": {
+      "enum": [
+        "ui",
+        "foundation"
+      ]
+    },
+    "version": {
+      "const": "0.9.0-alpha"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "leptos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "routerVersion",
+        "renderMode"
+      ],
+      "properties": {
+        "version": {
+          "const": "0.9.0-alpha"
+        },
+        "routerVersion": {
+          "const": "0.9.0-alpha"
+        },
+        "renderMode": {
+          "const": "csr"
+        }
+      }
+    },
+    "accessibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "behaviors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "required"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "required": {
+                "type": "boolean"
+              }
+            }
+          },
+          "uniqueItems": true
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.rs$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "path"
+            ],
+            "properties": {
+              "kind": {
+                "const": "ui"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^([a-z_][a-z0-9_]*\\.rs|[a-z_][a-z0-9_]*(/[a-z_][a-z0-9_]*)*/([a-z_][a-z0-9_]*|mod)\\.rs)$"
+              },
+              "exports": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "styles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.css$"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id"
+            ],
+            "properties": {
+              "kind": {
+                "const": "managed-css-block"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "registryDependencies": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$"
+      }
+    },
+    "cargoPlan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "crate",
+          "source",
+          "required"
+        ],
+        "properties": {
+          "crate": {
+            "enum": [
+              "leptos",
+              "leptos_router",
+              "web_ui_primitives"
+            ]
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "version"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "version"
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "url",
+                  "rev"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "git"
+                  },
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "rev": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{7,40}$"
+                  }
+                }
+              }
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_+./:-]+$"
+            },
+            "uniqueItems": true
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "extra": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "foundation"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "maxItems": 0
+          },
+          "styles": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

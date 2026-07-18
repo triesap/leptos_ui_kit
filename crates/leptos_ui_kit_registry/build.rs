@@ -1,7 +1,12 @@
+mod build_assets;
 mod build_provenance;
 
-use std::{env, path::Path};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
+use build_assets::generate_asset_catalog;
 use build_provenance::{
     SystemGit, explicit_revision, probe_checkout, read_cargo_vcs, resolve_provenance,
 };
@@ -10,9 +15,25 @@ const REV_ENV: &str = "LEPTOS_UI_KIT_GIT_REV";
 const SOURCE_ENV: &str = "LEPTOS_UI_KIT_GIT_REV_SOURCE";
 
 fn main() {
+    if let Err(error) = emit_asset_catalog() {
+        panic!("failed to generate leptos_ui_kit embedded assets: {error}");
+    }
     if let Err(error) = emit_build_provenance() {
         panic!("failed to resolve leptos_ui_kit build provenance: {error}");
     }
+}
+
+fn emit_asset_catalog() -> Result<(), build_assets::AssetCatalogError> {
+    println!("cargo:rerun-if-changed=build_assets.rs");
+    let package_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(
+        env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR to registry build scripts"),
+    );
+    let catalog = generate_asset_catalog(package_root, &out_dir)?;
+    for path in catalog.rerun_paths {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    Ok(())
 }
 
 fn emit_build_provenance() -> Result<(), build_provenance::ProvenanceError> {

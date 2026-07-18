@@ -347,22 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn package_schema_matches_public_schema() {
+    fn package_schema_declares_the_public_contract_identity() {
         let package_schema = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("registry/contracts/theme-contract.schema.json");
-        let public_schema = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../schema/0.9.0-alpha/theme-contract.schema.json");
+            .join("schema/0.9.0-alpha/theme-contract.schema.json");
 
         let package_value = serde_json::from_str::<serde_json::Value>(
             &fs::read_to_string(package_schema).expect("read package schema"),
         )
         .expect("parse package schema");
-        let public_value = serde_json::from_str::<serde_json::Value>(
-            &fs::read_to_string(public_schema).expect("read public schema"),
-        )
-        .expect("parse public schema");
 
-        assert_eq!(package_value, public_value);
+        assert_eq!(package_value["$id"], json!(THEME_CONTRACT_SCHEMA_URL));
+        assert_eq!(
+            package_value["$schema"],
+            json!("https://json-schema.org/draft/2020-12/schema")
+        );
     }
 
     #[test]

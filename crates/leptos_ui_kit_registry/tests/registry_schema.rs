@@ -9,8 +9,8 @@ use leptos_ui_kit_registry::{
 };
 use serde_json::{Value, json};
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+fn package_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
 fn read_json(path: &Path) -> Value {
@@ -67,8 +67,8 @@ fn collect_json_paths(root: &Path, directory: &Path, paths: &mut BTreeSet<String
 }
 
 #[test]
-fn public_registry_schemas_are_valid_draft_2020_12() {
-    let schema_root = workspace_root().join("schema/0.9.0-alpha");
+fn package_registry_schemas_are_valid_draft_2020_12() {
+    let schema_root = package_root().join("schema/0.9.0-alpha");
     for (file_name, expected_id) in [
         ("registry.schema.json", REGISTRY_SCHEMA_URL),
         ("registry-item.schema.json", REGISTRY_ITEM_SCHEMA_URL),
@@ -85,10 +85,10 @@ fn public_registry_schemas_are_valid_draft_2020_12() {
 }
 
 #[test]
-fn public_registry_schemas_validate_every_built_in_document() {
-    let root = workspace_root();
+fn package_registry_schemas_validate_every_built_in_document() {
+    let root = package_root();
     let schema_root = root.join("schema/0.9.0-alpha");
-    let registry_root = root.join("crates/leptos_ui_kit_registry/registry");
+    let registry_root = root.join("registry");
     let (_, root_validator) =
         compile_draft_2020_12_schema(&schema_root.join("registry.schema.json"));
     let (_, item_validator) =
@@ -133,10 +133,10 @@ fn public_registry_schemas_validate_every_built_in_document() {
 }
 
 #[test]
-fn public_registry_schemas_reject_structurally_invalid_documents() {
-    let root = workspace_root();
+fn package_registry_schemas_reject_structurally_invalid_documents() {
+    let root = package_root();
     let schema_root = root.join("schema/0.9.0-alpha");
-    let registry_root = root.join("crates/leptos_ui_kit_registry/registry");
+    let registry_root = root.join("registry");
     let (_, root_validator) =
         compile_draft_2020_12_schema(&schema_root.join("registry.schema.json"));
     let (_, item_validator) =

@@ -13,9 +13,13 @@ use leptos_ui_kit_registry::{
 
 // This pure resolver contract intentionally precedes wiring the helper into build.rs.
 // It freezes the approved decision boundary for the production change that follows.
+#[allow(dead_code)]
+#[path = "../build_assets.rs"]
+mod build_assets;
 #[path = "../build_provenance.rs"]
 mod build_provenance;
 
+use build_assets::ASSET_SPECS;
 use build_provenance::{
     CheckoutProvenance, GIT_REPOSITORY_OVERRIDE_ENV, GitRunner, ProvenanceError, ProvenanceSource,
     ResolvedProvenance, SystemGit, explicit_revision, is_canonical_repository, probe_checkout,
@@ -33,100 +37,36 @@ const EXPECTED_PUBLIC_SCHEMA_PATHS: [&str; 4] = [
     "schema/0.9.0-alpha/theme-contract.schema.json",
 ];
 
+const CARGO_GENERATED_VCS_METADATA: &str = ".cargo_vcs_info.json";
+
 const EXPECTED_PACKAGE_SUPPORT: [&str; 7] = [
-    ".cargo_vcs_info.json",
     "Cargo.lock",
     "Cargo.toml",
     "Cargo.toml.orig",
     "README.md",
     "build.rs",
+    "build_assets.rs",
     "build_provenance.rs",
 ];
 
-const EXPECTED_PACKAGE_SOURCES: [&str; 6] = [
+const EXPECTED_PACKAGE_SOURCES: [&str; 7] = [
     "src/config.rs",
     "src/detect.rs",
+    "src/embedded_assets.rs",
     "src/item.rs",
     "src/lib.rs",
     "src/registry_health.rs",
     "src/theme_contract.rs",
 ];
 
-const EXPECTED_PACKAGE_TESTS: [&str; 6] = [
+const EXPECTED_PACKAGE_TESTS: [&str; 7] = [
+    "tests/asset_catalog.rs",
     "tests/fixtures/theme_refactor_compatibility.json",
     "tests/fixtures/theme_refactor_mapping.json",
     "tests/packaged_runtime_boundaries.rs",
     "tests/registry_schema.rs",
     "tests/theme_refactor_compatibility.rs",
     "tests/theme_refactor_mapping.rs",
-];
-
-const EXPECTED_REGISTRY_ASSETS: [&str; 65] = [
-    "contracts/theme-contract.schema.json",
-    "contracts/theme-v1.json",
-    "foundation/tokens.json",
-    "registry.json",
-    "styles/anchor.css",
-    "styles/button.css",
-    "styles/collapsible.css",
-    "styles/dialog.css",
-    "styles/field.css",
-    "styles/menu.css",
-    "styles/spinner.css",
-    "styles/status.css",
-    "styles/tabs.css",
-    "styles/tokens.css",
-    "ui/anchor.json",
-    "ui/anchor.rs",
-    "ui/button.json",
-    "ui/button.rs",
-    "ui/collapsible.json",
-    "ui/collapsible/content.rs",
-    "ui/collapsible/mod.rs",
-    "ui/collapsible/root.rs",
-    "ui/collapsible/trigger.rs",
-    "ui/dialog.json",
-    "ui/dialog/close.rs",
-    "ui/dialog/content.rs",
-    "ui/dialog/description.rs",
-    "ui/dialog/mod.rs",
-    "ui/dialog/root.rs",
-    "ui/dialog/title.rs",
-    "ui/dialog/trigger.rs",
-    "ui/field.json",
-    "ui/field/label.rs",
-    "ui/field/message.rs",
-    "ui/field/mod.rs",
-    "ui/field/native_select.rs",
-    "ui/field/required.rs",
-    "ui/field/root.rs",
-    "ui/field/select_field.rs",
-    "ui/field/slot.rs",
-    "ui/field/surface.rs",
-    "ui/field/text_area.rs",
-    "ui/field/text_area_field.rs",
-    "ui/field/text_field.rs",
-    "ui/field/text_input.rs",
-    "ui/menu.json",
-    "ui/menu/content.rs",
-    "ui/menu/item.rs",
-    "ui/menu/item_indicator.rs",
-    "ui/menu/mod.rs",
-    "ui/menu/radio_item.rs",
-    "ui/menu/root.rs",
-    "ui/menu/trigger.rs",
-    "ui/router-link.json",
-    "ui/router_link.rs",
-    "ui/spinner.json",
-    "ui/spinner.rs",
-    "ui/status.json",
-    "ui/status.rs",
-    "ui/tabs.json",
-    "ui/tabs/list.rs",
-    "ui/tabs/mod.rs",
-    "ui/tabs/panel.rs",
-    "ui/tabs/root.rs",
-    "ui/tabs/trigger.rs",
 ];
 
 #[test]
@@ -581,7 +521,12 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
     collect_files(&registry_root, &registry_root, &mut actual);
     actual.sort();
 
-    assert_eq!(actual, EXPECTED_REGISTRY_ASSETS);
+    let expected = ASSET_SPECS
+        .iter()
+        .filter_map(|spec| spec.source_path.strip_prefix("registry/"))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 64);
     let mut case_folded = BTreeSet::new();
     for path in actual {
         assert!(!path.starts_with('/'));
@@ -593,11 +538,9 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
 
 #[test]
 fn approved_embedded_inventory_has_68_unique_logical_assets() {
-    let logical_assets = EXPECTED_REGISTRY_ASSETS
+    let logical_assets = ASSET_SPECS
         .iter()
-        .filter(|path| **path != "contracts/theme-contract.schema.json")
-        .map(|path| format!("registry/{path}"))
-        .chain(EXPECTED_PUBLIC_SCHEMA_PATHS.map(str::to_owned))
+        .map(|spec| spec.logical_path.to_owned())
         .collect::<BTreeSet<_>>();
 
     assert_eq!(logical_assets.len(), 68);
@@ -610,7 +553,7 @@ fn approved_embedded_inventory_has_68_unique_logical_assets() {
 }
 
 #[test]
-fn registry_crate_package_inventory_is_exact_and_freezes_missing_schema_debt() {
+fn registry_crate_package_inventory_is_exact_and_self_contained() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest_path = manifest_dir.join("Cargo.toml");
     let output = Command::new(env!("CARGO"))
@@ -631,31 +574,29 @@ fn registry_crate_package_inventory_is_exact_and_freezes_missing_schema_debt() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let actual = String::from_utf8(output.stdout)
+    let mut actual = String::from_utf8(output.stdout)
         .expect("UTF-8 cargo package list")
         .lines()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+    // Cargo adds VCS metadata when packaging from Git, but a package can be
+    // repackaged from its extracted archive without that generated input.
+    // It is provenance metadata rather than an authored runtime asset.
+    actual.remove(CARGO_GENERATED_VCS_METADATA);
     let expected = EXPECTED_PACKAGE_SUPPORT
         .iter()
         .map(|path| (*path).to_owned())
-        .chain(
-            EXPECTED_REGISTRY_ASSETS
-                .iter()
-                .map(|path| format!("registry/{path}")),
-        )
+        .chain(ASSET_SPECS.map(|spec| spec.source_path.to_owned()))
         .chain(EXPECTED_PACKAGE_SOURCES.map(str::to_owned))
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 84);
+    assert_eq!(expected.len(), 89);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
-        assert!(
-            !actual.contains(schema),
-            "unexpected packaged schema: {schema}"
-        );
+        assert!(actual.contains(schema), "missing packaged schema: {schema}");
     }
+    assert!(!actual.contains("tests/public_schema_parity.rs"));
 }
 
 #[test]

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/kit.schema.json",
+  "title": "leptos_ui_kit kit.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "tool",
+    "project",
+    "leptos",
+    "install",
+    "styles",
+    "registry",
+    "items"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/kit.schema.json"
+    },
+    "schemaVersion": {
+      "const": "0.9.0-alpha"
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package",
+        "binary",
+        "source"
+      ],
+      "properties": {
+        "package": {
+          "const": "leptos_ui_kit_cli"
+        },
+        "binary": {
+          "const": "leptos_ui_kit"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "url",
+            "rev"
+          ],
+          "properties": {
+            "kind": {
+              "const": "git"
+            },
+            "url": {
+              "const": "https://github.com/triesap/leptos_ui_kit"
+            },
+            "rev": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{40}$"
+            }
+          }
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "crateRoot",
+        "srcDir",
+        "indexHtml"
+      ],
+      "properties": {
+        "kind": {
+          "const": "single-crate-trunk-csr"
+        },
+        "crateRoot": {
+          "const": "."
+        },
+        "srcDir": {
+          "const": "src"
+        },
+        "indexHtml": {
+          "const": "index.html"
+        }
+      }
+    },
+    "leptos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "routerVersion",
+        "renderMode"
+      ],
+      "properties": {
+        "version": {
+          "const": "0.9.0-alpha"
+        },
+        "routerVersion": {
+          "const": "0.9.0-alpha"
+        },
+        "renderMode": {
+          "const": "csr"
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uiDir",
+        "uiMod",
+        "componentsMod"
+      ],
+      "properties": {
+        "uiDir": {
+          "const": "src/components/ui"
+        },
+        "uiMod": {
+          "const": "src/components/ui/mod.rs"
+        },
+        "componentsMod": {
+          "const": "src/components/mod.rs"
+        }
+      }
+    },
+    "styles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "css"
+      ],
+      "properties": {
+        "mode": {
+          "const": "pure-css"
+        },
+        "css": {
+          "type": "string",
+          "default": "styles/kit.css",
+          "pattern": "^styles/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\\.css$"
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "const": "builtin"
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "source"
+        ],
+        "properties": {
+          "name": {
+            "enum": [
+              "anchor",
+              "button",
+              "collapsible",
+              "dialog",
+              "field",
+              "menu",
+              "router-link",
+              "spinner",
+              "status",
+              "tabs",
+              "tokens"
+            ]
+          },
+          "source": {
+            "const": "builtin"
+          }
+        }
+      }
+    }
+  }
+}
