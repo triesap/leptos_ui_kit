@@ -2,12 +2,9 @@
 
 //! Registry layer for configuration and item resolution.
 
+mod builtin_registry;
 mod config;
 mod detect;
-#[allow(
-    dead_code,
-    reason = "the generated catalog becomes the runtime provider in the next checkpoint"
-)]
 mod embedded_assets;
 mod item;
 mod registry_health;
@@ -33,17 +30,22 @@ pub use detect::{
     dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
     detect_single_crate_project,
 };
+#[allow(
+    deprecated,
+    reason = "preserve the deprecated public compatibility API"
+)]
+pub use item::registry_item_content_hash;
 pub use item::{
-    CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, REGISTRY_ITEM_SCHEMA_URL,
-    REGISTRY_SCHEMA_URL, RegistryAccessibility, RegistryAccessibilityBehavior, RegistryError,
-    RegistryFileTarget, RegistryFileTargetKind, RegistryItem, RegistryItemFile, RegistryItemKind,
-    RegistryItemStyle, RegistryLeptos, RegistryRoot, RegistryRootItem, RegistrySourceKind,
-    RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
+    BuiltInAssetError, BuiltInAssetKind, CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind,
+    REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryAccessibility,
+    RegistryAccessibilityBehavior, RegistryError, RegistryFileTarget, RegistryFileTargetKind,
+    RegistryItem, RegistryItemFile, RegistryItemKind, RegistryItemStyle, RegistryLeptos,
+    RegistryRoot, RegistryRootItem, RegistrySourceKind, RegistryStyleTarget,
+    RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
     ResolvedStyleBlockTarget, ResolvedUiTarget, WEB_UI_PRIMITIVES_VERSION,
     load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
     parse_registry_item_str, parse_registry_root_str, read_built_in_registry_source,
-    registry_item_content_hash, resolve_built_in_registry_items, resolve_registry_targets,
-    validate_registry_graph,
+    resolve_built_in_registry_items, resolve_registry_targets, validate_registry_graph,
 };
 pub use registry_health::{
     RegistryHealthError, RegistryHealthFileKind, validate_built_in_registry_health,

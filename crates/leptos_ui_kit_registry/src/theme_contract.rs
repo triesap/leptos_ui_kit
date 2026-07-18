@@ -1,12 +1,12 @@
-use std::{
-    collections::BTreeSet,
-    fmt, fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::SCHEMA_VERSION;
+use crate::{
+    BuiltInAssetError, SCHEMA_VERSION,
+    builtin_registry::{SnapshotError, built_in_registry_snapshot},
+    item::built_in_asset_kind,
+};
 
 pub const THEME_CONTRACT_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/theme-contract.schema.json";
@@ -26,6 +26,7 @@ pub enum ThemeContractError {
         actual: String,
     },
     DuplicateToken(String),
+    BuiltInAsset(BuiltInAssetError),
 }
 
 impl fmt::Display for ThemeContractError {
@@ -48,11 +49,21 @@ impl fmt::Display for ThemeContractError {
                 "invalid theme contract value for {field}: expected {expected}, got {actual}"
             ),
             Self::DuplicateToken(name) => write!(f, "duplicate theme contract token: {name}"),
+            Self::BuiltInAsset(source) => source.fmt(f),
         }
     }
 }
 
-impl std::error::Error for ThemeContractError {}
+impl std::error::Error for ThemeContractError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Parse(source) => Some(source),
+            Self::BuiltInAsset(source) => Some(source),
+            Self::InvalidValue { .. } | Self::DuplicateToken(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -132,19 +143,74 @@ pub fn parse_theme_contract_str(input: &str) -> Result<ThemeContract, ThemeContr
 }
 
 pub fn load_built_in_theme_contract() -> Result<ThemeContract, ThemeContractError> {
-    let path = built_in_theme_contract_path();
-    let input = fs::read_to_string(&path).map_err(|source| ThemeContractError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    parse_theme_contract_str(&input)
+    built_in_registry_snapshot()
+        .map(|snapshot| snapshot.theme_contract().clone())
+        .map_err(snapshot_theme_contract_error)
 }
 
-fn built_in_theme_contract_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("registry")
-        .join("contracts")
-        .join("theme-v1.json")
+fn snapshot_theme_contract_error(error: SnapshotError) -> ThemeContractError {
+    match error {
+        SnapshotError::Provider(source) => ThemeContractError::BuiltInAsset(source.into()),
+        SnapshotError::MissingAsset { logical_path } => {
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::Missing {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::UnexpectedAsset { logical_path } => {
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::Unexpected {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateAsset { logical_path } => {
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::Duplicate {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::UnsortedAsset {
+            previous,
+            logical_path,
+        } => ThemeContractError::BuiltInAsset(BuiltInAssetError::Unsorted {
+            previous: previous.into(),
+            logical_path: logical_path.into(),
+        }),
+        SnapshotError::KindMismatch {
+            logical_path,
+            expected,
+            actual,
+        } => ThemeContractError::BuiltInAsset(BuiltInAssetError::KindMismatch {
+            logical_path: logical_path.into(),
+            expected: built_in_asset_kind(expected),
+            actual: built_in_asset_kind(actual),
+        }),
+        SnapshotError::UnownedRuntimeAsset { logical_path } => {
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::UnownedRuntimeAsset {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateRuntimeAssetReference {
+            logical_path,
+            first_owner,
+            second_owner,
+        } => ThemeContractError::BuiltInAsset(BuiltInAssetError::DuplicateRuntimeAssetReference {
+            logical_path: logical_path.into(),
+            first_owner,
+            second_owner,
+        }),
+        SnapshotError::InvalidThemeContract {
+            logical_path,
+            source,
+        } => ThemeContractError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+            logical_path: logical_path.into(),
+            reason: source.to_string(),
+        }),
+        error => ThemeContractError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+            logical_path: error
+                .logical_path()
+                .unwrap_or("registry/contracts/theme-v1.json")
+                .into(),
+            reason: error.to_string(),
+        }),
+    }
 }
 
 fn expect_string(
@@ -215,9 +281,12 @@ mod tests {
     use super::{
         THEME_CONTRACT_NAME, THEME_CONTRACT_SCHEMA_URL, THEME_CONTRACT_VERSION, ThemeContract,
         ThemeContractError, ThemeToken, ThemeTokenCategory, load_built_in_theme_contract,
-        parse_theme_contract_str,
+        parse_theme_contract_str, snapshot_theme_contract_error,
     };
-    use crate::{SCHEMA_VERSION, read_built_in_registry_source};
+    use crate::{
+        BuiltInAssetError, SCHEMA_VERSION, builtin_registry::BuiltInRegistrySnapshot,
+        embedded_assets::InMemoryAssetProvider, read_built_in_registry_source,
+    };
 
     fn valid_contract() -> ThemeContract {
         ThemeContract {
@@ -248,6 +317,76 @@ mod tests {
                 .iter()
                 .any(|token| token.name == "--kit-color-surface")
         );
+    }
+
+    #[test]
+    fn theme_adapter_preserves_embedded_utf8_fault_class_and_locator() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_bytes("registry/ui/button.rs", [0xff])
+            .expect("replace asset bytes");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("non-UTF-8 source must reject the snapshot");
+
+        let error = snapshot_theme_contract_error(injected);
+        assert!(matches!(
+            &error,
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::NonUtf8 {
+                logical_path,
+                ..
+            }) if logical_path == Path::new("registry/ui/button.rs")
+        ));
+        assert!(!matches!(error, ThemeContractError::Io { .. }));
+    }
+
+    #[test]
+    fn theme_adapter_preserves_invalid_schema_locator_without_io_fallback() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_bytes("schema/0.9.0-alpha/kit.schema.json", b"{}")
+            .expect("replace schema bytes");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("invalid schema contract must reject the snapshot");
+
+        let error = snapshot_theme_contract_error(injected);
+        assert!(matches!(
+            &error,
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+                logical_path,
+                ..
+            }) if logical_path == Path::new("schema/0.9.0-alpha/kit.schema.json")
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("schema/0.9.0-alpha/kit.schema.json")
+        );
+        assert!(!matches!(error, ThemeContractError::Io { .. }));
+    }
+
+    #[test]
+    fn theme_adapter_preserves_invalid_contract_locator_without_io_fallback() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_bytes("registry/contracts/theme-v1.json", b"{")
+            .expect("replace contract bytes");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("malformed contract must reject the snapshot");
+
+        let error = snapshot_theme_contract_error(injected);
+        assert!(matches!(
+            &error,
+            ThemeContractError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+                logical_path,
+                ..
+            }) if logical_path == Path::new("registry/contracts/theme-v1.json")
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("registry/contracts/theme-v1.json")
+        );
+        assert!(!matches!(error, ThemeContractError::Io { .. }));
     }
 
     #[test]

@@ -9,6 +9,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION, THEME_CONTRACT_VERSION,
+    builtin_registry::{
+        BuiltInRegistryItemSnapshot, BuiltInRegistrySnapshot, SnapshotError,
+        built_in_registry_snapshot,
+    },
+    embedded_assets::{AssetProviderError, EmbeddedAssetKind},
 };
 
 pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
@@ -17,6 +22,247 @@ pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
 pub const REGISTRY_ITEM_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json";
+
+/// The declared content kind of one immutable built-in asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltInAssetKind {
+    Json,
+    Rust,
+    Css,
+}
+
+impl fmt::Display for BuiltInAssetKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json => formatter.write_str("JSON"),
+            Self::Rust => formatter.write_str("Rust"),
+            Self::Css => formatter.write_str("CSS"),
+        }
+    }
+}
+
+/// A failure in the immutable built-in asset catalog.
+///
+/// Every path carried by this error is a stable logical catalog locator, not
+/// an authoring checkout, Cargo cache, or build output path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuiltInAssetError {
+    InvalidLogicalPath {
+        logical_path: PathBuf,
+        reason: &'static str,
+    },
+    Missing {
+        logical_path: PathBuf,
+    },
+    Unexpected {
+        logical_path: PathBuf,
+    },
+    Duplicate {
+        logical_path: PathBuf,
+    },
+    Unsorted {
+        previous: PathBuf,
+        logical_path: PathBuf,
+    },
+    UnownedRuntimeAsset {
+        logical_path: PathBuf,
+    },
+    DuplicateRuntimeAssetReference {
+        logical_path: PathBuf,
+        first_owner: String,
+        second_owner: String,
+    },
+    KindMismatch {
+        logical_path: PathBuf,
+        expected: BuiltInAssetKind,
+        actual: BuiltInAssetKind,
+    },
+    NonUtf8 {
+        logical_path: PathBuf,
+        source: std::str::Utf8Error,
+    },
+    HashMismatch {
+        logical_path: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    InvalidContent {
+        logical_path: PathBuf,
+        reason: String,
+    },
+}
+
+impl BuiltInAssetError {
+    pub fn logical_path(&self) -> &Path {
+        match self {
+            Self::InvalidLogicalPath { logical_path, .. }
+            | Self::Missing { logical_path }
+            | Self::Unexpected { logical_path }
+            | Self::Duplicate { logical_path }
+            | Self::Unsorted { logical_path, .. }
+            | Self::UnownedRuntimeAsset { logical_path }
+            | Self::DuplicateRuntimeAssetReference { logical_path, .. }
+            | Self::KindMismatch { logical_path, .. }
+            | Self::NonUtf8 { logical_path, .. }
+            | Self::HashMismatch { logical_path, .. }
+            | Self::InvalidContent { logical_path, .. } => logical_path,
+        }
+    }
+}
+
+impl fmt::Display for BuiltInAssetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLogicalPath {
+                logical_path,
+                reason,
+            } => write!(
+                formatter,
+                "invalid logical built-in asset path {}: {reason}",
+                logical_path.display()
+            ),
+            Self::Missing { logical_path } => {
+                write!(
+                    formatter,
+                    "built-in asset is missing: {}",
+                    logical_path.display()
+                )
+            }
+            Self::Unexpected { logical_path } => write!(
+                formatter,
+                "unexpected built-in asset: {}",
+                logical_path.display()
+            ),
+            Self::Duplicate { logical_path } => write!(
+                formatter,
+                "duplicate built-in asset: {}",
+                logical_path.display()
+            ),
+            Self::Unsorted {
+                previous,
+                logical_path,
+            } => write!(
+                formatter,
+                "built-in assets are not strictly sorted: {} follows {}",
+                logical_path.display(),
+                previous.display()
+            ),
+            Self::UnownedRuntimeAsset { logical_path } => write!(
+                formatter,
+                "built-in runtime asset has no manifest owner: {}",
+                logical_path.display()
+            ),
+            Self::DuplicateRuntimeAssetReference {
+                logical_path,
+                first_owner,
+                second_owner,
+            } => write!(
+                formatter,
+                "built-in runtime asset {} is referenced by both {first_owner} and {second_owner}",
+                logical_path.display()
+            ),
+            Self::KindMismatch {
+                logical_path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "built-in asset {} has kind {actual}, expected {expected}",
+                logical_path.display()
+            ),
+            Self::NonUtf8 { logical_path, .. } => write!(
+                formatter,
+                "built-in asset is not UTF-8: {}",
+                logical_path.display()
+            ),
+            Self::HashMismatch {
+                logical_path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "built-in asset {} has content hash {actual}, expected {expected}",
+                logical_path.display()
+            ),
+            Self::InvalidContent {
+                logical_path,
+                reason,
+            } => write!(
+                formatter,
+                "invalid built-in asset content {}: {reason}",
+                logical_path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BuiltInAssetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NonUtf8 { source, .. } => Some(source),
+            Self::InvalidLogicalPath { .. }
+            | Self::Missing { .. }
+            | Self::Unexpected { .. }
+            | Self::Duplicate { .. }
+            | Self::Unsorted { .. }
+            | Self::UnownedRuntimeAsset { .. }
+            | Self::DuplicateRuntimeAssetReference { .. }
+            | Self::KindMismatch { .. }
+            | Self::HashMismatch { .. }
+            | Self::InvalidContent { .. } => None,
+        }
+    }
+}
+
+impl From<AssetProviderError> for BuiltInAssetError {
+    fn from(error: AssetProviderError) -> Self {
+        match error {
+            AssetProviderError::InvalidLogicalPath {
+                logical_path,
+                reason,
+            } => Self::InvalidLogicalPath {
+                logical_path: logical_path.into(),
+                reason,
+            },
+            AssetProviderError::Missing { logical_path } => Self::Missing {
+                logical_path: logical_path.into(),
+            },
+            AssetProviderError::KindMismatch {
+                logical_path,
+                expected,
+                actual,
+            } => Self::KindMismatch {
+                logical_path: logical_path.into(),
+                expected: built_in_asset_kind(expected),
+                actual: built_in_asset_kind(actual),
+            },
+            AssetProviderError::NonUtf8 {
+                logical_path,
+                source,
+            } => Self::NonUtf8 {
+                logical_path: logical_path.into(),
+                source,
+            },
+            AssetProviderError::HashMismatch {
+                logical_path,
+                expected,
+                actual,
+            } => Self::HashMismatch {
+                logical_path: logical_path.into(),
+                expected,
+                actual,
+            },
+        }
+    }
+}
+
+pub(crate) const fn built_in_asset_kind(kind: EmbeddedAssetKind) -> BuiltInAssetKind {
+    match kind {
+        EmbeddedAssetKind::Json => BuiltInAssetKind::Json,
+        EmbeddedAssetKind::Rust => BuiltInAssetKind::Rust,
+        EmbeddedAssetKind::Css => BuiltInAssetKind::Css,
+    }
+}
 
 #[derive(Debug)]
 pub enum RegistryError {
@@ -47,6 +293,7 @@ pub enum RegistryError {
     DependencyCycle(String),
     MissingSource(PathBuf),
     Serialize(serde_json::Error),
+    BuiltInAsset(BuiltInAssetError),
 }
 
 impl fmt::Display for RegistryError {
@@ -92,11 +339,28 @@ impl fmt::Display for RegistryError {
                 write!(f, "registry source file missing: {}", path.display())
             }
             Self::Serialize(error) => write!(f, "failed to serialize registry metadata: {error}"),
+            Self::BuiltInAsset(source) => source.fmt(f),
         }
     }
 }
 
-impl std::error::Error for RegistryError {}
+impl std::error::Error for RegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } | Self::Serialize(source) => Some(source),
+            Self::BuiltInAsset(source) => Some(source),
+            Self::BuiltInNotFound(_)
+            | Self::LocalRegistryUnsupported(_)
+            | Self::InvalidValue { .. }
+            | Self::UnsafePath { .. }
+            | Self::DuplicateTarget(_)
+            | Self::UnknownDependency { .. }
+            | Self::DependencyCycle(_)
+            | Self::MissingSource(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -569,54 +833,167 @@ pub fn load_registry_item(
 }
 
 pub fn load_built_in_registry_root() -> Result<RegistryRoot, RegistryError> {
-    let path = built_in_registry_root().join("registry.json");
-    let root = parse_registry_root_file(&path)?;
-    validate_built_in_registry_catalog(&root)?;
-    Ok(root)
+    Ok(registry_snapshot()?.root().clone())
 }
 
 pub fn load_built_in_registry_item(name: &str) -> Result<ResolvedRegistryItem, RegistryError> {
-    let root = load_built_in_registry_root()?;
-    let (item, path) = parse_built_in_item_from_root(&root, name)?;
-    let mut items = Vec::new();
-    let mut seen = BTreeSet::new();
-    collect_built_in_item_closure(&root, name, &mut seen, &mut items)?;
-    validate_registry_graph(&items)?;
-    let targets = resolve_registry_targets(&item)?;
-    let content_hash = registry_item_content_hash(&item, &built_in_registry_root())?;
-
-    Ok(ResolvedRegistryItem {
-        source_kind: RegistrySourceKind::BuiltIn,
-        source_path: path,
-        content_hash,
-        targets,
-        item,
-    })
+    load_built_in_registry_item_from(registry_snapshot()?, name)
 }
 
 pub fn read_built_in_registry_source(source: &str) -> Result<String, RegistryError> {
     validate_registry_source_path("source", source)?;
-    read_to_string(&built_in_registry_root().join(source))
+    registry_snapshot()?
+        .registry_source(source)
+        .map(str::to_owned)
+        .map_err(snapshot_error)
 }
 
 pub fn resolve_built_in_registry_items(
     names: &[String],
 ) -> Result<Vec<ResolvedRegistryItem>, RegistryError> {
-    let root = load_built_in_registry_root()?;
-    let mut items = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    for name in names {
-        collect_built_in_item_closure(&root, name, &mut seen, &mut items)?;
-    }
-
-    let order = validate_registry_graph(&items)?;
-    order
+    let snapshot = registry_snapshot()?;
+    let resolved = snapshot
+        .resolve_items(names)
+        .map_err(snapshot_error)?
         .into_iter()
-        .map(|name| load_built_in_registry_item(&name))
-        .collect()
+        .map(resolved_registry_item)
+        .collect();
+    Ok(resolved)
 }
 
+fn registry_snapshot() -> Result<&'static BuiltInRegistrySnapshot, RegistryError> {
+    built_in_registry_snapshot().map_err(snapshot_error)
+}
+
+fn load_built_in_registry_item_from(
+    snapshot: &BuiltInRegistrySnapshot,
+    name: &str,
+) -> Result<ResolvedRegistryItem, RegistryError> {
+    let item = snapshot
+        .item(name)
+        .ok_or_else(|| RegistryError::BuiltInNotFound(name.to_owned()))?;
+    Ok(resolved_registry_item(item))
+}
+
+fn resolved_registry_item(snapshot: &BuiltInRegistryItemSnapshot) -> ResolvedRegistryItem {
+    ResolvedRegistryItem {
+        source_kind: RegistrySourceKind::BuiltIn,
+        source_path: PathBuf::from(snapshot.manifest_path()),
+        content_hash: snapshot.content_hash().to_owned(),
+        targets: snapshot.targets().clone(),
+        item: snapshot.item().clone(),
+    }
+}
+
+fn snapshot_error(error: SnapshotError) -> RegistryError {
+    match error {
+        SnapshotError::Provider(source) => provider_error(source),
+        SnapshotError::MissingAsset { logical_path } => {
+            RegistryError::MissingSource(PathBuf::from(logical_path))
+        }
+        SnapshotError::UnexpectedAsset { logical_path } => {
+            RegistryError::BuiltInAsset(BuiltInAssetError::Unexpected {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateAsset { logical_path } => {
+            RegistryError::BuiltInAsset(BuiltInAssetError::Duplicate {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::UnsortedAsset {
+            previous,
+            logical_path,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::Unsorted {
+            previous: previous.into(),
+            logical_path: logical_path.into(),
+        }),
+        SnapshotError::KindMismatch {
+            logical_path,
+            expected,
+            actual,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::KindMismatch {
+            logical_path: logical_path.into(),
+            expected: built_in_asset_kind(expected),
+            actual: built_in_asset_kind(actual),
+        }),
+        SnapshotError::UnownedRuntimeAsset { logical_path } => {
+            RegistryError::BuiltInAsset(BuiltInAssetError::UnownedRuntimeAsset {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateRuntimeAssetReference {
+            logical_path,
+            first_owner,
+            second_owner,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::DuplicateRuntimeAssetReference {
+            logical_path: logical_path.into(),
+            first_owner,
+            second_owner,
+        }),
+        SnapshotError::ParseJson {
+            logical_path,
+            source,
+        } => RegistryError::Parse {
+            path: PathBuf::from(logical_path),
+            source,
+        },
+        SnapshotError::InvalidRegistryRoot {
+            logical_path,
+            source,
+        }
+        | SnapshotError::InvalidRegistryItem {
+            logical_path,
+            source,
+        }
+        | SnapshotError::InvalidRegistryCatalog {
+            logical_path,
+            source,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+            logical_path: logical_path.into(),
+            reason: source.to_string(),
+        }),
+        SnapshotError::RegistryItemIdentity {
+            logical_path,
+            expected,
+            actual,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+            logical_path: logical_path.into(),
+            reason: format!("registry item name {actual} does not match {expected}"),
+        }),
+        SnapshotError::SerializeItem {
+            logical_path,
+            source,
+        } => RegistryError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+            logical_path: logical_path.into(),
+            reason: source.to_string(),
+        }),
+        SnapshotError::ItemNotFound(name) => RegistryError::BuiltInNotFound(name),
+        other => {
+            let logical_path = other
+                .logical_path()
+                .unwrap_or("registry/registry.json")
+                .into();
+            RegistryError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+                logical_path,
+                reason: other.to_string(),
+            })
+        }
+    }
+}
+
+fn provider_error(error: AssetProviderError) -> RegistryError {
+    match BuiltInAssetError::from(error) {
+        BuiltInAssetError::InvalidLogicalPath { logical_path, .. } => RegistryError::UnsafePath {
+            field: "built-in asset",
+            path: logical_path.display().to_string(),
+        },
+        BuiltInAssetError::Missing { logical_path } => RegistryError::MissingSource(logical_path),
+        source => RegistryError::BuiltInAsset(source),
+    }
+}
+
+#[cfg(test)]
 fn parse_built_in_item_from_root(
     root: &RegistryRoot,
     name: &str,
@@ -634,15 +1011,6 @@ fn parse_built_in_item_from_root(
     validate_registry_root_item_identity(entry, &item)?;
 
     Ok((item, path))
-}
-
-fn validate_built_in_registry_catalog(root: &RegistryRoot) -> Result<(), RegistryError> {
-    let mut items = Vec::with_capacity(root.items.len());
-    for entry in &root.items {
-        items.push(parse_built_in_item_from_root(root, &entry.name)?.0);
-    }
-
-    validate_built_in_registry_items(&items)
 }
 
 pub(crate) fn validate_built_in_registry_items(
@@ -737,24 +1105,6 @@ fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryErro
             actual: format!("{item:?}"),
         })
     }
-}
-
-fn collect_built_in_item_closure(
-    root: &RegistryRoot,
-    name: &str,
-    seen: &mut BTreeSet<String>,
-    items: &mut Vec<RegistryItem>,
-) -> Result<(), RegistryError> {
-    if !seen.insert(name.to_owned()) {
-        return Ok(());
-    }
-
-    let (item, _) = parse_built_in_item_from_root(root, name)?;
-    for dependency in &item.registry_dependencies {
-        collect_built_in_item_closure(root, dependency, seen, items)?;
-    }
-    items.push(item);
-    Ok(())
 }
 
 pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, RegistryError> {
@@ -859,6 +1209,10 @@ pub fn resolve_registry_targets(
     })
 }
 
+#[deprecated(
+    since = "0.1.0",
+    note = "physical registry roots are an authoring-only compatibility API; built-in items now expose a content hash derived from immutable embedded assets"
+)]
 pub fn registry_item_content_hash(
     item: &RegistryItem,
     registry_root: &Path,
@@ -889,11 +1243,12 @@ fn update_hash_with_source(
 ) -> Result<(), RegistryError> {
     validate_registry_source_path("source", source)?;
     let path = registry_root.join(source);
+    let logical_path = PathBuf::from(source);
     if !path.is_file() {
-        return Err(RegistryError::MissingSource(path));
+        return Err(RegistryError::MissingSource(logical_path));
     }
     let bytes = fs::read(&path).map_err(|source| RegistryError::Io {
-        path: path.clone(),
+        path: logical_path,
         source,
     })?;
 
@@ -904,6 +1259,7 @@ fn update_hash_with_source(
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_registry_root_file(path: &Path) -> Result<RegistryRoot, RegistryError> {
     let input = read_to_string(path)?;
     let root = parse_registry_root_str(&input).map_err(|source| RegistryError::Parse {
@@ -914,6 +1270,7 @@ fn parse_registry_root_file(path: &Path) -> Result<RegistryRoot, RegistryError> 
     Ok(root)
 }
 
+#[cfg(test)]
 fn parse_registry_item_file(path: &Path) -> Result<RegistryItem, RegistryError> {
     let input = read_to_string(path)?;
     let item = parse_registry_item_str(&input).map_err(|source| RegistryError::Parse {
@@ -924,6 +1281,7 @@ fn parse_registry_item_file(path: &Path) -> Result<RegistryItem, RegistryError> 
     Ok(item)
 }
 
+#[cfg(test)]
 fn read_to_string(path: &Path) -> Result<String, RegistryError> {
     fs::read_to_string(path).map_err(|source| RegistryError::Io {
         path: path.to_path_buf(),
@@ -1007,6 +1365,7 @@ fn validate_registry_source_path_with_extension(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_registry_root_item_identity(
     entry: &RegistryRootItem,
     item: &RegistryItem,
@@ -1190,6 +1549,7 @@ fn looks_like_local_path(source: &str) -> bool {
         || source.starts_with('.')
 }
 
+#[cfg(test)]
 fn built_in_registry_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("registry")
 }
@@ -1199,6 +1559,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::embedded_assets::InMemoryAssetProvider;
     use web_ui_primitives::{
         core::{Direction, MenuLoop, MenuModel},
         leptos::{
@@ -1245,6 +1606,7 @@ mod tests {
         assert_eq!(resolved.source_kind, RegistrySourceKind::BuiltIn);
         assert_eq!(resolved.item.name, "button");
         assert_eq!(resolved.item.kind, RegistryItemKind::Ui);
+        assert_eq!(resolved.source_path, Path::new("ui/button.json"));
         assert_eq!(resolved.item.files[0].target.path, "button.rs");
         assert_eq!(resolved.item.styles[0].target.id, "button");
         assert!(resolved.content_hash.starts_with("sha256:"));
@@ -1449,6 +1811,114 @@ mod tests {
         let second = load_built_in_registry_item("button").expect("load second");
 
         assert_eq!(first.content_hash, second.content_hash);
+    }
+
+    #[test]
+    #[allow(deprecated, reason = "exercise the public v1 compatibility API")]
+    fn embedded_item_hash_preserves_the_v1_authoring_hash() {
+        let resolved = load_built_in_registry_item("button").expect("load button");
+        let legacy = registry_item_content_hash(&resolved.item, &built_in_registry_root())
+            .expect("hash authoring inputs");
+
+        assert_eq!(resolved.content_hash, legacy);
+        assert_eq!(
+            read_built_in_registry_source("ui/button.rs").expect("read embedded source"),
+            fs::read_to_string(built_in_registry_root().join("ui/button.rs"))
+                .expect("read authoring source")
+        );
+    }
+
+    #[test]
+    fn injected_snapshot_drives_source_view_locator_and_hash_together() {
+        let baseline = load_built_in_registry_item("button").expect("load baseline");
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let replacement = "// injected source\npub fn Button() {}\n";
+        provider
+            .set_bytes("registry/ui/button.rs", replacement.as_bytes())
+            .expect("replace provider source");
+        let snapshot = BuiltInRegistrySnapshot::from_provider(&provider).expect("build snapshot");
+        drop(provider);
+
+        let changed =
+            load_built_in_registry_item_from(&snapshot, "button").expect("resolve injected button");
+        assert_eq!(changed.source_path, Path::new("ui/button.json"));
+        assert_eq!(
+            snapshot
+                .registry_source("ui/button.rs")
+                .expect("read injected source"),
+            replacement
+        );
+        assert_ne!(changed.content_hash, baseline.content_hash);
+    }
+
+    #[test]
+    fn item_adapter_preserves_embedded_hash_fault_class_and_locator() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_declared_hash("registry/registry.json", "sha256:injected-mismatch")
+            .expect("replace declared hash");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("invalid hash must reject the snapshot");
+
+        let error = snapshot_error(injected);
+        assert!(matches!(
+            &error,
+            RegistryError::BuiltInAsset(BuiltInAssetError::HashMismatch {
+                logical_path,
+                expected,
+                actual,
+            }) if logical_path == Path::new("registry/registry.json")
+                && expected == "sha256:injected-mismatch"
+                && actual.starts_with("sha256:")
+        ));
+        assert!(!matches!(error, RegistryError::Io { .. }));
+    }
+
+    #[test]
+    fn item_adapter_preserves_semantic_document_locator_without_io_fallback() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let mut root = load_built_in_registry_root().expect("load template root");
+        root.name = "wrong-registry".to_owned();
+        provider
+            .set_bytes(
+                "registry/registry.json",
+                serde_json::to_vec(&root).expect("serialize invalid root"),
+            )
+            .expect("replace registry root");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("invalid semantic root must reject the snapshot");
+
+        let error = snapshot_error(injected);
+        assert!(matches!(
+            &error,
+            RegistryError::BuiltInAsset(BuiltInAssetError::InvalidContent {
+                logical_path,
+                ..
+            }) if logical_path == Path::new("registry/registry.json")
+        ));
+        assert!(error.to_string().contains("registry/registry.json"));
+        assert!(!matches!(error, RegistryError::Io { .. }));
+    }
+
+    #[test]
+    #[allow(deprecated, reason = "exercise the public v1 compatibility API")]
+    fn compatibility_hash_errors_expose_only_logical_source_paths() {
+        let temp = tempfile::tempdir().expect("create absolute registry root");
+        let mut item = load_built_in_registry_item("button")
+            .expect("load template item")
+            .item;
+        item.files[0].source = "ui/missing.rs".to_owned();
+
+        let error = registry_item_content_hash(&item, temp.path()).expect_err("missing source");
+        let RegistryError::MissingSource(path) = &error else {
+            panic!("expected missing source, got {error}");
+        };
+        assert_eq!(path, Path::new("ui/missing.rs"));
+        assert!(
+            !error
+                .to_string()
+                .contains(&temp.path().display().to_string())
+        );
     }
 
     #[test]

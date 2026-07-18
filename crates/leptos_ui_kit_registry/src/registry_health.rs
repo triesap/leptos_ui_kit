@@ -1,16 +1,23 @@
 use std::{
     collections::BTreeSet,
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
 };
+
+#[cfg(test)]
+use std::fs;
 
 use serde_json::{Value, json};
 
 use crate::{
-    RegistryError, SCHEMA_VERSION, THEME_CONTRACT_NAME, THEME_CONTRACT_SCHEMA_URL,
-    THEME_CONTRACT_VERSION, ThemeContractError, parse_registry_item_str, parse_registry_root_str,
-    parse_theme_contract_str,
+    BuiltInAssetError, RegistryError, SCHEMA_VERSION, THEME_CONTRACT_NAME,
+    THEME_CONTRACT_SCHEMA_URL, THEME_CONTRACT_VERSION, ThemeContractError,
+    builtin_registry::{SnapshotError, built_in_registry_snapshot},
+    item::built_in_asset_kind,
 };
+
+#[cfg(test)]
+use crate::{parse_registry_item_str, parse_registry_root_str, parse_theme_contract_str};
 
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
 const THEME_TOKEN_NAME_PATTERN: &str = "^--kit-[a-z][a-z0-9-]*$";
@@ -23,6 +30,7 @@ pub enum RegistryHealthFileKind {
     RegistrySource,
     ThemeContract,
     ThemeContractSchema,
+    PublicSchema,
 }
 
 impl fmt::Display for RegistryHealthFileKind {
@@ -33,6 +41,7 @@ impl fmt::Display for RegistryHealthFileKind {
             Self::RegistrySource => write!(f, "registry source"),
             Self::ThemeContract => write!(f, "theme contract"),
             Self::ThemeContractSchema => write!(f, "theme contract schema"),
+            Self::PublicSchema => write!(f, "public schema"),
         }
     }
 }
@@ -53,6 +62,10 @@ pub enum RegistryHealthError {
         kind: RegistryHealthFileKind,
         path: PathBuf,
         source: std::string::FromUtf8Error,
+    },
+    BuiltInAsset {
+        kind: RegistryHealthFileKind,
+        source: BuiltInAssetError,
     },
     ParseJson {
         kind: RegistryHealthFileKind,
@@ -86,6 +99,12 @@ pub enum RegistryHealthError {
         expected: String,
         actual: String,
     },
+    InvalidPublicSchema {
+        path: PathBuf,
+        pointer: &'static str,
+        expected: String,
+        actual: String,
+    },
     ThemeContractVersionMismatch {
         manifest_path: PathBuf,
         contract_path: PathBuf,
@@ -110,6 +129,9 @@ impl fmt::Display for RegistryHealthError {
             }
             Self::NonUtf8File { kind, path, .. } => {
                 write!(f, "packaged {kind} is not UTF-8: {}", path.display())
+            }
+            Self::BuiltInAsset { kind, source } => {
+                write!(f, "invalid packaged {kind}: {source}")
             }
             Self::ParseJson { kind, path, source } => {
                 write!(
@@ -163,6 +185,16 @@ impl fmt::Display for RegistryHealthError {
                 "invalid packaged theme contract schema {} at {pointer}: expected {expected}, got {actual}",
                 path.display()
             ),
+            Self::InvalidPublicSchema {
+                path,
+                pointer,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "invalid packaged public schema {} at {pointer}: expected {expected}, got {actual}",
+                path.display()
+            ),
             Self::ThemeContractVersionMismatch {
                 manifest_path,
                 contract_path,
@@ -184,6 +216,7 @@ impl std::error::Error for RegistryHealthError {
         match self {
             Self::ReadFile { source, .. } => Some(source),
             Self::NonUtf8File { source, .. } => Some(source),
+            Self::BuiltInAsset { source, .. } => Some(source),
             Self::ParseJson { source, .. } => Some(source),
             Self::InvalidRegistryRoot { source, .. }
             | Self::InvalidRegistryItem { source, .. }
@@ -192,6 +225,7 @@ impl std::error::Error for RegistryHealthError {
             Self::MissingFile { .. }
             | Self::RegistryItemIdentity { .. }
             | Self::InvalidThemeContractSchema { .. }
+            | Self::InvalidPublicSchema { .. }
             | Self::ThemeContractVersionMismatch { .. } => None,
         }
     }
@@ -199,10 +233,9 @@ impl std::error::Error for RegistryHealthError {
 
 /// Validates every runtime-relevant file in the packaged built-in registry.
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
-    validate_built_in_registry_health_with_schema_at(
-        &built_in_registry_root(),
-        &built_in_theme_contract_schema_path(),
-    )
+    let snapshot = built_in_registry_snapshot().map_err(snapshot_health_error)?;
+    debug_assert_eq!(snapshot.schema_count(), 4);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -215,6 +248,7 @@ pub(crate) fn validate_built_in_registry_health_at(
     )
 }
 
+#[cfg(test)]
 fn validate_built_in_registry_health_with_schema_at(
     registry_root: &Path,
     schema_path: &Path,
@@ -340,6 +374,7 @@ fn validate_built_in_registry_health_with_schema_at(
     Ok(())
 }
 
+#[cfg(test)]
 fn read_utf8(kind: RegistryHealthFileKind, path: &Path) -> Result<String, RegistryHealthError> {
     let bytes = fs::read(path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
@@ -362,7 +397,7 @@ fn read_utf8(kind: RegistryHealthFileKind, path: &Path) -> Result<String, Regist
     })
 }
 
-fn validate_theme_contract_schema_shape(
+pub(crate) fn validate_theme_contract_schema_shape(
     path: &Path,
     schema: &Value,
 ) -> Result<(), RegistryHealthError> {
@@ -559,12 +594,192 @@ fn render_value(value: Option<&Value>) -> String {
     value.map_or_else(|| "<missing>".to_owned(), Value::to_string)
 }
 
+#[cfg(test)]
 fn built_in_registry_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("registry")
 }
 
+#[cfg(test)]
 fn built_in_theme_contract_schema_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/0.9.0-alpha/theme-contract.schema.json")
+}
+
+fn snapshot_health_error(error: SnapshotError) -> RegistryHealthError {
+    match error {
+        SnapshotError::Provider(source) => health_asset_error(source.into()),
+        SnapshotError::MissingAsset { logical_path } => {
+            health_asset_error(BuiltInAssetError::Missing {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::UnexpectedAsset { logical_path } => {
+            health_asset_error(BuiltInAssetError::Unexpected {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateAsset { logical_path } => {
+            health_asset_error(BuiltInAssetError::Duplicate {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::UnsortedAsset {
+            previous,
+            logical_path,
+        } => health_asset_error(BuiltInAssetError::Unsorted {
+            previous: previous.into(),
+            logical_path: logical_path.into(),
+        }),
+        SnapshotError::KindMismatch {
+            logical_path,
+            expected,
+            actual,
+        } => health_asset_error(BuiltInAssetError::KindMismatch {
+            logical_path: logical_path.into(),
+            expected: built_in_asset_kind(expected),
+            actual: built_in_asset_kind(actual),
+        }),
+        SnapshotError::UnownedRuntimeAsset { logical_path } => {
+            health_asset_error(BuiltInAssetError::UnownedRuntimeAsset {
+                logical_path: logical_path.into(),
+            })
+        }
+        SnapshotError::DuplicateRuntimeAssetReference {
+            logical_path,
+            first_owner,
+            second_owner,
+        } => health_asset_error(BuiltInAssetError::DuplicateRuntimeAssetReference {
+            logical_path: logical_path.into(),
+            first_owner,
+            second_owner,
+        }),
+        SnapshotError::ParseJson {
+            logical_path,
+            source,
+        } => RegistryHealthError::ParseJson {
+            kind: file_kind_for_logical_path(&logical_path),
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::InvalidRegistryRoot {
+            logical_path,
+            source,
+        } => RegistryHealthError::InvalidRegistryRoot {
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::InvalidRegistryItem {
+            logical_path,
+            source,
+        } => RegistryHealthError::InvalidRegistryItem {
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::RegistryItemIdentity {
+            logical_path,
+            expected,
+            actual,
+        } => RegistryHealthError::RegistryItemIdentity {
+            path: logical_path.into(),
+            expected,
+            actual,
+        },
+        SnapshotError::InvalidRegistryCatalog {
+            logical_path,
+            source,
+        } => RegistryHealthError::InvalidRegistryCatalog {
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::InvalidThemeContract {
+            logical_path,
+            source: ThemeContractError::Parse(source),
+        } => RegistryHealthError::ParseJson {
+            kind: RegistryHealthFileKind::ThemeContract,
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::InvalidThemeContract {
+            logical_path,
+            source,
+        } => RegistryHealthError::InvalidThemeContract {
+            path: logical_path.into(),
+            source,
+        },
+        SnapshotError::InvalidThemeContractSchema {
+            logical_path,
+            pointer,
+            expected,
+            actual,
+        } => {
+            if logical_path == THEME_CONTRACT_SCHEMA_LOGICAL_PATH {
+                RegistryHealthError::InvalidThemeContractSchema {
+                    path: logical_path.into(),
+                    pointer,
+                    expected,
+                    actual,
+                }
+            } else {
+                RegistryHealthError::InvalidPublicSchema {
+                    path: logical_path.into(),
+                    pointer,
+                    expected,
+                    actual,
+                }
+            }
+        }
+        SnapshotError::ThemeContractVersionMismatch {
+            manifest_path,
+            contract_path,
+            manifest_version,
+            contract_version,
+            expected,
+        } => RegistryHealthError::ThemeContractVersionMismatch {
+            manifest_path: manifest_path.into(),
+            contract_path: contract_path.into(),
+            manifest_version,
+            contract_version,
+            expected,
+        },
+        SnapshotError::SerializeItem {
+            logical_path,
+            source,
+        } => RegistryHealthError::InvalidRegistryCatalog {
+            path: logical_path.into(),
+            source: RegistryError::Serialize(source),
+        },
+        SnapshotError::ItemNotFound(name) => RegistryHealthError::InvalidRegistryCatalog {
+            path: REGISTRY_ROOT_LOGICAL_PATH.into(),
+            source: RegistryError::BuiltInNotFound(name),
+        },
+    }
+}
+
+fn health_asset_error(source: BuiltInAssetError) -> RegistryHealthError {
+    let logical_path = source.logical_path().to_string_lossy().into_owned();
+    let kind = file_kind_for_logical_path(&logical_path);
+    match source {
+        BuiltInAssetError::Missing { logical_path } => RegistryHealthError::MissingFile {
+            kind,
+            path: logical_path,
+        },
+        source => RegistryHealthError::BuiltInAsset { kind, source },
+    }
+}
+
+const REGISTRY_ROOT_LOGICAL_PATH: &str = "registry/registry.json";
+const THEME_CONTRACT_SCHEMA_LOGICAL_PATH: &str = "schema/0.9.0-alpha/theme-contract.schema.json";
+
+fn file_kind_for_logical_path(logical_path: &str) -> RegistryHealthFileKind {
+    match logical_path {
+        REGISTRY_ROOT_LOGICAL_PATH => RegistryHealthFileKind::RegistryRoot,
+        "registry/contracts/theme-v1.json" => RegistryHealthFileKind::ThemeContract,
+        THEME_CONTRACT_SCHEMA_LOGICAL_PATH => RegistryHealthFileKind::ThemeContractSchema,
+        path if path.starts_with("schema/") => RegistryHealthFileKind::PublicSchema,
+        path if path.ends_with(".rs") || path.ends_with(".css") => {
+            RegistryHealthFileKind::RegistrySource
+        }
+        _ => RegistryHealthFileKind::RegistryItem,
+    }
 }
 
 #[cfg(test)]
@@ -576,8 +791,14 @@ mod tests {
 
     use super::{
         RegistryHealthError, RegistryHealthFileKind, built_in_registry_root,
-        built_in_theme_contract_schema_path, validate_built_in_registry_health,
-        validate_built_in_registry_health_at,
+        built_in_theme_contract_schema_path, snapshot_health_error,
+        validate_built_in_registry_health, validate_built_in_registry_health_at,
+    };
+    use crate::{
+        BuiltInAssetError, BuiltInAssetKind,
+        builtin_registry::BuiltInRegistrySnapshot,
+        embedded_assets::{EmbeddedAssetKind, InMemoryAssetProvider},
+        load_built_in_registry_item,
     };
 
     fn health_fixture() -> (TempDir, std::path::PathBuf) {
@@ -621,6 +842,133 @@ mod tests {
     #[test]
     fn validates_the_packaged_registry_health_contract() {
         validate_built_in_registry_health().expect("built-in registry should be healthy");
+    }
+
+    #[test]
+    fn health_adapter_preserves_embedded_kind_and_inventory_faults() {
+        let mut wrong_kind = InMemoryAssetProvider::from_embedded();
+        wrong_kind
+            .set_kind("registry/styles/button.css", EmbeddedAssetKind::Rust)
+            .expect("replace asset kind");
+        let injected = BuiltInRegistrySnapshot::from_provider(&wrong_kind)
+            .expect_err("wrong kind must reject the snapshot");
+        let error = snapshot_health_error(injected);
+        assert!(matches!(
+            &error,
+            RegistryHealthError::BuiltInAsset {
+                kind: RegistryHealthFileKind::RegistrySource,
+                source: BuiltInAssetError::KindMismatch {
+                    logical_path,
+                    expected: BuiltInAssetKind::Css,
+                    actual: BuiltInAssetKind::Rust,
+                },
+            } if logical_path == Path::new("registry/styles/button.css")
+        ));
+        assert!(!matches!(error, RegistryHealthError::ReadFile { .. }));
+
+        let mut unexpected = InMemoryAssetProvider::from_embedded();
+        unexpected
+            .insert(
+                "registry/ui/unlisted.rs",
+                EmbeddedAssetKind::Rust,
+                b"pub fn Unlisted() {}\n",
+            )
+            .expect("insert unexpected asset");
+        let injected = BuiltInRegistrySnapshot::from_provider(&unexpected)
+            .expect_err("unexpected inventory must reject the snapshot");
+        assert!(matches!(
+            snapshot_health_error(injected),
+            RegistryHealthError::BuiltInAsset {
+                kind: RegistryHealthFileKind::RegistrySource,
+                source: BuiltInAssetError::Unexpected { logical_path },
+            } if logical_path == Path::new("registry/ui/unlisted.rs")
+        ));
+    }
+
+    #[test]
+    fn health_adapter_classifies_non_theme_schema_faults_accurately() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_bytes("schema/0.9.0-alpha/kit.schema.json", b"{}")
+            .expect("replace schema bytes");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("invalid kit schema must reject the snapshot");
+
+        let error = snapshot_health_error(injected);
+        assert!(matches!(
+            &error,
+            RegistryHealthError::InvalidPublicSchema {
+                path,
+                pointer,
+                ..
+            }
+                if path == Path::new("schema/0.9.0-alpha/kit.schema.json")
+                    && *pointer == "/$schema"
+        ));
+        assert!(error.to_string().contains("public schema"));
+        assert!(!error.to_string().contains("theme contract schema"));
+        assert!(!matches!(error, RegistryHealthError::ReadFile { .. }));
+    }
+
+    #[test]
+    fn health_adapter_preserves_malformed_contract_json_class_and_locator() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        provider
+            .set_bytes("registry/contracts/theme-v1.json", b"{")
+            .expect("replace contract bytes");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("malformed contract must reject the snapshot");
+
+        let error = snapshot_health_error(injected);
+        assert!(matches!(
+            &error,
+            RegistryHealthError::ParseJson {
+                kind: RegistryHealthFileKind::ThemeContract,
+                path,
+                ..
+            } if path == Path::new("registry/contracts/theme-v1.json")
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("registry/contracts/theme-v1.json")
+        );
+        assert!(!matches!(error, RegistryHealthError::ReadFile { .. }));
+    }
+
+    #[test]
+    fn health_adapter_preserves_theme_contract_version_mismatch_class_and_locators() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let mut tokens = load_built_in_registry_item("tokens")
+            .expect("load template tokens")
+            .item;
+        tokens.extra.insert(
+            "themeContractVersion".to_owned(),
+            Value::String("2".to_owned()),
+        );
+        provider
+            .set_bytes(
+                "registry/foundation/tokens.json",
+                serde_json::to_vec(&tokens).expect("serialize tokens drift"),
+            )
+            .expect("replace tokens manifest");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("version drift must reject the snapshot");
+
+        assert!(matches!(
+            snapshot_health_error(injected),
+            RegistryHealthError::ThemeContractVersionMismatch {
+                manifest_path,
+                contract_path,
+                manifest_version,
+                contract_version,
+                expected,
+            } if manifest_path == Path::new("registry/foundation/tokens.json")
+                && contract_path == Path::new("registry/contracts/theme-v1.json")
+                && manifest_version == "2"
+                && contract_version == "1"
+                && expected == "1"
+        ));
     }
 
     #[test]

@@ -49,7 +49,8 @@ const EXPECTED_PACKAGE_SUPPORT: [&str; 7] = [
     "build_provenance.rs",
 ];
 
-const EXPECTED_PACKAGE_SOURCES: [&str; 7] = [
+const EXPECTED_PACKAGE_SOURCES: [&str; 8] = [
+    "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
     "src/embedded_assets.rs",
@@ -591,7 +592,7 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 89);
+    assert_eq!(expected.len(), 90);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(actual.contains(schema), "missing packaged schema: {schema}");
@@ -600,11 +601,10 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
 }
 
 #[test]
-fn current_item_source_path_characterizes_the_absolute_path_debt() {
+fn built_in_item_source_path_is_a_stable_logical_locator() {
     let item = load_built_in_registry_item("button").expect("load button");
-    let expected = Path::new(env!("CARGO_MANIFEST_DIR")).join("registry/ui/button.json");
-    assert!(item.source_path.is_absolute());
-    assert_eq!(item.source_path, expected);
+    assert_eq!(item.source_path, Path::new("ui/button.json"));
+    assert!(!item.source_path.is_absolute());
 }
 
 fn collect_files(root: &Path, directory: &Path, output: &mut Vec<String>) {

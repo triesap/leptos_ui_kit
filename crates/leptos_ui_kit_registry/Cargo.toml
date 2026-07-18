@@ -82,6 +82,7 @@ include = [
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
     "schema/0.9.0-alpha/theme-contract.schema.json",
+    "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
     "src/embedded_assets.rs",
