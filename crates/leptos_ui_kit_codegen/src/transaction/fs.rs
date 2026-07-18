@@ -482,7 +482,7 @@ pub(crate) struct FaultFs {
     fail: std::sync::Mutex<Option<FaultMode>>,
     counts: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
     events: std::sync::Mutex<Vec<FsEvent>>,
-    pause_after_success: Option<PauseAfterSuccess>,
+    pauses_after_success: Vec<PauseAfterSuccess>,
     final_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     post_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
 }
@@ -507,7 +507,7 @@ impl FaultFs {
             fail: std::sync::Mutex::new(None),
             counts: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             events: std::sync::Mutex::new(Vec::new()),
-            pause_after_success: None,
+            pauses_after_success: Vec::new(),
             final_revalidation_mutation: std::sync::Mutex::new(None),
             post_revalidation_mutation: std::sync::Mutex::new(None),
         }
@@ -539,12 +539,31 @@ impl FaultFs {
     ) -> Self {
         assert!(ordinal > 0, "pause ordinal is one-based");
         let mut fs = Self::passthrough();
-        fs.pause_after_success = Some(PauseAfterSuccess {
+        fs.pauses_after_success.push(PauseAfterSuccess {
             operation,
             ordinal,
             ready,
             release,
         });
+        fs
+    }
+
+    pub(crate) fn pause_after_successes(
+        pauses: Vec<(FsOperation, usize, PathBuf, PathBuf)>,
+    ) -> Self {
+        let mut fs = Self::passthrough();
+        fs.pauses_after_success = pauses
+            .into_iter()
+            .map(|(operation, ordinal, ready, release)| {
+                assert!(ordinal > 0, "pause ordinal is one-based");
+                PauseAfterSuccess {
+                    operation,
+                    ordinal,
+                    ready,
+                    release,
+                }
+            })
+            .collect();
         fs
     }
 
@@ -664,9 +683,6 @@ impl FaultFs {
     }
 
     fn after_success(&self, operation: FsOperation, path: &Path) -> io::Result<()> {
-        let Some(pause) = &self.pause_after_success else {
-            return Ok(());
-        };
         let ordinal = self
             .counts
             .lock()
@@ -674,9 +690,13 @@ impl FaultFs {
             .get(&format!("{operation:?}"))
             .copied()
             .unwrap_or_default();
-        if pause.operation != operation || pause.ordinal != ordinal {
+        let Some(pause) = self
+            .pauses_after_success
+            .iter()
+            .find(|pause| pause.operation == operation && pause.ordinal == ordinal)
+        else {
             return Ok(());
-        }
+        };
         fs::write(&pause.ready, path.to_string_lossy().as_bytes())?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !pause.release.exists() {

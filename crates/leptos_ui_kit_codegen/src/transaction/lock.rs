@@ -656,7 +656,7 @@ fn publish_initialized_lock(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            abandon_candidate(context, fs, kit_directory, transactions, candidate)?;
+            abandon_candidate_for_convergence(context, fs, kit_directory, transactions, candidate)?;
             converge_on_published_lock(context, fs)
         }
         Err(source) => {
@@ -2349,7 +2349,7 @@ fn bootstrap_coordination_ignore(
             validate_coordination_ignore(context, fs, &mut file, &full_path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            abandon_candidate(context, fs, kit_directory, transactions, candidate)?;
+            abandon_candidate_for_convergence(context, fs, kit_directory, transactions, candidate)?;
             let mut file = open_existing_coordination_file(context, fs)?.ok_or_else(|| {
                 CodegenError::PreimageConflict {
                     path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
@@ -2506,6 +2506,67 @@ fn abandon_candidate(
     cleanup_result?;
     sync_result?;
     directory_cleanup_result
+}
+
+fn abandon_candidate_for_convergence(
+    context: &PlanningContext,
+    fs: &dyn FsOps,
+    kit_directory: &Dir,
+    transactions: TransactionsDirectory,
+    mut candidate: Candidate,
+) -> Result<(), CodegenError> {
+    let cleanup_result =
+        cleanup_candidate_source(context, fs, kit_directory, &transactions, &mut candidate);
+    let sync_result = sync_directory(fs, &transactions.directory, &transactions.path);
+    drop(candidate);
+    let directory_cleanup_result = cleanup_shared_transactions_directory_after_drop_by_identity(
+        fs,
+        kit_directory,
+        context,
+        transactions.identity,
+        transactions.directory,
+    );
+    cleanup_result?;
+    sync_result?;
+    directory_cleanup_result
+}
+
+fn cleanup_shared_transactions_directory_after_drop_by_identity(
+    fs: &dyn FsOps,
+    kit_directory: &Dir,
+    context: &PlanningContext,
+    identity: (u64, u64),
+    directory: Dir,
+) -> Result<(), CodegenError> {
+    drop(directory);
+    match try_cleanup_transactions_directory_by_identity(fs, kit_directory, context, identity) {
+        Ok(TransactionsDirectoryCleanupOutcome::Removed)
+        | Ok(TransactionsDirectoryCleanupOutcome::Absent)
+        | Ok(TransactionsDirectoryCleanupOutcome::NotQuiescent(_)) => Ok(()),
+        Ok(TransactionsDirectoryCleanupOutcome::Failed(source)) => {
+            best_effort_cleanup_transactions_directory_by_identity(
+                fs,
+                kit_directory,
+                context,
+                identity,
+            );
+            Err(CodegenError::Io {
+                path: context
+                    .project_root()
+                    .join("src/components/ui/_kit/.transactions"),
+                source,
+            })
+        }
+        Err(original) => {
+            best_effort_cleanup_transactions_directory_by_identity(
+                fs,
+                kit_directory,
+                context,
+                identity,
+            );
+            Err(original)
+        }
+    }
 }
 
 fn cleanup_published_candidate(

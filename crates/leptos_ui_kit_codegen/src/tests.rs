@@ -2975,6 +2975,68 @@ fn concurrent_destination_creation_is_no_clobber_and_converges() {
     assert_exact_persistent_coordination(&project);
 }
 
+#[test]
+fn simultaneous_publishers_tolerate_a_live_peer_alias_while_the_loser_converges() {
+    let sandbox = tempfile::tempdir().expect("two-publisher sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create two-publisher project");
+    fs::create_dir(&control).expect("create two-publisher control");
+
+    let mut winner = spawn_lock_stage_worker("two-publisher-winner", &project, &control);
+    let mut loser = spawn_lock_stage_worker("two-publisher-loser", &project, &control);
+    wait_for_worker_path(&control.join("winner-candidate-synced"), &mut winner);
+    wait_for_worker_path(&control.join("loser-candidate-synced"), &mut loser);
+    assert_eq!(
+        transaction_candidate_paths(&project).len(),
+        2,
+        "both private publishers must be staged before publication"
+    );
+
+    fs::write(control.join("release-winner-publication"), b"release\n")
+        .expect("release winning publisher");
+    wait_for_worker_path(&control.join("winner-lock-published"), &mut winner);
+    let published_identity = coordination_lock_identity(&project);
+    let published_aliases = transaction_candidate_paths(&project);
+    assert_eq!(
+        published_aliases.len(),
+        2,
+        "winner must retain its source alias while the loser converges"
+    );
+    assert!(
+        published_aliases
+            .iter()
+            .any(|alias| coordination_file_identity(alias) == published_identity),
+        "one staged alias must identify the published lock"
+    );
+
+    fs::write(control.join("release-loser-publication"), b"release\n")
+        .expect("release losing publisher");
+    wait_for_worker_path(&control.join("loser-contended"), &mut loser);
+    loser.wait_success();
+    let remaining_aliases = transaction_candidate_paths(&project);
+    assert_eq!(
+        remaining_aliases.len(),
+        1,
+        "loser must remove only its own source alias"
+    );
+    assert_eq!(
+        coordination_file_identity(&remaining_aliases[0]),
+        published_identity,
+        "winner's published source alias must remain untouched"
+    );
+
+    fs::write(control.join("release-winner-after-loser"), b"release\n")
+        .expect("release winner after loser converges");
+    wait_for_worker_path(&control.join("winner-acquired"), &mut winner);
+    winner.wait_success();
+
+    assert_eq!(coordination_lock_identity(&project), published_identity);
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_coordination_bootstrap_supports_long_project_paths() {
@@ -3177,6 +3239,39 @@ fn transaction_lock_stage_worker() {
             fs::write(control.join("destination-converged"), b"converged\n")
                 .expect("signal destination convergence");
             drop(lock);
+        }
+        "two-publisher-winner" => {
+            let fs = Arc::new(FaultFs::pause_after_successes(vec![
+                (
+                    FsOperation::SyncHandle,
+                    1,
+                    control.join("winner-candidate-synced"),
+                    control.join("release-winner-publication"),
+                ),
+                (
+                    FsOperation::HardLink,
+                    1,
+                    control.join("winner-lock-published"),
+                    control.join("release-winner-after-loser"),
+                ),
+            ]));
+            let lock = WriteLock::acquire_with(&project, fs).expect("winning publisher resumes");
+            fs::write(control.join("winner-acquired"), b"acquired\n")
+                .expect("signal winning publisher acquisition");
+            drop(lock);
+        }
+        "two-publisher-loser" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::SyncHandle,
+                1,
+                control.join("loser-candidate-synced"),
+                control.join("release-loser-publication"),
+            ));
+            let error = WriteLock::acquire_with(&project, fs)
+                .expect_err("losing publisher must converge as a contender");
+            assert!(matches!(error, CodegenError::WriteLockContended { .. }));
+            fs::write(control.join("loser-contended"), b"contended\n")
+                .expect("signal losing publisher contention");
         }
         "paused-directory-guards" => {
             let fs = Arc::new(FaultFs::pause_after_success(
