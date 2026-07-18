@@ -9,4 +9,4 @@ pub use replace::write_file_atomic;
 #[cfg(test)]
 pub(crate) use fs::{FaultFs, FsEvent, FsOperation};
 #[cfg(test)]
-pub(crate) use replace::apply_planned_files_with;
+pub(crate) use replace::{apply_planned_files_with, apply_planned_files_with_snapshot};

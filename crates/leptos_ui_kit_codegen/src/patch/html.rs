@@ -1,18 +1,17 @@
-use std::path::Path;
-
 use leptos_ui_kit_registry::KitConfig;
 
-use crate::planning::{push_file_plan, read_to_string};
+use crate::path_safety::PlanningContext;
+use crate::planning::push_file_plan;
 use crate::{ChangeKind, ChangeRecord, CodegenError, PlannedFile, PlannedFileAction};
 
 pub(crate) fn plan_index_html(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     config: &KitConfig,
 ) -> Result<(), CodegenError> {
-    let path = project_root.join("index.html");
-    let html = read_to_string(&path)?;
+    let path = context.project_root().join("index.html");
+    let html = context.read_string("index.html")?;
     let css_path = config.styles.css.as_str();
     if contains_trunk_css_link(&html, css_path) {
         return Ok(());

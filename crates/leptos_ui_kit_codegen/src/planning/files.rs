@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -8,19 +7,19 @@ use leptos_ui_kit_registry::{DEFAULT_KIT_CONFIG_PATH, RegistryItem, canonical_ki
 
 use crate::digest::hash_bytes;
 use crate::patch::unsafe_patch;
+use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, DEFAULT_KIT_LOCK_PATH, InstallLock, InstalledFile,
     PlannedFile, PlannedFileAction, UiModuleExport, lock_to_json_at_path,
 };
 
 pub(crate) fn load_or_empty_lock(
-    project_root: &Path,
+    context: &PlanningContext,
     lock_path: &str,
     config_hash: String,
 ) -> Result<InstallLock, CodegenError> {
-    let path = project_root.join(lock_path);
-    if path.is_file() {
-        let input = read_to_string(&path)?;
+    let path = context.project_root().join(lock_path);
+    if let Some(input) = context.read_optional_string(lock_path)? {
         let mut lock = serde_json::from_str::<InstallLock>(&input).map_err(|source| {
             CodegenError::LockParse {
                 path: path.clone(),
@@ -36,7 +35,7 @@ pub(crate) fn load_or_empty_lock(
 }
 
 pub(crate) fn plan_generated_source_file(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     lock: &InstallLock,
@@ -52,10 +51,10 @@ pub(crate) fn plan_generated_source_file(
             );
         }
 
-        let current = read_optional_to_string(&project_root.join(logical_path))?;
+        let current = context.read_optional_string(logical_path)?;
         let Some(current) = current else {
             return upsert_planned_file(
-                project_root,
+                context,
                 files,
                 changes,
                 logical_path,
@@ -72,7 +71,7 @@ pub(crate) fn plan_generated_source_file(
             return unsafe_patch(logical_path, "tracked target has local edits");
         }
         return upsert_planned_file(
-            project_root,
+            context,
             files,
             changes,
             logical_path,
@@ -82,12 +81,12 @@ pub(crate) fn plan_generated_source_file(
         );
     }
 
-    if project_root.join(logical_path).is_file() {
+    if context.read_optional_string(logical_path)?.is_some() {
         return unsafe_patch(logical_path, "target exists but is not tracked in lock");
     }
 
     upsert_planned_file(
-        project_root,
+        context,
         files,
         changes,
         logical_path,
@@ -98,7 +97,7 @@ pub(crate) fn plan_generated_source_file(
 }
 
 pub(crate) fn upsert_planned_file(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     logical_path: &str,
@@ -113,7 +112,7 @@ pub(crate) fn upsert_planned_file(
         return Ok(());
     }
 
-    let existing = read_optional_to_string(&project_root.join(logical_path))?;
+    let existing = context.read_optional_string(logical_path)?;
     if existing.as_deref() == Some(content.as_str()) {
         return Ok(());
     }
@@ -169,37 +168,24 @@ pub(crate) fn upsert_preloaded_planned_file(
 
 pub(crate) fn planned_or_existing_content(
     files: &[PlannedFile],
-    project_root: &Path,
+    context: &PlanningContext,
     logical_path: &str,
 ) -> Result<Option<String>, CodegenError> {
     if let Some(file) = files.iter().find(|file| file.path == logical_path) {
         return Ok(Some(file.content.clone()));
     }
-    read_optional_to_string(&project_root.join(logical_path))
+    context.read_optional_string(logical_path)
 }
 
 pub(crate) fn planned_or_existing_kit_config_content(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &[PlannedFile],
 ) -> Result<String, CodegenError> {
-    if let Some(content) =
-        planned_or_existing_content(files, project_root, DEFAULT_KIT_CONFIG_PATH)?
-    {
+    if let Some(content) = planned_or_existing_content(files, context, DEFAULT_KIT_CONFIG_PATH)? {
         return Ok(content);
     }
 
     Ok(canonical_kit_json()?)
-}
-
-pub(crate) fn read_optional_to_string(path: &Path) -> Result<Option<String>, CodegenError> {
-    match fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(CodegenError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
 }
 
 pub(crate) fn tracked_file_lock<'a>(
@@ -305,11 +291,4 @@ pub(crate) fn empty_lock_json(
         &InstallLock::empty(hash_bytes(config_content.as_bytes())),
         Path::new(state_path),
     )
-}
-
-pub(crate) fn read_to_string(path: &Path) -> Result<String, CodegenError> {
-    fs::read_to_string(path).map_err(|source| CodegenError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
 }

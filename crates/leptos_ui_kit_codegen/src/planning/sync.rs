@@ -10,11 +10,12 @@ use leptos_ui_kit_registry::{
 
 use super::{
     KitConfigWriter, built_in_item_id, desired_builtin_item, load_or_empty_lock,
-    plan_generated_source_file, plan_init, planned_or_existing_content,
+    plan_generated_source_file, plan_init_with_context, planned_or_existing_content,
     planned_or_existing_kit_config_content, ui_exports_for_item, upsert_planned_file,
     upsert_preloaded_planned_file,
 };
 use crate::digest::hash_bytes;
+use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, InstallLock, InstalledFile, InstalledItem,
     InstalledStyleBlock, ManagedCssBlockRole, ManagedCssDependency, ManagedCssOperation,
@@ -30,8 +31,13 @@ pub(crate) fn plan_sync_with_config_writer(
     project_root: &Path,
     config_writer: KitConfigWriter,
 ) -> Result<SyncPlan, CodegenError> {
-    let init_plan = plan_init(project_root)?;
-    let config_content = planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
+    let context = PlanningContext::open(project_root)?;
+    let init_plan = plan_init_with_context(
+        &context,
+        project_root,
+        leptos_ui_kit_registry::canonical_kit_json,
+    )?;
+    let config_content = planned_or_existing_kit_config_content(&context, &init_plan.files)?;
     let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
     let files = init_plan
@@ -46,6 +52,7 @@ pub(crate) fn plan_sync_with_config_writer(
         .collect::<Vec<_>>();
 
     plan_sync_from_config(
+        &context,
         project_root,
         files,
         changes,
@@ -56,6 +63,7 @@ pub(crate) fn plan_sync_with_config_writer(
 }
 
 pub(crate) fn plan_sync_from_config(
+    context: &PlanningContext,
     project_root: &Path,
     mut files: Vec<PlannedFile>,
     mut changes: Vec<ChangeRecord>,
@@ -80,7 +88,7 @@ pub(crate) fn plan_sync_from_config(
         config.items = resolved_desired_items;
         (config, config_content) = prepare_kit_config_write(config, config_writer)?;
         upsert_planned_file(
-            project_root,
+            context,
             &mut files,
             &mut changes,
             DEFAULT_KIT_CONFIG_PATH,
@@ -92,7 +100,7 @@ pub(crate) fn plan_sync_from_config(
 
     let config_hash = hash_bytes(config_content.as_bytes());
     let lock_path = install_lock_path(&config);
-    let mut lock = load_or_empty_lock(project_root, &lock_path, config_hash.clone())?;
+    let mut lock = load_or_empty_lock(context, &lock_path, config_hash.clone())?;
     let prior_lock = lock.clone();
     lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
@@ -102,7 +110,7 @@ pub(crate) fn plan_sync_from_config(
 
     for item in &resolved_items {
         let item_id = plan_built_in_item(
-            project_root,
+            context,
             &mut files,
             &mut changes,
             &mut lock,
@@ -115,7 +123,7 @@ pub(crate) fn plan_sync_from_config(
     }
 
     plan_managed_stylesheet_batch(
-        project_root,
+        context,
         &mut files,
         &mut changes,
         &prior_lock,
@@ -127,7 +135,7 @@ pub(crate) fn plan_sync_from_config(
     lock.validate_at_path(Path::new(&lock_path))?;
     let lock_json = lock_to_json_at_path(&lock, Path::new(&lock_path))?;
     upsert_planned_file(
-        project_root,
+        context,
         &mut files,
         &mut changes,
         &lock_path,
@@ -150,6 +158,7 @@ pub(crate) fn plan_sync_from_config(
         changes,
         diagnostics,
         lock,
+        snapshot: context.finish_snapshot(),
     })
 }
 
@@ -213,7 +222,7 @@ fn managed_css_dependencies(
 }
 
 pub(crate) fn plan_built_in_item(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     lock: &mut InstallLock,
@@ -231,7 +240,7 @@ pub(crate) fn plan_built_in_item(
         let generated_hash = hash_bytes(generated.as_bytes());
 
         plan_generated_source_file(
-            project_root,
+            context,
             files,
             changes,
             lock,
@@ -250,11 +259,10 @@ pub(crate) fn plan_built_in_item(
     }
 
     if !item.targets.ui_files.is_empty() {
-        let components_mod =
-            planned_or_existing_content(files, project_root, "src/components/mod.rs")?;
+        let components_mod = planned_or_existing_content(files, context, "src/components/mod.rs")?;
         let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
         upsert_planned_file(
-            project_root,
+            context,
             files,
             changes,
             "src/components/mod.rs",
@@ -263,10 +271,10 @@ pub(crate) fn plan_built_in_item(
             Some(&item_id),
         )?;
 
-        let ui_mod = planned_or_existing_content(files, project_root, "src/components/ui/mod.rs")?;
+        let ui_mod = planned_or_existing_content(files, context, "src/components/ui/mod.rs")?;
         let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item)?)?;
         upsert_planned_file(
-            project_root,
+            context,
             files,
             changes,
             "src/components/ui/mod.rs",
@@ -317,7 +325,7 @@ pub(crate) fn plan_built_in_item(
 }
 
 fn plan_managed_stylesheet_batch(
-    project_root: &Path,
+    context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
     prior_lock: &InstallLock,
@@ -330,7 +338,7 @@ fn plan_managed_stylesheet_batch(
     }
 
     let css_path = config.styles.css.as_str();
-    let existing = planned_or_existing_content(files, project_root, css_path)?.unwrap_or_default();
+    let existing = planned_or_existing_content(files, context, css_path)?.unwrap_or_default();
     let reconciled = reconcile_managed_css_blocks_at_path(
         &existing,
         css_path,

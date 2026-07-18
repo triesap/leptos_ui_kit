@@ -11,9 +11,10 @@ use leptos_ui_kit_registry::{
 };
 
 use super::{
-    KitConfigWriter, built_in_item_id, plan_init, plan_sync_from_config,
+    KitConfigWriter, built_in_item_id, plan_init_with_context, plan_sync_from_config,
     planned_or_existing_kit_config_content, prepare_kit_config_write, upsert_planned_file,
 };
+use crate::path_safety::PlanningContext;
 use crate::{AddPlan, ChangeKind, CodegenError, install_lock_path};
 
 pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
@@ -21,6 +22,16 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
 }
 
 pub(crate) fn plan_add_with_config_writer(
+    project_root: &Path,
+    item_name: &str,
+    config_writer: KitConfigWriter,
+) -> Result<AddPlan, CodegenError> {
+    let context = PlanningContext::open(project_root)?;
+    plan_add_with_context(&context, project_root, item_name, config_writer)
+}
+
+fn plan_add_with_context(
+    context: &PlanningContext,
     project_root: &Path,
     item_name: &str,
     config_writer: KitConfigWriter,
@@ -33,9 +44,9 @@ pub(crate) fn plan_add_with_config_writer(
     let item_id = built_in_item_id(&item.item.name);
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
-    let init_plan = plan_init(project_root)?;
+    let init_plan = plan_init_with_context(context, project_root, kit_config_to_canonical_json)?;
     let existing_config_content =
-        planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
+        planned_or_existing_kit_config_content(context, &init_plan.files)?;
     let config = parse_kit_json_str(&existing_config_content)?;
     let state_path = install_lock_path(&config);
     let mut files = init_plan
@@ -57,7 +68,7 @@ pub(crate) fn plan_add_with_config_writer(
         prepare_kit_config_write(config, config_writer)?
     };
     upsert_planned_file(
-        project_root,
+        context,
         &mut files,
         &mut changes,
         DEFAULT_KIT_CONFIG_PATH,
@@ -67,6 +78,7 @@ pub(crate) fn plan_add_with_config_writer(
     )?;
 
     let sync = plan_sync_from_config(
+        context,
         project_root,
         files,
         changes,
@@ -85,7 +97,12 @@ pub(crate) fn plan_add_with_config_writer(
         changes: sync.changes,
         diagnostics: sync.diagnostics,
         lock: sync.lock,
+        snapshot: sync.snapshot,
     })
+}
+
+fn kit_config_to_canonical_json() -> Result<String, leptos_ui_kit_registry::ConfigError> {
+    leptos_ui_kit_registry::canonical_kit_json()
 }
 
 pub(crate) fn desired_builtin_item(

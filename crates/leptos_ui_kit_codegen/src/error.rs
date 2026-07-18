@@ -27,6 +27,14 @@ pub enum CodegenError {
         path: String,
         reason: String,
     },
+    PreimageConflict {
+        path: String,
+        reason: String,
+    },
+    ProjectRootChanged {
+        path: PathBuf,
+        reason: String,
+    },
     DuplicatePath(String),
     LockExists(PathBuf),
 }
@@ -49,6 +57,12 @@ impl fmt::Display for CodegenError {
             }
             Self::UnsafePath { path, reason } => {
                 write!(f, "unsafe write path {path}: {reason}")
+            }
+            Self::PreimageConflict { path, reason } => {
+                write!(f, "project path changed after planning at {path}: {reason}")
+            }
+            Self::ProjectRootChanged { path, reason } => {
+                write!(f, "project root changed at {}: {reason}", path.display())
             }
             Self::DuplicatePath(path) => write!(f, "duplicate planned write path: {path}"),
             Self::LockExists(path) => write!(f, "write lock already exists: {}", path.display()),

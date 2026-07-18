@@ -11,6 +11,7 @@ pub(crate) use files::*;
 pub use init::plan_init;
 #[cfg(test)]
 pub(crate) use init::plan_init_with_config_provider;
+pub(crate) use init::plan_init_with_context;
 pub use sync::plan_sync;
 #[cfg(test)]
 pub(crate) use sync::{plan_built_in_item, plan_sync_with_config_writer};
@@ -21,6 +22,7 @@ use std::path::PathBuf;
 use leptos_ui_kit_registry::{CargoPlanEntry, ConfigError, KitConfig};
 use serde::Serialize;
 
+use crate::PlanSnapshot;
 use crate::{ChangeRecord, Diagnostic, InstallLock};
 
 pub(crate) type KitConfigWriter = fn(KitConfig) -> Result<KitConfig, ConfigError>;
@@ -31,6 +33,8 @@ pub struct InitPlan {
     pub project_root: PathBuf,
     pub files: Vec<PlannedFile>,
     pub changes: Vec<ChangeRecord>,
+    #[serde(skip)]
+    pub snapshot: PlanSnapshot,
 }
 
 impl InitPlan {
@@ -51,6 +55,8 @@ pub struct AddPlan {
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
     pub lock: InstallLock,
+    #[serde(skip)]
+    pub snapshot: PlanSnapshot,
 }
 
 impl AddPlan {
@@ -69,6 +75,8 @@ pub struct SyncPlan {
     pub changes: Vec<ChangeRecord>,
     pub diagnostics: Vec<Diagnostic>,
     pub lock: InstallLock,
+    #[serde(skip)]
+    pub snapshot: PlanSnapshot,
 }
 
 impl SyncPlan {

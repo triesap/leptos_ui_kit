@@ -399,9 +399,10 @@ fn item_planner_supports_nested_ui_targets() {
     )
     .expect("parse config");
     let item = nested_registry_item();
+    let context = PlanningContext::open(root).expect("open planning context");
 
     let item_id = plan_built_in_item(
-        root,
+        &context,
         &mut files,
         &mut changes,
         &mut lock,
@@ -2256,6 +2257,37 @@ fn path_safety_rejects_unsafe_paths() {
 }
 
 #[test]
+fn path_safety_does_not_expose_the_internal_sentinel_hidden_name() {
+    for path in [
+        DEFAULT_KIT_WRITE_LOCK_PATH,
+        "src/components/ui/.write.lock",
+        "src/components/ui/arbitrary/.write.lock",
+        "styles/.write.lock",
+    ] {
+        assert!(
+            validate_logical_write_path(path).is_err(),
+            "public logical-path validation accepted {path}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn project_write_validation_preserves_the_supplied_root_shape() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let real_root = parent.path().join("real");
+    let alias = parent.path().join("alias");
+    fs::create_dir(&real_root).expect("create real root");
+    fs::create_dir(real_root.join("styles")).expect("create styles");
+    std::os::unix::fs::symlink(&real_root, &alias).expect("create root alias");
+
+    let validated = validate_project_write_path(&alias, "styles/kit.css")
+        .expect("validate through stable alias");
+
+    assert_eq!(validated, alias.join("styles/kit.css"));
+}
+
+#[test]
 fn path_safety_rejects_casefold_duplicate_paths() {
     let paths = vec![
         "src/components/ui/button.rs".to_owned(),
@@ -2290,6 +2322,56 @@ fn transaction_lock_fails_when_lock_exists() {
     let error = WriteLock::acquire(root).expect_err("second lock should fail");
 
     assert!(matches!(error, CodegenError::LockExists(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_sentinel_rejects_parent_and_final_symlink_indirection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src/components")).expect("component parent");
+    std::os::unix::fs::symlink(outside.path(), root.join("src/components/ui"))
+        .expect("parent symlink");
+
+    let error = WriteLock::acquire(root).expect_err("parent symlink must fail");
+    assert!(matches!(error, CodegenError::UnsafePath { .. }));
+    assert!(
+        fs::read_dir(outside.path())
+            .expect("outside entries")
+            .next()
+            .is_none()
+    );
+
+    fs::remove_file(root.join("src/components/ui")).expect("remove parent symlink");
+    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
+    let referent = outside.path().join("sentinel-referent");
+    fs::write(&referent, b"outside\n").expect("write referent");
+    std::os::unix::fs::symlink(&referent, &lock_path).expect("final symlink");
+
+    let error = WriteLock::acquire(root).expect_err("final symlink must fail");
+    assert!(matches!(error, CodegenError::UnsafePath { .. }));
+    assert_eq!(fs::read(referent).expect("read referent"), b"outside\n");
+}
+
+#[test]
+fn legacy_sentinel_drop_does_not_remove_a_substituted_inode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let lock = WriteLock::acquire(root).expect("acquire lock");
+    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    let moved = root.join("src/components/ui/_kit/original.write.lock");
+    fs::rename(&lock_path, &moved).expect("move acquired inode");
+    fs::write(&lock_path, b"replacement\n").expect("substitute lock inode");
+
+    drop(lock);
+
+    assert_eq!(
+        fs::read(&lock_path).expect("replacement lock"),
+        b"replacement\n"
+    );
+    assert_eq!(fs::read(moved).expect("original lock"), b"locked\n");
 }
 
 #[test]
@@ -2380,6 +2462,420 @@ fn legacy_empty_cohort_skips_all_transaction_io() {
     apply_planned_files_with(dir.path(), &[], &[], fs.clone()).expect("empty apply");
 
     assert!(fs.events().is_empty());
+}
+
+#[test]
+fn planning_context_reuses_one_coherent_cached_observation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::write(root.join("index.html"), "first\n").expect("seed index");
+    let context = PlanningContext::open(root).expect("open planning context");
+
+    assert_eq!(
+        context.read_string("index.html").expect("first read"),
+        "first\n"
+    );
+    fs::write(root.join("index.html"), "second\n").expect("mutate index");
+    assert_eq!(
+        context.read_string("index.html").expect("cached read"),
+        "first\n"
+    );
+    assert!(matches!(
+        context.finish_snapshot().preimage("index.html"),
+        Some(PathPreimage::RegularFile { content_hash, .. })
+            if content_hash == &hash_content_bytes(b"first\n")
+    ));
+}
+
+#[test]
+fn whole_cohort_preimage_conflict_aborts_before_target_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    let plan = plan_init(root).expect("plan init");
+    fs::write(root.join("index.html"), "changed after planning\n").expect("race index");
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    let error = apply_planned_files_with_snapshot(
+        root,
+        &plan.files,
+        &plan.changes,
+        &plan.snapshot,
+        fault_fs.clone(),
+    )
+    .expect_err("stale cohort must conflict");
+
+    assert!(
+        matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "index.html")
+    );
+    assert!(!fault_fs.events().iter().any(|event| {
+        matches!(
+            event.operation,
+            FsOperation::WriteFile | FsOperation::Rename
+        )
+    }));
+    assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
+}
+
+#[test]
+fn malformed_cohort_missing_a_later_preimage_aborts_before_any_transaction_io() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/first.css"), "first-before\n").expect("seed first");
+    let snapshot = capture_plan_snapshot(root, ["styles/first.css"]).expect("capture first only");
+    let files = vec![
+        PlannedFile {
+            path: "styles/first.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "first-planned\n".to_owned(),
+        },
+        PlannedFile {
+            path: "styles/second.css".to_owned(),
+            action: PlannedFileAction::Create,
+            content: "second-planned\n".to_owned(),
+        },
+    ];
+    let changes = vec![
+        ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
+        ChangeRecord::new(ChangeKind::CreateFile, "styles/second.css", true),
+    ];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("missing second preimage must reject the whole cohort");
+
+    assert!(
+        matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/second.css")
+    );
+    assert!(fault_fs.events().is_empty());
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("first target"),
+        b"first-before\n"
+    );
+    assert!(!root.join("styles/second.css").exists());
+}
+
+#[test]
+fn exact_preimages_conflict_on_same_length_change_deletion_and_appearance() {
+    for (case, initial, mutation) in [
+        (
+            "same-length content change",
+            Some("aaaaa\n"),
+            Some("bbbbb\n"),
+        ),
+        ("deletion", Some("before\n"), None),
+        ("absent target appearance", None, Some("appeared\n")),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir(root.join("styles")).expect("styles");
+        let target = root.join("styles/kit.css");
+        if let Some(initial) = initial {
+            fs::write(&target, initial).expect("seed target");
+        }
+        let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+        match mutation {
+            Some(content) => fs::write(&target, content).expect("mutate target"),
+            None => fs::remove_file(&target).expect("delete target"),
+        }
+        let files = vec![PlannedFile {
+            path: "styles/kit.css".to_owned(),
+            action: if initial.is_some() {
+                PlannedFileAction::Update
+            } else {
+                PlannedFileAction::Create
+            },
+            content: "planned\n".to_owned(),
+        }];
+        let changes = vec![ChangeRecord::new(
+            ChangeKind::UpdateFile,
+            "styles/kit.css",
+            true,
+        )];
+        let fault_fs = Arc::new(FaultFs::passthrough());
+
+        let error =
+            apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+                .expect_err(case);
+
+        assert!(
+            matches!(error, CodegenError::PreimageConflict { .. }),
+            "{case}: {error}"
+        );
+        assert!(
+            !fault_fs.events().iter().any(|event| {
+                matches!(
+                    event.operation,
+                    FsOperation::WriteFile | FsOperation::Rename
+                )
+            }),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn target_swap_after_cohort_validation_is_caught_before_rename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let target = root.join("styles/kit.css");
+    fs::write(&target, "before\n").expect("seed target");
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::mutate_before_final_revalidation(
+        target.clone(),
+        b"raced\n".to_vec(),
+    ));
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("final target swap must conflict");
+
+    assert!(
+        matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/kit.css")
+    );
+    assert_eq!(fs::read(&target).expect("read raced target"), b"raced\n");
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| event.operation == FsOperation::Rename)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_swap_after_cohort_validation_is_caught_before_rename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let root = dir.path();
+    let parent = root.join("styles");
+    fs::create_dir(&parent).expect("styles");
+    let target = parent.join("kit.css");
+    fs::write(&target, "before\n").expect("seed target");
+    let outside_target = outside.path().join("kit.css");
+    fs::write(&outside_target, "outside\n").expect("seed outside target");
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::replace_parent_before_final_revalidation(
+        target,
+        parent,
+        root.join("styles-before-swap"),
+        outside.path().to_path_buf(),
+    ));
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("final parent swap must conflict");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert_eq!(
+        fs::read(outside_target).expect("outside target"),
+        b"outside\n"
+    );
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| event.operation == FsOperation::Rename)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_swap_after_final_revalidation_is_caught_before_rename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let root = dir.path();
+    let parent = root.join("styles");
+    fs::create_dir(&parent).expect("styles");
+    let target = parent.join("kit.css");
+    fs::write(&target, "before\n").expect("seed target");
+    let outside_target = outside.path().join("kit.css");
+    fs::write(&outside_target, "outside\n").expect("seed outside target");
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::replace_parent_after_final_revalidation(
+        target,
+        parent,
+        root.join("styles-after-validation"),
+        outside.path().to_path_buf(),
+    ));
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("post-validation parent swap must conflict");
+
+    assert!(matches!(
+        error,
+        CodegenError::PreimageConflict { .. } | CodegenError::UnsafePath { .. }
+    ));
+    assert_eq!(
+        fs::read(outside_target).expect("outside target"),
+        b"outside\n"
+    );
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| event.operation == FsOperation::Rename)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn newly_created_parent_identity_is_bound_through_commit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("styles")).expect("styles");
+    let logical_path = "styles/nested/kit.css";
+    let target = root.join(logical_path);
+    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
+    let files = vec![PlannedFile {
+        path: logical_path.to_owned(),
+        action: PlannedFileAction::Create,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::CreateFile,
+        logical_path,
+        true,
+    )];
+    let parent = root.join("styles/nested");
+    let moved_parent = root.join("styles/staged-parent");
+    let fault_fs = Arc::new(
+        FaultFs::replace_parent_with_directory_after_final_revalidation(
+            target,
+            parent.clone(),
+            moved_parent.clone(),
+        ),
+    );
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("replacement parent with an ordinary directory must conflict");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert!(!parent.join("kit.css").exists());
+    assert_eq!(
+        fs::read(moved_parent.join("kit.leptos-ui-kit.tmp")).expect("staged file remains"),
+        b"planned\n"
+    );
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| event.operation == FsOperation::Rename)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mode_only_preimage_change_conflicts_before_target_writes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let target = root.join("styles/kit.css");
+    fs::write(&target, "before\n").expect("seed target");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).expect("seed mode");
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("change mode");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("mode-only change must conflict");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert!(!fault_fs.events().iter().any(|event| {
+        matches!(
+            event.operation,
+            FsOperation::WriteFile | FsOperation::Rename
+        )
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn retargeted_project_alias_conflicts_before_lock_creation() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    let alias = parent.path().join("alias");
+    fs::create_dir(&first).expect("first root");
+    fs::create_dir(&second).expect("second root");
+    fs::create_dir_all(first.join("styles")).expect("first styles");
+    fs::write(first.join("styles/kit.css"), "first\n").expect("first target");
+    fs::create_dir_all(second.join("styles")).expect("second styles");
+    fs::write(second.join("styles/kit.css"), "second\n").expect("second target");
+    std::os::unix::fs::symlink(&first, &alias).expect("create alias");
+    let snapshot = capture_plan_snapshot(&alias, ["styles/kit.css"]).expect("capture snapshot");
+    fs::remove_file(&alias).expect("remove alias");
+    std::os::unix::fs::symlink(&second, &alias).expect("retarget alias");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    let error =
+        apply_planned_files_with_snapshot(&alias, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("retargeted root must conflict");
+
+    assert!(matches!(error, CodegenError::ProjectRootChanged { .. }));
+    assert!(fault_fs.events().is_empty());
+    assert_eq!(
+        fs::read(second.join("styles/kit.css")).expect("second target"),
+        b"second\n"
+    );
 }
 
 #[test]

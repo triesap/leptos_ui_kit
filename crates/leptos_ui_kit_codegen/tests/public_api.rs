@@ -19,6 +19,40 @@ struct PublicData {
     value: &'static str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyInitPlan<'a> {
+    project_root: &'a PathBuf,
+    files: &'a [PlannedFile],
+    changes: &'a [ChangeRecord],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyAddPlan<'a> {
+    project_root: &'a PathBuf,
+    item_id: &'a str,
+    item_name: &'a str,
+    content_hash: &'a str,
+    cargo_plan: &'a [CargoPlanEntry],
+    files: &'a [PlannedFile],
+    changes: &'a [ChangeRecord],
+    diagnostics: &'a [Diagnostic],
+    lock: &'a InstallLock,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySyncPlan<'a> {
+    project_root: &'a PathBuf,
+    item_ids: &'a [String],
+    cargo_plan: &'a [CargoPlanEntry],
+    files: &'a [PlannedFile],
+    changes: &'a [ChangeRecord],
+    diagnostics: &'a [Diagnostic],
+    lock: &'a InstallLock,
+}
+
 #[derive(Debug, Serialize)]
 struct DebugData;
 
@@ -137,6 +171,10 @@ fn public_traits_associated_methods_and_fields_remain_available() {
     assert_serializable_owned_traits::<PlannedFile>();
     assert_serializable_owned_traits::<PlannedFileAction>();
     assert_copy_eq::<PlannedFileAction>();
+    assert_owned_traits::<PlanSnapshot>();
+    assert_owned_traits::<PathPreimage>();
+    assert_owned_traits::<PreservedFileMode>();
+    assert_copy_eq::<PreservedFileMode>();
     assert_serde_owned_traits::<InstallLock>();
     assert_serde_owned_traits::<InstallLockProject>();
     assert_serde_owned_traits::<InstalledItem>();
@@ -154,6 +192,14 @@ fn public_traits_associated_methods_and_fields_remain_available() {
     assert_auto_traits::<WriteLock>();
     let _ = ManagedCssBlockRole::Foundation;
     let _ = ManagedCssBlockRole::Component;
+    let _ = PathPreimage::Absent;
+    let _ = PathPreimage::RegularFile {
+        content_hash: valid_hash('1'),
+        mode: PreservedFileMode {
+            readonly: false,
+            posix_mode: Some(0o644),
+        },
+    };
 
     let _: fn(&InitPlan) -> bool = InitPlan::is_empty;
     let _: fn(&AddPlan) -> bool = AddPlan::is_empty;
@@ -213,6 +259,7 @@ fn project_plan_fields(init: &InitPlan, add: &AddPlan, sync: &SyncPlan, file: &P
     let _: &PathBuf = &init.project_root;
     let _: &Vec<PlannedFile> = &init.files;
     let _: &Vec<ChangeRecord> = &init.changes;
+    let _: &PlanSnapshot = &init.snapshot;
 
     let _: &PathBuf = &add.project_root;
     let _: &String = &add.item_id;
@@ -223,6 +270,7 @@ fn project_plan_fields(init: &InitPlan, add: &AddPlan, sync: &SyncPlan, file: &P
     let _: &Vec<ChangeRecord> = &add.changes;
     let _: &Vec<Diagnostic> = &add.diagnostics;
     let _: &InstallLock = &add.lock;
+    let _: &PlanSnapshot = &add.snapshot;
 
     let _: &PathBuf = &sync.project_root;
     let _: &Vec<String> = &sync.item_ids;
@@ -231,6 +279,7 @@ fn project_plan_fields(init: &InitPlan, add: &AddPlan, sync: &SyncPlan, file: &P
     let _: &Vec<ChangeRecord> = &sync.changes;
     let _: &Vec<Diagnostic> = &sync.diagnostics;
     let _: &InstallLock = &sync.lock;
+    let _: &PlanSnapshot = &sync.snapshot;
 
     let _: &String = &file.path;
     let _: PlannedFileAction = file.action;
@@ -405,15 +454,47 @@ fn public_plan_and_nested_lock_serialized_names_remain_stable() {
     let sync = plan_sync(root).expect("plan sync");
     let add = plan_add(root, "button").expect("plan add");
 
-    let init = serde_json::to_value(init).expect("serialize init plan");
+    let init_legacy = serde_json::to_string(&LegacyInitPlan {
+        project_root: &init.project_root,
+        files: &init.files,
+        changes: &init.changes,
+    })
+    .expect("serialize legacy init plan");
+    assert_eq!(
+        serde_json::to_string(&init).expect("serialize init plan"),
+        init_legacy
+    );
+    assert!(!init.snapshot.is_empty());
+    assert_eq!(init.snapshot.len(), init.snapshot.observations().len());
+    assert!(
+        init.snapshot
+            .preimage("index.html")
+            .is_some_and(|preimage| matches!(preimage, PathPreimage::RegularFile { .. }))
+    );
+    let init = serde_json::to_value(&init).expect("serialize init plan value");
     assert_object_contains_keys(&init, &["projectRoot", "files", "changes"]);
+    assert!(init.get("snapshot").is_none());
     let planned_file = init["files"]
         .as_array()
         .and_then(|files| files.first())
         .expect("planned file");
     assert_object_contains_keys(planned_file, &["path", "action", "content"]);
 
-    let sync = serde_json::to_value(sync).expect("serialize sync plan");
+    let sync_legacy = serde_json::to_string(&LegacySyncPlan {
+        project_root: &sync.project_root,
+        item_ids: &sync.item_ids,
+        cargo_plan: &sync.cargo_plan,
+        files: &sync.files,
+        changes: &sync.changes,
+        diagnostics: &sync.diagnostics,
+        lock: &sync.lock,
+    })
+    .expect("serialize legacy sync plan");
+    assert_eq!(
+        serde_json::to_string(&sync).expect("serialize sync plan"),
+        sync_legacy
+    );
+    let sync = serde_json::to_value(&sync).expect("serialize sync plan value");
     assert_object_contains_keys(
         &sync,
         &[
@@ -426,8 +507,25 @@ fn public_plan_and_nested_lock_serialized_names_remain_stable() {
             "lock",
         ],
     );
+    assert!(sync.get("snapshot").is_none());
 
-    let add = serde_json::to_value(add).expect("serialize add plan");
+    let add_legacy = serde_json::to_string(&LegacyAddPlan {
+        project_root: &add.project_root,
+        item_id: &add.item_id,
+        item_name: &add.item_name,
+        content_hash: &add.content_hash,
+        cargo_plan: &add.cargo_plan,
+        files: &add.files,
+        changes: &add.changes,
+        diagnostics: &add.diagnostics,
+        lock: &add.lock,
+    })
+    .expect("serialize legacy add plan");
+    assert_eq!(
+        serde_json::to_string(&add).expect("serialize add plan"),
+        add_legacy
+    );
+    let add = serde_json::to_value(&add).expect("serialize add plan value");
     assert_object_contains_keys(
         &add,
         &[
@@ -442,6 +540,7 @@ fn public_plan_and_nested_lock_serialized_names_remain_stable() {
             "lock",
         ],
     );
+    assert!(add.get("snapshot").is_none());
     let item = &add["lock"]["items"]["builtin:button"];
     assert_object_contains_keys(
         item,
@@ -520,6 +619,20 @@ fn public_error_variants_and_conversion_bounds_remain_constructible() {
     assert!(
         matches!(unsafe_path, CodegenError::UnsafePath { path, reason } if path == "../escape" && reason == "unsafe")
     );
+    let conflict = CodegenError::PreimageConflict {
+        path: "styles/kit.css".to_owned(),
+        reason: "changed".to_owned(),
+    };
+    assert!(
+        matches!(conflict, CodegenError::PreimageConflict { path, reason } if path == "styles/kit.css" && reason == "changed")
+    );
+    let root_changed = CodegenError::ProjectRootChanged {
+        path: path.clone(),
+        reason: "retargeted".to_owned(),
+    };
+    assert!(
+        matches!(root_changed, CodegenError::ProjectRootChanged { path: value, reason } if value == path && reason == "retargeted")
+    );
     assert!(matches!(
         CodegenError::DuplicatePath("dup".to_owned()),
         CodegenError::DuplicatePath(path) if path == "dup"
@@ -540,7 +653,13 @@ fn valid_hash(digit: char) -> String {
 
 fn assert_object_contains_keys(value: &Value, expected: &[&str]) {
     let object = value.as_object().expect("object");
-    for key in expected {
-        assert!(object.contains_key(*key), "missing serialized key {key}");
-    }
+    let actual = object
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected, "serialized object key set");
 }

@@ -37,7 +37,8 @@ pub use patch::{
 };
 #[doc(inline)]
 pub use path_safety::{
-    validate_logical_write_path, validate_planned_write_paths, validate_project_write_path,
+    PathPreimage, PlanSnapshot, PreservedFileMode, validate_logical_write_path,
+    validate_planned_write_paths, validate_project_write_path,
 };
 #[doc(inline)]
 pub use planning::{
@@ -50,12 +51,16 @@ pub use transaction::{DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, write_file_atomic}
 #[cfg(test)]
 use digest::hash_bytes;
 #[cfg(test)]
+use path_safety::{PlanningContext, capture_plan_snapshot};
+#[cfg(test)]
 use planning::{
     built_in_item_id, desired_builtin_item, plan_add_with_config_writer, plan_built_in_item,
     plan_init_with_config_provider, plan_sync_with_config_writer,
 };
 #[cfg(test)]
-use transaction::{FaultFs, FsEvent, FsOperation, apply_planned_files_with};
+use transaction::{
+    FaultFs, FsEvent, FsOperation, apply_planned_files_with, apply_planned_files_with_snapshot,
+};
 
 #[cfg(test)]
 mod tests;

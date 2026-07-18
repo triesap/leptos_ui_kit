@@ -57,7 +57,7 @@ const REGISTRY_TESTS: [&str; 7] = [
 
 const FACADE_FILES: [&str; 1] = ["src/lib.rs"];
 const PRIMITIVES_FILES: [&str; 1] = ["src/lib.rs"];
-const CODEGEN_FILES: [&str; 24] = [
+const CODEGEN_FILES: [&str; 25] = [
     "src/command.rs",
     "src/digest.rs",
     "src/error.rs",
@@ -82,6 +82,7 @@ const CODEGEN_FILES: [&str; 24] = [
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
     "tests/public_api.rs",
+    "tests/transaction_security.rs",
 ];
 const CLI_FILES: [&str; 11] = [
     "src/bin/cargo-leptos_ui_kit.rs",
