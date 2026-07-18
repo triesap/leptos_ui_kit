@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     fs,
@@ -12,15 +12,16 @@ use std::{
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
     InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add,
-    apply_init, apply_sync, extract_managed_css_block, hash_content_bytes, install_lock_path,
-    parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
+    apply_init, apply_sync, hash_content_bytes, inspect_managed_css_blocks_at_path,
+    install_lock_path, parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DependencyRequirement,
-    DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY,
-    TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output, canonical_tool_config,
-    detect_cargo_plan_requirements, load_built_in_registry_item, load_built_in_registry_root,
-    load_registry_item, read_built_in_registry_source,
+    CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
+    DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
+    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output,
+    canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json, load_registry_item,
+    read_built_in_registry_source, resolve_built_in_registry_items,
+    validate_built_in_registry_health,
 };
 use serde::Serialize;
 
@@ -141,6 +142,62 @@ enum DoctorCheckStatus {
     Pass,
     Warning,
     Fail,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorRegistrySnapshot {
+    requested_names: BTreeSet<String>,
+    resolved_names: BTreeSet<String>,
+    resolved_order: Vec<String>,
+    expected_items: BTreeMap<String, InstalledItem>,
+    files_by_path: BTreeMap<String, String>,
+    style_blocks_by_id: BTreeMap<String, String>,
+    css_path: Option<String>,
+    cargo_plan: Vec<CargoPlanEntry>,
+    style_dependencies: BTreeSet<(String, String)>,
+}
+
+#[derive(Debug)]
+enum DoctorLockState {
+    Missing {
+        logical_path: String,
+        path: PathBuf,
+    },
+    Invalid {
+        logical_path: String,
+        path: PathBuf,
+        message: String,
+    },
+    Valid {
+        logical_path: String,
+        path: PathBuf,
+        lock: InstallLock,
+    },
+}
+
+impl DoctorLockState {
+    fn logical_path(&self) -> &str {
+        match self {
+            Self::Missing { logical_path, .. }
+            | Self::Invalid { logical_path, .. }
+            | Self::Valid { logical_path, .. } => logical_path,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Missing { path, .. } | Self::Invalid { path, .. } | Self::Valid { path, .. } => {
+                path
+            }
+        }
+    }
+
+    fn lock(&self) -> Option<&InstallLock> {
+        match self {
+            Self::Valid { lock, .. } => Some(lock),
+            Self::Missing { .. } | Self::Invalid { .. } => None,
+        }
+    }
 }
 
 pub fn main_entry() {
@@ -639,8 +696,8 @@ fn version_output() -> VersionCommandOutput {
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
     let command_output = InfoCommandOutput {
         info: output.clone(),
-        registry_available: validate_built_in_registry_assets().is_ok(),
-        installed_lock: read_installed_lock(
+        registry_available: validate_built_in_registry_health().is_ok(),
+        installed_lock: read_info_install_lock(
             &output.detected.project_root,
             output.kit_config.as_ref(),
         ),
@@ -734,22 +791,6 @@ fn registry_item_source_output(
     })
 }
 
-fn validate_built_in_registry_assets() -> Result<(), String> {
-    let root = load_built_in_registry_root().map_err(|error| error.to_string())?;
-
-    for entry in root.items {
-        let item = load_built_in_registry_item(&entry.name).map_err(|error| error.to_string())?;
-        for file in &item.targets.ui_files {
-            read_built_in_registry_source(&file.source).map_err(|error| error.to_string())?;
-        }
-        for style in &item.targets.style_blocks {
-            read_built_in_registry_source(&style.source).map_err(|error| error.to_string())?;
-        }
-    }
-
-    Ok(())
-}
-
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
     let mut checks = Vec::new();
 
@@ -759,16 +800,6 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 "project",
                 "supported Trunk CSR project detected",
             ));
-            if info.kit_config.is_some() {
-                checks.push(DoctorCheck::pass("config", "kit.json is valid"));
-            } else {
-                checks.push(strict_check(
-                    strict,
-                    "config",
-                    "kit.json is missing; run leptos_ui_kit init",
-                ));
-            }
-
             dependency_check(
                 &mut checks,
                 strict,
@@ -776,21 +807,107 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                 "leptos",
                 info.detected.dependency_plan.leptos.status,
             );
-            checks.extend(lock_checks(cwd, strict, info.kit_config.as_ref()));
             checks.extend(stylesheet_checks(cwd, strict, &info));
-            checks.extend(registry_dependency_checks(cwd, strict, &info));
+
+            let lock_state = load_doctor_lock(cwd, info.kit_config.as_ref());
+            checks.extend(lock_state_checks(cwd, strict, &lock_state));
+
+            if let Some(config) = info.kit_config.as_ref() {
+                checks.push(DoctorCheck::pass("config", "kit.json is valid"));
+                let names = config
+                    .items
+                    .iter()
+                    .map(|item| item.item_name().to_owned())
+                    .collect::<BTreeSet<_>>();
+                match resolve_doctor_registry_snapshot(
+                    names,
+                    &config.install.ui_dir,
+                    Some(&config.styles.css),
+                ) {
+                    Ok(snapshot) => {
+                        checks.extend(config_closure_checks(strict, &snapshot));
+                        if let Some(lock) = lock_state.lock() {
+                            checks.push(compare_config_hash(cwd, strict, config, lock, &snapshot));
+                        }
+                        checks.extend(registry_snapshot_checks(
+                            cwd,
+                            strict,
+                            lock_state.lock(),
+                            &snapshot,
+                        ));
+                        checks.extend(registry_dependency_checks(
+                            cwd,
+                            strict,
+                            &snapshot.cargo_plan,
+                        ));
+                    }
+                    Err(error) => checks.push(DoctorCheck::fail(
+                        "registry.snapshot",
+                        format!("failed to resolve configured registry closure: {error}"),
+                    )),
+                }
+            } else {
+                checks.push(strict_check(
+                    strict,
+                    "config",
+                    "kit.json is missing; run leptos_ui_kit init",
+                ));
+
+                if !strict && let Some(lock) = lock_state.lock() {
+                    let names = lock
+                        .items
+                        .values()
+                        .map(|item| item.name.clone())
+                        .collect::<BTreeSet<_>>();
+                    let css_path = match fallback_css_path(lock) {
+                        Ok(css_path) => Some(css_path),
+                        Err(message) => {
+                            checks.push(DoctorCheck::warning("registry.snapshot", message));
+                            None
+                        }
+                    };
+                    match resolve_doctor_registry_snapshot(
+                        names,
+                        DEFAULT_UI_DIR,
+                        css_path.as_deref(),
+                    ) {
+                        Ok(snapshot) => {
+                            checks.push(DoctorCheck::warning(
+                                "registry.snapshot",
+                                "using lock-derived registry closure because kit.json is missing",
+                            ));
+                            checks.extend(registry_snapshot_checks(
+                                cwd,
+                                strict,
+                                Some(lock),
+                                &snapshot,
+                            ));
+                            checks.extend(registry_dependency_checks(
+                                cwd,
+                                strict,
+                                &snapshot.cargo_plan,
+                            ));
+                        }
+                        Err(error) => checks.push(strict_check(
+                            strict,
+                            "registry.snapshot",
+                            format!("failed to resolve lock-derived registry closure: {error}"),
+                        )),
+                    }
+                }
+            }
         }
         Err(error) => {
-            checks.push(DoctorCheck::fail("project", error.to_string()));
+            checks.push(strict_check(strict, "project", error.to_string()));
         }
     }
 
-    match validate_built_in_registry_assets() {
+    match validate_built_in_registry_health() {
         Ok(()) => checks.push(DoctorCheck::pass(
             "registry",
-            "all built-in registry assets are available",
+            "built-in registry runtime health is valid",
         )),
-        Err(error) => checks.push(DoctorCheck::fail("registry", error)),
+        Err(error) => checks.push(DoctorCheck::fail("registry", error.to_string())),
     }
 
     if check {
@@ -812,6 +929,217 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
         check,
         trunk_build,
         checks,
+    }
+}
+
+fn resolve_doctor_registry_snapshot(
+    requested_names: BTreeSet<String>,
+    ui_dir: &str,
+    css_path: Option<&str>,
+) -> Result<DoctorRegistrySnapshot, String> {
+    let sorted_names = requested_names.iter().cloned().collect::<Vec<_>>();
+    let resolved =
+        resolve_built_in_registry_items(&sorted_names).map_err(|error| error.to_string())?;
+    build_doctor_registry_snapshot(requested_names, ui_dir, css_path, resolved)
+}
+
+fn build_doctor_registry_snapshot(
+    requested_names: BTreeSet<String>,
+    ui_dir: &str,
+    css_path: Option<&str>,
+    resolved: Vec<ResolvedRegistryItem>,
+) -> Result<DoctorRegistrySnapshot, String> {
+    let mut resolved_names = BTreeSet::new();
+    let mut resolved_order = Vec::new();
+    let mut expected_items = BTreeMap::new();
+    let mut files_by_path = BTreeMap::new();
+    let mut style_blocks_by_id = BTreeMap::new();
+    let mut cargo_plan = Vec::new();
+    let style_ids_by_item = resolved
+        .iter()
+        .map(|item| {
+            (
+                item.item.name.clone(),
+                item.targets
+                    .style_blocks
+                    .iter()
+                    .map(|style| style.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut style_dependencies = BTreeSet::new();
+
+    for item in resolved {
+        let item_id = format!("builtin:{}", item.item.name);
+        resolved_names.insert(item.item.name.clone());
+        resolved_order.push(item.item.name.clone());
+        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
+
+        let mut files = Vec::new();
+        for target in &item.targets.ui_files {
+            let generated =
+                read_built_in_registry_source(&target.source).map_err(|error| error.to_string())?;
+            let logical_path = format!(
+                "{}/{path}",
+                ui_dir.trim_end_matches('/'),
+                path = target.path
+            );
+            let generated_hash = hash_content_bytes(generated.as_bytes());
+            if files_by_path
+                .insert(logical_path.clone(), item_id.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "registry closure has duplicate file target {logical_path}"
+                ));
+            }
+            files.push(InstalledFile {
+                path: logical_path,
+                kind: "rust".to_owned(),
+                generated_hash: generated_hash.clone(),
+                local_hash_at_install: generated_hash,
+            });
+        }
+
+        let mut style_blocks = Vec::new();
+        for target in &item.targets.style_blocks {
+            let generated =
+                read_built_in_registry_source(&target.source).map_err(|error| error.to_string())?;
+            if style_blocks_by_id
+                .insert(target.id.clone(), item_id.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "registry closure has duplicate managed CSS block {}",
+                    target.id
+                ));
+            }
+            style_blocks.push(InstalledStyleBlock {
+                css_path: css_path.unwrap_or_default().to_owned(),
+                block_id: target.id.clone(),
+                generated_hash: hash_content_bytes(generated.as_bytes()),
+            });
+        }
+
+        for dependency_name in &item.item.registry_dependencies {
+            let dependency_style_ids = style_ids_by_item.get(dependency_name).ok_or_else(|| {
+                format!(
+                    "resolved registry closure is missing dependency {dependency_name} required by {}",
+                    item.item.name
+                )
+            })?;
+            let dependent_style_ids = style_ids_by_item.get(&item.item.name).ok_or_else(|| {
+                format!(
+                    "resolved registry closure is missing style metadata for {}",
+                    item.item.name
+                )
+            })?;
+            for dependency_id in dependency_style_ids {
+                for dependent_id in dependent_style_ids {
+                    style_dependencies.insert((dependency_id.clone(), dependent_id.clone()));
+                }
+            }
+        }
+
+        let installed = InstalledItem {
+            id: item_id.clone(),
+            name: item.item.name,
+            source: "builtin".to_owned(),
+            version: item.item.version,
+            content_hash: item.content_hash,
+            files,
+            style_blocks,
+        };
+        if expected_items.insert(item_id.clone(), installed).is_some() {
+            return Err(format!(
+                "registry closure contains duplicate item {item_id}"
+            ));
+        }
+    }
+
+    Ok(DoctorRegistrySnapshot {
+        requested_names,
+        resolved_names,
+        resolved_order,
+        expected_items,
+        files_by_path,
+        style_blocks_by_id,
+        css_path: css_path.map(str::to_owned),
+        cargo_plan,
+        style_dependencies,
+    })
+}
+
+fn load_doctor_lock(cwd: &Path, config: Option<&KitConfig>) -> DoctorLockState {
+    let logical_path = config
+        .map(install_lock_path)
+        .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned());
+    let path = cwd.join(&logical_path);
+    if !path.is_file() {
+        return DoctorLockState::Missing { logical_path, path };
+    }
+    let input = match fs::read_to_string(&path) {
+        Ok(input) => input,
+        Err(error) => {
+            return DoctorLockState::Invalid {
+                logical_path,
+                path,
+                message: format!("failed to read lock: {error}"),
+            };
+        }
+    };
+    match parse_install_lock_str_at_path(&input, Path::new(&logical_path)) {
+        Ok(lock) => DoctorLockState::Valid {
+            logical_path,
+            path,
+            lock,
+        },
+        Err(error) => DoctorLockState::Invalid {
+            logical_path,
+            path,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn lock_state_checks(cwd: &Path, strict: bool, state: &DoctorLockState) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    match state {
+        DoctorLockState::Missing { logical_path, path } => checks.push(
+            strict_check(strict, "lock", format!("{logical_path} is missing"))
+                .with_path(path.display().to_string()),
+        ),
+        DoctorLockState::Invalid { path, message, .. } => {
+            checks.push(strict_check(strict, "lock", message).with_path(path.display().to_string()))
+        }
+        DoctorLockState::Valid { .. } => {
+            checks.push(
+                DoctorCheck::pass("lock", "install lock is valid")
+                    .with_path(state.path().display().to_string()),
+            );
+            checks.extend(git_metadata_checks(cwd, strict, state.logical_path()));
+        }
+    }
+    checks
+}
+
+fn fallback_css_path(lock: &InstallLock) -> Result<String, String> {
+    let paths = lock
+        .items
+        .values()
+        .flat_map(|item| item.style_blocks.iter().map(|block| block.css_path.clone()))
+        .collect::<BTreeSet<_>>();
+    match paths.len() {
+        0 => Ok(DEFAULT_CSS_PATH.to_owned()),
+        1 => Ok(paths
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| DEFAULT_CSS_PATH.to_owned())),
+        _ => Err(format!(
+            "lock-derived registry closure spans multiple stylesheet paths [{}]; managed CSS and dependency-order inspection was skipped",
+            paths.into_iter().collect::<Vec<_>>().join(", ")
+        )),
     }
 }
 
@@ -882,76 +1210,421 @@ fn strict_check(strict: bool, name: impl Into<String>, message: impl Into<String
     }
 }
 
-fn lock_checks(cwd: &Path, strict: bool, kit_config: Option<&KitConfig>) -> Vec<DoctorCheck> {
+fn config_closure_checks(strict: bool, snapshot: &DoctorRegistrySnapshot) -> Vec<DoctorCheck> {
+    if snapshot.requested_names == snapshot.resolved_names {
+        return vec![
+            DoctorCheck::pass(
+                "config_closure",
+                "kit.json item membership equals the resolved registry closure",
+            )
+            .with_path(DEFAULT_KIT_CONFIG_PATH),
+        ];
+    }
+
+    vec![
+        strict_check(
+            strict,
+            "config_closure",
+            set_drift_message(
+                "kit.json item membership differs from the resolved registry closure",
+                &snapshot.resolved_names,
+                &snapshot.requested_names,
+            ),
+        )
+        .with_path(DEFAULT_KIT_CONFIG_PATH),
+    ]
+}
+
+fn registry_snapshot_checks(
+    cwd: &Path,
+    strict: bool,
+    lock: Option<&InstallLock>,
+    snapshot: &DoctorRegistrySnapshot,
+) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let lock_logical_path = kit_config
-        .map(install_lock_path)
-        .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned());
-    let lock_path = cwd.join(&lock_logical_path);
-    if !lock_path.is_file() {
+    checks.extend(lock_snapshot_checks(strict, lock, snapshot));
+    checks.extend(installed_file_snapshot_checks(cwd, strict, snapshot));
+    checks.extend(managed_css_snapshot_checks(cwd, strict, snapshot));
+    checks
+}
+
+fn lock_snapshot_checks(
+    strict: bool,
+    lock: Option<&InstallLock>,
+    snapshot: &DoctorRegistrySnapshot,
+) -> Vec<DoctorCheck> {
+    let Some(lock) = lock else {
+        return Vec::new();
+    };
+    let mut checks = Vec::new();
+    if lock.kit_version == SCHEMA_VERSION {
+        checks.push(DoctorCheck::pass(
+            "lock_metadata",
+            "install lock kitVersion matches the registry schema version",
+        ));
+    } else {
         checks.push(strict_check(
             strict,
-            "lock",
-            format!("{lock_logical_path} is missing"),
+            "lock_metadata",
+            format!(
+                "install lock kitVersion {} must be {SCHEMA_VERSION}",
+                lock.kit_version
+            ),
         ));
-        return checks;
     }
-
-    let lock_input = match fs::read_to_string(&lock_path) {
-        Ok(input) => input,
-        Err(error) => {
-            checks.push(
-                DoctorCheck::fail("lock", format!("failed to read lock: {error}"))
-                    .with_path(lock_path.display().to_string()),
-            );
-            return checks;
-        }
-    };
-    let lock = match parse_install_lock_str_at_path(&lock_input, Path::new(&lock_logical_path)) {
-        Ok(lock) => lock,
-        Err(error) => {
-            checks.push(
-                DoctorCheck::fail("lock", error.to_string())
-                    .with_path(lock_path.display().to_string()),
-            );
-            return checks;
-        }
-    };
-
-    checks.push(DoctorCheck::pass("lock", "install lock is valid"));
-    checks.push(compare_config_hash(cwd, strict, &lock));
-    if let Some(config) = kit_config {
-        checks.extend(compare_desired_items(
-            config,
-            &lock,
+    let expected_ids = snapshot
+        .expected_items
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual_ids = lock.items.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_ids == actual_ids {
+        checks.push(DoctorCheck::pass(
+            "lock_closure",
+            "install lock item membership equals the resolved registry closure",
+        ));
+    } else {
+        checks.push(strict_check(
             strict,
-            &lock_logical_path,
+            "lock_closure",
+            set_drift_message(
+                "install lock item membership differs from the resolved registry closure",
+                &expected_ids,
+                &actual_ids,
+            ),
         ));
     }
-    for item in lock.items.values() {
-        checks.push(compare_item_content_hash(item));
-        for file in &item.files {
-            let source_path = cwd.join(&file.path);
-            checks.extend(compare_file_to_lock(
-                "installed_file",
-                file,
-                &source_path,
+
+    for (item_id, expected) in &snapshot.expected_items {
+        let Some(actual) = lock.items.get(item_id) else {
+            continue;
+        };
+        if actual.id == expected.id
+            && actual.name == expected.name
+            && actual.source == expected.source
+            && actual.version == expected.version
+            && actual.content_hash == expected.content_hash
+        {
+            checks.push(DoctorCheck::pass(
+                "lock_item_metadata",
+                format!("installed item metadata for {item_id} matches the registry snapshot"),
+            ));
+        } else {
+            checks.push(strict_check(
                 strict,
+                "lock_item_metadata",
+                format!("installed item metadata for {item_id} differs from the registry snapshot"),
             ));
         }
-        for block in &item.style_blocks {
-            let css_path = cwd.join(&block.css_path);
-            checks.extend(compare_css_block_to_lock(
-                block,
-                &css_path,
-                &block.block_id,
+
+        let expected_files = installed_file_records(&expected.files);
+        let actual_files = installed_file_records(&actual.files);
+        if expected_files == actual_files {
+            checks.push(DoctorCheck::pass(
+                "lock_file_targets",
+                format!("installed file targets for {item_id} match the registry snapshot"),
+            ));
+        } else {
+            checks.push(strict_check(
                 strict,
+                "lock_file_targets",
+                record_drift_message(
+                    &format!(
+                        "installed file targets for {item_id} differ from the registry snapshot"
+                    ),
+                    &expected_files,
+                    &actual_files,
+                ),
+            ));
+        }
+
+        let include_css_path = snapshot.css_path.is_some();
+        let expected_styles = installed_style_records(&expected.style_blocks, include_css_path);
+        let actual_styles = installed_style_records(&actual.style_blocks, include_css_path);
+        if expected_styles == actual_styles {
+            checks.push(DoctorCheck::pass(
+                "lock_style_targets",
+                format!("managed CSS targets for {item_id} match the registry snapshot"),
+            ));
+        } else {
+            checks.push(strict_check(
+                strict,
+                "lock_style_targets",
+                record_drift_message(
+                    &format!("managed CSS targets for {item_id} differ from the registry snapshot"),
+                    &expected_styles,
+                    &actual_styles,
+                ),
             ));
         }
     }
-    checks.extend(git_metadata_checks(cwd, strict, &lock_logical_path));
+
+    if lock.files_by_path == snapshot.files_by_path {
+        checks.push(DoctorCheck::pass(
+            "lock_files_by_path",
+            "filesByPath exactly matches registry target ownership",
+        ));
+    } else {
+        checks.push(strict_check(
+            strict,
+            "lock_files_by_path",
+            "filesByPath differs from registry target ownership",
+        ));
+    }
+    if lock.style_blocks_by_id == snapshot.style_blocks_by_id {
+        checks.push(DoctorCheck::pass(
+            "lock_style_blocks_by_id",
+            "styleBlocksById exactly matches registry target ownership",
+        ));
+    } else {
+        checks.push(strict_check(
+            strict,
+            "lock_style_blocks_by_id",
+            "styleBlocksById differs from registry target ownership",
+        ));
+    }
 
     checks
+}
+
+fn installed_file_records(files: &[InstalledFile]) -> Vec<String> {
+    let mut records = files
+        .iter()
+        .map(|file| {
+            format!(
+                "{}|{}|{}|{}",
+                file.path, file.kind, file.generated_hash, file.local_hash_at_install
+            )
+        })
+        .collect::<Vec<_>>();
+    records.sort();
+    records
+}
+
+fn installed_style_records(styles: &[InstalledStyleBlock], include_css_path: bool) -> Vec<String> {
+    let mut records = styles
+        .iter()
+        .map(|style| {
+            if include_css_path {
+                format!(
+                    "{}|{}|{}",
+                    style.css_path, style.block_id, style.generated_hash
+                )
+            } else {
+                format!("{}|{}", style.block_id, style.generated_hash)
+            }
+        })
+        .collect::<Vec<_>>();
+    records.sort();
+    records
+}
+
+fn installed_file_snapshot_checks(
+    cwd: &Path,
+    strict: bool,
+    snapshot: &DoctorRegistrySnapshot,
+) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    for expected in snapshot.expected_items.values() {
+        for file in &expected.files {
+            let path = cwd.join(&file.path);
+            match fs::read(&path) {
+                Ok(content) if hash_content_bytes(&content) == file.generated_hash => checks.push(
+                    DoctorCheck::pass(
+                        "installed_file",
+                        format!("installed file {} matches the registry snapshot", file.path),
+                    )
+                    .with_path(path.display().to_string()),
+                ),
+                Ok(_) => checks.push(
+                    strict_check(
+                        strict,
+                        "installed_file",
+                        format!(
+                            "installed file {} differs from the registry snapshot",
+                            file.path
+                        ),
+                    )
+                    .with_path(path.display().to_string()),
+                ),
+                Err(error) => checks.push(
+                    strict_check(
+                        strict,
+                        "installed_file",
+                        format!(
+                            "installed file {} is missing or unreadable: {error}",
+                            file.path
+                        ),
+                    )
+                    .with_path(path.display().to_string()),
+                ),
+            }
+        }
+    }
+    checks
+}
+
+fn managed_css_snapshot_checks(
+    cwd: &Path,
+    strict: bool,
+    snapshot: &DoctorRegistrySnapshot,
+) -> Vec<DoctorCheck> {
+    let Some(css_logical_path) = snapshot.css_path.as_deref() else {
+        return Vec::new();
+    };
+    let path = cwd.join(css_logical_path);
+    let css = match fs::read_to_string(&path) {
+        Ok(css) => css,
+        Err(error) => {
+            if snapshot.style_blocks_by_id.is_empty() {
+                return Vec::new();
+            }
+            return snapshot
+                .style_blocks_by_id
+                .keys()
+                .map(|block_id| {
+                    strict_check(
+                        strict,
+                        "managed_css",
+                        format!(
+                            "managed CSS block {block_id} is missing because {} is unreadable: {error}",
+                            css_logical_path
+                        ),
+                    )
+                    .with_path(path.display().to_string())
+                })
+                .collect();
+        }
+    };
+    let ranges = match inspect_managed_css_blocks_at_path(&css, css_logical_path) {
+        Ok(ranges) => ranges,
+        Err(error) => {
+            return vec![
+                strict_check(strict, "managed_css", error.to_string())
+                    .with_path(path.display().to_string()),
+            ];
+        }
+    };
+    let mut checks = Vec::new();
+    let expected_ids = snapshot
+        .style_blocks_by_id
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual_ids = ranges.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_ids == actual_ids {
+        checks.push(
+            DoctorCheck::pass(
+                "managed_css_closure",
+                "managed CSS block membership equals the resolved registry closure",
+            )
+            .with_path(path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            strict_check(
+                strict,
+                "managed_css_closure",
+                set_drift_message(
+                    "managed CSS block membership differs from the resolved registry closure",
+                    &expected_ids,
+                    &actual_ids,
+                ),
+            )
+            .with_path(path.display().to_string()),
+        );
+    }
+
+    for expected in snapshot.expected_items.values() {
+        for block in &expected.style_blocks {
+            let Some(range) = ranges.get(&block.block_id) else {
+                checks.push(
+                    strict_check(
+                        strict,
+                        "managed_css",
+                        format!("managed CSS block {} is missing", block.block_id),
+                    )
+                    .with_path(path.display().to_string()),
+                );
+                continue;
+            };
+            let current = &css[range.start..range.end];
+            if hash_content_bytes(current.as_bytes()) == block.generated_hash {
+                checks.push(
+                    DoctorCheck::pass(
+                        "managed_css",
+                        format!(
+                            "managed CSS block {} matches the registry snapshot",
+                            block.block_id
+                        ),
+                    )
+                    .with_path(path.display().to_string()),
+                );
+            } else {
+                checks.push(
+                    strict_check(
+                        strict,
+                        "managed_css",
+                        format!(
+                            "managed CSS block {} differs from the registry snapshot",
+                            block.block_id
+                        ),
+                    )
+                    .with_path(path.display().to_string()),
+                );
+            }
+        }
+    }
+
+    for (dependency_id, dependent_id) in &snapshot.style_dependencies {
+        let (Some(dependency), Some(dependent)) =
+            (ranges.get(dependency_id), ranges.get(dependent_id))
+        else {
+            continue;
+        };
+        if dependency.start < dependent.start {
+            checks.push(
+                DoctorCheck::pass(
+                    "managed_css_order",
+                    format!("managed CSS dependency {dependency_id} precedes {dependent_id}"),
+                )
+                .with_path(path.display().to_string()),
+            );
+        } else {
+            checks.push(
+                strict_check(
+                    strict,
+                    "managed_css_order",
+                    format!("managed CSS dependency {dependency_id} must precede {dependent_id}"),
+                )
+                .with_path(path.display().to_string()),
+            );
+        }
+    }
+
+    checks
+}
+
+fn set_drift_message(
+    prefix: &str,
+    expected: &BTreeSet<String>,
+    actual: &BTreeSet<String>,
+) -> String {
+    let missing = expected.difference(actual).cloned().collect::<Vec<_>>();
+    let extra = actual.difference(expected).cloned().collect::<Vec<_>>();
+    format!(
+        "{prefix}; missing [{}]; extra [{}]",
+        missing.join(", "),
+        extra.join(", ")
+    )
+}
+
+fn record_drift_message(prefix: &str, expected: &[String], actual: &[String]) -> String {
+    format!(
+        "{prefix}; expected [{}]; actual [{}]",
+        expected.join(", "),
+        actual.join(", ")
+    )
 }
 
 fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
@@ -998,7 +1671,8 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
             .with_path(info.detected.index_html_path.display().to_string()),
         ),
         Err(error) => checks.push(
-            DoctorCheck::fail(
+            strict_check(
+                strict,
                 "stylesheet_link",
                 format!("failed to read index.html: {error}"),
             )
@@ -1017,46 +1691,26 @@ fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
     })
 }
 
-fn registry_dependency_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorCheck> {
-    let cargo_plan = registry_cargo_plan(cwd, info);
+fn registry_dependency_checks(
+    cwd: &Path,
+    strict: bool,
+    cargo_plan: &[CargoPlanEntry],
+) -> Vec<DoctorCheck> {
     if cargo_plan.is_empty() {
         return Vec::new();
     }
 
-    match detect_cargo_plan_requirements(cwd, &cargo_plan) {
+    match detect_cargo_plan_requirements(cwd, cargo_plan) {
         Ok(requirements) => requirements
             .iter()
             .map(|requirement| registry_dependency_check(strict, requirement))
             .collect(),
-        Err(error) => vec![DoctorCheck::fail(
+        Err(error) => vec![strict_check(
+            strict,
             "dependency.registry",
             format!("failed to inspect registry dependency plan: {error}"),
         )],
     }
-}
-
-fn registry_cargo_plan(cwd: &Path, info: &InfoOutput) -> Vec<CargoPlanEntry> {
-    let mut cargo_plan = Vec::new();
-
-    if let Some(config) = info.kit_config.as_ref() {
-        for item in &config.items {
-            if let Ok(registry_item) = load_built_in_registry_item(item.item_name()) {
-                merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
-            }
-        }
-    }
-
-    if cargo_plan.is_empty() {
-        if let Some(lock) = read_installed_lock(cwd, info.kit_config.as_ref()) {
-            for item in lock.items.values() {
-                if let Ok(registry_item) = load_built_in_registry_item(&item.name) {
-                    merge_cargo_plan(&mut cargo_plan, &registry_item.item.cargo_plan);
-                }
-            }
-        }
-    }
-
-    cargo_plan
 }
 
 fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
@@ -1107,12 +1761,49 @@ fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) 
     }
 }
 
-fn compare_config_hash(cwd: &Path, strict: bool, lock: &InstallLock) -> DoctorCheck {
+fn compare_config_hash(
+    cwd: &Path,
+    strict: bool,
+    config: &KitConfig,
+    lock: &InstallLock,
+    snapshot: &DoctorRegistrySnapshot,
+) -> DoctorCheck {
     let path = cwd.join(DEFAULT_KIT_CONFIG_PATH);
     match fs::read(&path) {
         Ok(content) if hash_content_bytes(&content) == lock.project.config_hash => {
             DoctorCheck::pass("config_hash", "kit.json hash matches install lock")
                 .with_path(path.display().to_string())
+        }
+        Ok(_) if snapshot.requested_names == snapshot.resolved_names => {
+            let mut canonical = config.clone();
+            canonical.items = snapshot
+                .resolved_order
+                .iter()
+                .filter_map(|name| {
+                    config
+                        .items
+                        .iter()
+                        .find(|item| item.item_name() == name)
+                        .cloned()
+                })
+                .collect();
+            match kit_config_to_json(&canonical) {
+                Ok(content)
+                    if hash_content_bytes(content.as_bytes()) == lock.project.config_hash =>
+                {
+                    DoctorCheck::pass(
+                        "config_hash",
+                        "kit.json differs only by nonsemantic JSON formatting or item ordering",
+                    )
+                    .with_path(path.display().to_string())
+                }
+                Ok(_) | Err(_) => strict_check(
+                    strict,
+                    "config_hash",
+                    "kit.json hash differs from install lock",
+                )
+                .with_path(path.display().to_string()),
+            }
         }
         Ok(_) => strict_check(
             strict,
@@ -1120,56 +1811,13 @@ fn compare_config_hash(cwd: &Path, strict: bool, lock: &InstallLock) -> DoctorCh
             "kit.json hash differs from install lock",
         )
         .with_path(path.display().to_string()),
-        Err(error) => DoctorCheck::fail("config_hash", format!("failed to read config: {error}"))
-            .with_path(path.display().to_string()),
+        Err(error) => strict_check(
+            strict,
+            "config_hash",
+            format!("failed to read config: {error}"),
+        )
+        .with_path(path.display().to_string()),
     }
-}
-
-fn compare_desired_items(
-    config: &KitConfig,
-    lock: &InstallLock,
-    strict: bool,
-    lock_logical_path: &str,
-) -> Vec<DoctorCheck> {
-    let mut checks = Vec::new();
-    let desired_ids = config
-        .items
-        .iter()
-        .map(|item| format!("builtin:{}", item.item_name()))
-        .collect::<BTreeSet<_>>();
-
-    for desired_id in &desired_ids {
-        if lock.items.contains_key(desired_id) {
-            checks.push(DoctorCheck::pass(
-                "desired_item",
-                format!("desired item {desired_id} is installed"),
-            ));
-        } else {
-            checks.push(
-                strict_check(
-                    strict,
-                    "desired_item",
-                    format!("desired item {desired_id} is not installed"),
-                )
-                .with_path(DEFAULT_KIT_CONFIG_PATH),
-            );
-        }
-    }
-
-    for installed_id in lock.items.keys() {
-        if !desired_ids.contains(installed_id) {
-            checks.push(
-                strict_check(
-                    strict,
-                    "desired_item",
-                    format!("installed item {installed_id} is not declared in kit.json"),
-                )
-                .with_path(lock_logical_path),
-            );
-        }
-    }
-
-    checks
 }
 
 fn git_metadata_checks(cwd: &Path, strict: bool, state_logical_path: &str) -> Vec<DoctorCheck> {
@@ -1184,7 +1832,7 @@ fn git_metadata_checks(cwd: &Path, strict: bool, state_logical_path: &str) -> Ve
             GitIgnoreStatus::Ignored => ignored.push(path),
             GitIgnoreStatus::NotIgnored => {}
             GitIgnoreStatus::Unknown(message) => {
-                return vec![DoctorCheck::warning("git_metadata", message)];
+                return vec![strict_check(strict, "git_metadata", message)];
             }
         }
     }
@@ -1248,125 +1896,6 @@ fn git_check_ignore(cwd: &Path, path: &str) -> GitIgnoreStatus {
     }
 }
 
-fn compare_item_content_hash(item: &InstalledItem) -> DoctorCheck {
-    match load_built_in_registry_item(&item.name) {
-        Ok(registry_item) if item.content_hash == registry_item.content_hash => {
-            DoctorCheck::pass("item_content_hash", "item content hash matches registry")
-        }
-        Ok(_) => DoctorCheck::fail(
-            "item_content_hash",
-            format!("item {} content hash differs from registry", item.id),
-        ),
-        Err(error) => DoctorCheck::fail("item_content_hash", error.to_string()),
-    }
-}
-
-fn compare_file_to_lock(
-    name: &str,
-    file: &InstalledFile,
-    source_path: &Path,
-    _strict: bool,
-) -> Vec<DoctorCheck> {
-    let source = match fs::read_to_string(source_path) {
-        Ok(source) => source,
-        Err(error) => {
-            return vec![
-                DoctorCheck::fail(name, format!("failed to read installed file: {error}"))
-                    .with_path(source_path.display().to_string()),
-            ];
-        }
-    };
-    let source_hash = hash_content_bytes(source.as_bytes());
-    let mut checks = Vec::new();
-
-    if source_hash == file.generated_hash {
-        checks.push(
-            DoctorCheck::pass(name, "installed file matches generated source")
-                .with_path(source_path.display().to_string()),
-        );
-    } else {
-        checks.push(
-            DoctorCheck::warning(name, "installed file has local edits")
-                .with_path(source_path.display().to_string()),
-        );
-    }
-
-    if source_hash == file.local_hash_at_install {
-        checks.push(
-            DoctorCheck::pass(
-                "installed_file_hash",
-                "installed file hash matches install lock",
-            )
-            .with_path(source_path.display().to_string()),
-        );
-    } else {
-        checks.push(
-            DoctorCheck::warning(
-                "installed_file_hash",
-                "installed file hash differs from lock",
-            )
-            .with_path(source_path.display().to_string()),
-        );
-    }
-
-    checks
-}
-
-fn compare_css_block_to_lock(
-    block: &InstalledStyleBlock,
-    css_path: &Path,
-    block_id: &str,
-    strict: bool,
-) -> Vec<DoctorCheck> {
-    let css = match fs::read_to_string(css_path) {
-        Ok(css) => css,
-        Err(error) => {
-            return vec![
-                DoctorCheck::fail("style_block", format!("failed to read CSS: {error}"))
-                    .with_path(css_path.display().to_string()),
-            ];
-        }
-    };
-    let mut checks = Vec::new();
-
-    match extract_managed_css_block(&css, block_id) {
-        Ok(Some(current)) => {
-            let current_hash = hash_content_bytes(current.as_bytes());
-            if current_hash == block.generated_hash {
-                checks.push(
-                    DoctorCheck::pass(
-                        "style_block",
-                        format!("managed CSS block {block_id} matches generated source"),
-                    )
-                    .with_path(css_path.display().to_string()),
-                );
-            } else {
-                checks.push(
-                    DoctorCheck::warning(
-                        "style_block",
-                        format!("managed CSS block {block_id} has local edits"),
-                    )
-                    .with_path(css_path.display().to_string()),
-                );
-            }
-        }
-        Ok(None) => checks.push(
-            strict_check(
-                strict,
-                "style_block",
-                format!("managed CSS block {block_id} is missing"),
-            )
-            .with_path(css_path.display().to_string()),
-        ),
-        Err(error) => checks.push(
-            DoctorCheck::fail("style_block", error.to_string())
-                .with_path(css_path.display().to_string()),
-        ),
-    }
-
-    checks
-}
-
 fn doctor_status(output: &DoctorOutput) -> CommandStatus {
     if output.has_failures() {
         CommandStatus::Error
@@ -1423,13 +1952,15 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
         .collect()
 }
 
-fn read_installed_lock(project_root: &Path, kit_config: Option<&KitConfig>) -> Option<InstallLock> {
-    let state_logical_path = kit_config
+fn read_info_install_lock(
+    project_root: &Path,
+    kit_config: Option<&KitConfig>,
+) -> Option<InstallLock> {
+    let logical_path = kit_config
         .map(install_lock_path)
         .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned());
-    let path = project_root.join(&state_logical_path);
-    let input = fs::read_to_string(path).ok()?;
-    parse_install_lock_str_at_path(&input, Path::new(&state_logical_path)).ok()
+    let input = fs::read_to_string(project_root.join(&logical_path)).ok()?;
+    parse_install_lock_str_at_path(&input, Path::new(&logical_path)).ok()
 }
 
 fn usage() -> String {
@@ -1507,10 +2038,10 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, fs};
 
-    use leptos_ui_kit_codegen::{lock_to_json, plan_init};
+    use leptos_ui_kit_codegen::{extract_managed_css_block, lock_to_json, plan_init};
     use leptos_ui_kit_registry::{
         canonical_kit_config, desired_builtin_button_item, kit_config_to_json,
-        kit_config_with_desired_item, parse_kit_json_str,
+        kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
     };
     use tempfile::tempdir;
 
@@ -1800,10 +2331,10 @@ leptos_router = "0.9.0-alpha"
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Success);
-        assert!(output.contains("managed CSS block tokens matches generated source"));
-        assert!(output.contains("desired item builtin:tokens is installed"));
-        assert!(output.contains("desired item builtin:spinner is installed"));
-        assert!(output.contains("desired item builtin:button is installed"));
+        assert!(output.contains("managed CSS block tokens matches the registry snapshot"));
+        assert!(
+            output.contains("install lock item membership equals the resolved registry closure")
+        );
     }
 
     #[test]
@@ -1973,9 +2504,9 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Success);
-        assert!(output.contains("all built-in registry assets are available"));
+        assert!(output.contains("built-in registry runtime health is valid"));
         assert!(!output.contains("\"name\": \"dependency.leptos_router\""));
-        assert!(!output.contains("\"name\": \"dependency.registry.leptos_router\""));
+        assert!(!output.contains("\"name\": \"dependency.registry."));
     }
 
     #[test]
@@ -2010,8 +2541,9 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert!(output.contains("\"code\": \"doctor.desired_item\""));
-        assert!(output.contains("desired item builtin:button is not installed"));
+        assert!(output.contains("\"code\": \"doctor.config_closure\""));
+        assert!(output.contains("missing [spinner, tokens]"));
+        assert!(output.contains("\"code\": \"doctor.lock_closure\""));
     }
 
     #[test]
@@ -2028,8 +2560,8 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert!(output.contains("\"code\": \"doctor.desired_item\""));
-        assert!(output.contains("installed item builtin:button is not declared in kit.json"));
+        assert!(output.contains("\"code\": \"doctor.lock_closure\""));
+        assert!(output.contains("extra [builtin:button, builtin:spinner, builtin:tokens]"));
     }
 
     #[test]
@@ -2060,7 +2592,7 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
     }
 
     #[test]
-    fn doctor_reports_lock_hash_mismatches_as_warnings() {
+    fn doctor_strict_rejects_lock_hash_mismatches() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         fs::write(
@@ -2104,9 +2636,8 @@ leptos_router = "0.9.0-alpha"
         let output =
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
-        assert_eq!(doctor_status(&doctor), CommandStatus::Warning);
-        assert!(output.contains("\"code\": \"doctor.installed_file\""));
-        assert!(output.contains("installed file has local edits"));
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.lock_file_targets\""));
     }
 
     #[test]
@@ -2149,8 +2680,555 @@ leptos_router = "0.9.0-alpha"
             render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
 
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert!(output.contains("\"code\": \"doctor.style_block\""));
+        assert!(output.contains("\"code\": \"doctor.managed_css\""));
         assert!(output.contains("managed CSS block button markers are ambiguous"));
+    }
+
+    #[test]
+    fn doctor_rejects_self_consistent_tokens_removal_from_project_state() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+
+        let css_path = root.join(DEFAULT_CSS_PATH);
+        let css = fs::read_to_string(&css_path).expect("read stylesheet");
+        fs::write(&css_path, remove_managed_css_block(css, "tokens")).expect("remove tokens CSS");
+        remove_tokens_from_config_and_lock(root);
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert_doctor_check(
+            &strict,
+            "config_closure",
+            DoctorCheckStatus::Fail,
+            "missing [tokens]",
+        );
+        assert_doctor_check(
+            &strict,
+            "lock_closure",
+            DoctorCheckStatus::Fail,
+            "missing [builtin:tokens]",
+        );
+        assert_doctor_check(
+            &strict,
+            "managed_css_closure",
+            DoctorCheckStatus::Fail,
+            "missing [tokens]",
+        );
+        assert_doctor_check(
+            &strict,
+            "managed_css",
+            DoctorCheckStatus::Fail,
+            "managed CSS block tokens is missing",
+        );
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "config_closure",
+            DoctorCheckStatus::Warning,
+            "missing [tokens]",
+        );
+    }
+
+    #[test]
+    fn doctor_rejects_consistently_removed_registry_targets_and_indexes() {
+        for target_kind in ["file", "style"] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, DEFAULT_CSS_PATH);
+            let mut lock = read_install_lock(root);
+            let button = lock
+                .items
+                .get_mut("builtin:button")
+                .expect("button lock item");
+
+            match target_kind {
+                "file" => {
+                    let removed = button.files.pop().expect("button file target");
+                    assert_eq!(
+                        lock.files_by_path.remove(&removed.path).as_deref(),
+                        Some("builtin:button")
+                    );
+                }
+                "style" => {
+                    let removed = button.style_blocks.pop().expect("button style target");
+                    assert_eq!(
+                        lock.style_blocks_by_id.remove(&removed.block_id).as_deref(),
+                        Some("builtin:button")
+                    );
+                }
+                _ => unreachable!(),
+            }
+            write_install_lock(root, &lock);
+
+            let doctor = build_doctor_output(root, true, false, false);
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+            let (target_check, index_check) = if target_kind == "file" {
+                ("lock_file_targets", "lock_files_by_path")
+            } else {
+                ("lock_style_targets", "lock_style_blocks_by_id")
+            };
+            assert_doctor_check(
+                &doctor,
+                target_check,
+                DoctorCheckStatus::Fail,
+                "differ from the registry snapshot",
+            );
+            assert_doctor_check(
+                &doctor,
+                index_check,
+                DoctorCheckStatus::Fail,
+                "differs from registry target ownership",
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_rejects_extra_duplicate_and_misowned_lock_targets() {
+        for mutation in [
+            "extra_file",
+            "duplicate_file",
+            "misowned_file",
+            "extra_style",
+            "duplicate_style",
+            "misowned_style",
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, DEFAULT_CSS_PATH);
+            let mut lock = read_install_lock(root);
+
+            match mutation {
+                "extra_file" => {
+                    let generated_hash = format!("sha256:{}", "1".repeat(64));
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .files
+                        .push(InstalledFile {
+                            path: "src/components/ui/extra.rs".to_owned(),
+                            kind: "rust".to_owned(),
+                            generated_hash: generated_hash.clone(),
+                            local_hash_at_install: generated_hash,
+                        });
+                    lock.files_by_path.insert(
+                        "src/components/ui/extra.rs".to_owned(),
+                        "builtin:button".to_owned(),
+                    );
+                }
+                "duplicate_file" => {
+                    let duplicate = lock.items["builtin:button"].files[0].clone();
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .files
+                        .push(duplicate);
+                }
+                "misowned_file" => {
+                    let path = lock.items["builtin:spinner"].files[0].path.clone();
+                    lock.files_by_path.insert(path, "builtin:button".to_owned());
+                }
+                "extra_style" => {
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .style_blocks
+                        .push(InstalledStyleBlock {
+                            css_path: DEFAULT_CSS_PATH.to_owned(),
+                            block_id: "extra".to_owned(),
+                            generated_hash: format!("sha256:{}", "4".repeat(64)),
+                        });
+                    lock.style_blocks_by_id
+                        .insert("extra".to_owned(), "builtin:button".to_owned());
+                }
+                "duplicate_style" => {
+                    let duplicate = lock.items["builtin:button"].style_blocks[0].clone();
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .style_blocks
+                        .push(duplicate);
+                }
+                "misowned_style" => {
+                    lock.style_blocks_by_id
+                        .insert("spinner".to_owned(), "builtin:button".to_owned());
+                }
+                _ => unreachable!(),
+            }
+            write_install_lock(root, &lock);
+
+            let doctor = build_doctor_output(root, true, false, false);
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+            if mutation == "misowned_file" {
+                assert_doctor_check(
+                    &doctor,
+                    "lock_files_by_path",
+                    DoctorCheckStatus::Fail,
+                    "differs from registry target ownership",
+                );
+            } else if mutation.ends_with("_file") {
+                assert_doctor_check(
+                    &doctor,
+                    "lock_file_targets",
+                    DoctorCheckStatus::Fail,
+                    "differ from the registry snapshot",
+                );
+            } else if mutation == "misowned_style" {
+                assert_doctor_check(
+                    &doctor,
+                    "lock_style_blocks_by_id",
+                    DoctorCheckStatus::Fail,
+                    "differs from registry target ownership",
+                );
+            } else {
+                assert_doctor_check(
+                    &doctor,
+                    "lock_style_targets",
+                    DoctorCheckStatus::Fail,
+                    "differ from the registry snapshot",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_rejects_stale_item_and_lock_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let mut lock = read_install_lock(root);
+        lock.kit_version = "0.8.0".to_owned();
+        lock.items
+            .get_mut("builtin:button")
+            .expect("button item")
+            .content_hash = format!("sha256:{}", "2".repeat(64));
+        write_install_lock(root, &lock);
+
+        let doctor = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert_doctor_check(
+            &doctor,
+            "lock_metadata",
+            DoctorCheckStatus::Fail,
+            "kitVersion 0.8.0",
+        );
+        assert_doctor_check(
+            &doctor,
+            "lock_item_metadata",
+            DoctorCheckStatus::Fail,
+            "builtin:button differs",
+        );
+    }
+
+    #[test]
+    fn doctor_rejects_each_managed_css_dependency_order_inversion() {
+        for (block_id, expected_message) in [
+            ("tokens", "managed CSS dependency tokens must precede"),
+            (
+                "spinner",
+                "managed CSS dependency spinner must precede button",
+            ),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, DEFAULT_CSS_PATH);
+            move_managed_css_block_to_end(root, DEFAULT_CSS_PATH, block_id);
+
+            let doctor = build_doctor_output(root, true, false, false);
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+            assert_doctor_check(
+                &doctor,
+                "managed_css_order",
+                DoctorCheckStatus::Fail,
+                expected_message,
+            );
+            assert!(doctor.checks.iter().any(|check| {
+                check.name == "managed_css"
+                    && check.status == DoctorCheckStatus::Pass
+                    && check.message.contains(block_id)
+            }));
+        }
+    }
+
+    #[test]
+    fn doctor_treats_config_item_order_as_nonsemantic() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+                .expect("parse installed config");
+        config.items.reverse();
+        fs::write(
+            &config_path,
+            kit_config_to_json(&config).expect("serialize reordered config"),
+        )
+        .expect("write reordered config");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert_doctor_check(
+            &doctor,
+            "config_closure",
+            DoctorCheckStatus::Pass,
+            "equals the resolved registry closure",
+        );
+        assert_doctor_check(
+            &doctor,
+            "config_hash",
+            DoctorCheckStatus::Pass,
+            "nonsemantic JSON formatting or item ordering",
+        );
+    }
+
+    #[test]
+    fn doctor_tokens_only_cargo_plan_does_not_fall_back_to_stale_lock_items() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        apply_init(root).expect("init project");
+        apply_add(root, "tokens").expect("install tokens");
+
+        let router = load_built_in_registry_item("router-link").expect("load router-link");
+        let mut lock = read_install_lock(root);
+        lock.items.insert(
+            "builtin:router-link".to_owned(),
+            InstalledItem {
+                id: "builtin:router-link".to_owned(),
+                name: "router-link".to_owned(),
+                source: "builtin".to_owned(),
+                version: router.item.version,
+                content_hash: router.content_hash,
+                files: Vec::new(),
+                style_blocks: Vec::new(),
+            },
+        );
+        write_install_lock(root, &lock);
+
+        let doctor = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert_doctor_check(
+            &doctor,
+            "lock_closure",
+            DoctorCheckStatus::Fail,
+            "extra [builtin:router-link]",
+        );
+        assert!(
+            !doctor
+                .checks
+                .iter()
+                .any(|check| check.name.starts_with("dependency.registry."))
+        );
+    }
+
+    #[test]
+    fn doctor_router_link_cargo_plan_requires_router_from_resolved_closure() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_doctor_project(root);
+        apply_init(root).expect("init project");
+        apply_add(root, "router-link").expect("install router-link closure");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert_doctor_check(
+            &doctor,
+            "dependency.registry.leptos_router",
+            DoctorCheckStatus::Pass,
+            "satisfies registry plan",
+        );
+        assert!(
+            !doctor
+                .checks
+                .iter()
+                .any(|check| check.name == "dependency.registry.web_ui_primitives")
+        );
+    }
+
+    #[test]
+    fn doctor_missing_config_fallback_is_ordinary_only() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        fs::remove_file(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("remove config");
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "registry.snapshot",
+            DoctorCheckStatus::Warning,
+            "using lock-derived registry closure",
+        );
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert_doctor_check(
+            &strict,
+            "config",
+            DoctorCheckStatus::Fail,
+            "kit.json is missing",
+        );
+        assert!(
+            !strict
+                .checks
+                .iter()
+                .any(|check| check.name == "registry.snapshot")
+        );
+    }
+
+    #[test]
+    fn doctor_malformed_config_never_falls_back_to_lock() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        fs::write(root.join(DEFAULT_KIT_CONFIG_PATH), "{\n").expect("write malformed config");
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "project",
+            DoctorCheckStatus::Warning,
+            "failed to parse kit.json",
+        );
+        assert!(
+            !ordinary
+                .checks
+                .iter()
+                .any(|check| check.name == "registry.snapshot")
+        );
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert_doctor_check(
+            &strict,
+            "project",
+            DoctorCheckStatus::Fail,
+            "failed to parse kit.json",
+        );
+    }
+
+    #[test]
+    fn doctor_malformed_lock_is_warning_ordinary_and_failure_strict() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        fs::write(root.join(DEFAULT_KIT_LOCK_PATH), "{\n").expect("write malformed lock");
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "lock",
+            DoctorCheckStatus::Warning,
+            "failed to parse",
+        );
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert_doctor_check(&strict, "lock", DoctorCheckStatus::Fail, "failed to parse");
+    }
+
+    #[test]
+    fn doctor_local_file_drift_warns_ordinary_and_fails_strict() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let path = root.join("src/components/ui/button.rs");
+        let mut source = fs::read_to_string(&path).expect("read installed button");
+        source.push_str("\n// local edit\n");
+        fs::write(&path, source).expect("write local edit");
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "installed_file",
+            DoctorCheckStatus::Warning,
+            "differs from the registry snapshot",
+        );
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert_doctor_check(
+            &strict,
+            "installed_file",
+            DoctorCheckStatus::Fail,
+            "differs from the registry snapshot",
+        );
+    }
+
+    #[test]
+    fn doctor_lock_fallback_resolution_errors_are_not_swallowed() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let mut lock = read_install_lock(root);
+        lock.items.insert(
+            "builtin:missing-item".to_owned(),
+            InstalledItem {
+                id: "builtin:missing-item".to_owned(),
+                name: "missing-item".to_owned(),
+                source: "builtin".to_owned(),
+                version: SCHEMA_VERSION.to_owned(),
+                content_hash: format!("sha256:{}", "3".repeat(64)),
+                files: Vec::new(),
+                style_blocks: Vec::new(),
+            },
+        );
+        write_install_lock(root, &lock);
+        fs::remove_file(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("remove config");
+
+        let ordinary = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&ordinary), CommandStatus::Warning);
+        assert_doctor_check(
+            &ordinary,
+            "registry.snapshot",
+            DoctorCheckStatus::Warning,
+            "failed to resolve lock-derived registry closure",
+        );
+
+        let strict = build_doctor_output(root, true, false, false);
+        assert_eq!(doctor_status(&strict), CommandStatus::Error);
+        assert!(
+            !strict
+                .checks
+                .iter()
+                .any(|check| check.name == "registry.snapshot")
+        );
+    }
+
+    #[test]
+    fn doctor_ambiguous_lock_only_stylesheets_warn_and_skip_css_inspection() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let mut lock = read_install_lock(root);
+        lock.items
+            .get_mut("builtin:button")
+            .expect("button item")
+            .style_blocks[0]
+            .css_path = "styles/other.css".to_owned();
+        write_install_lock(root, &lock);
+        fs::remove_file(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("remove config");
+
+        let doctor = build_doctor_output(root, false, false, false);
+        assert_eq!(doctor_status(&doctor), CommandStatus::Warning);
+        assert_doctor_check(
+            &doctor,
+            "registry.snapshot",
+            DoctorCheckStatus::Warning,
+            "spans multiple stylesheet paths",
+        );
+        assert!(!doctor.checks.iter().any(|check| {
+            check.name == "managed_css"
+                || check.name == "managed_css_closure"
+                || check.name == "managed_css_order"
+        }));
     }
 
     #[test]
@@ -2310,6 +3388,33 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(check.status, DoctorCheckStatus::Fail);
         assert!(check.message.contains("failed to run"));
+    }
+
+    fn assert_doctor_check(
+        doctor: &DoctorOutput,
+        name: &str,
+        status: DoctorCheckStatus,
+        message: &str,
+    ) {
+        assert!(
+            doctor.checks.iter().any(|check| {
+                check.name == name && check.status == status && check.message.contains(message)
+            }),
+            "missing doctor check {name:?} with status {status:?} and message containing {message:?}; checks:\n{:#?}",
+            doctor.checks
+        );
+    }
+
+    fn move_managed_css_block_to_end(root: &Path, css_path: &str, block_id: &str) {
+        let path = root.join(css_path);
+        let css = fs::read_to_string(&path).expect("read stylesheet");
+        let block = managed_css_block(&css, block_id);
+        let mut reordered = remove_managed_css_block(css, block_id);
+        if !reordered.ends_with('\n') {
+            reordered.push('\n');
+        }
+        reordered.push_str(&block);
+        fs::write(path, reordered).expect("write reordered stylesheet");
     }
 
     fn create_doctor_project(root: &Path) {

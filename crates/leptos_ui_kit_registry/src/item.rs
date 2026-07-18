@@ -645,7 +645,9 @@ fn validate_built_in_registry_catalog(root: &RegistryRoot) -> Result<(), Registr
     validate_built_in_registry_items(&items)
 }
 
-fn validate_built_in_registry_items(items: &[RegistryItem]) -> Result<(), RegistryError> {
+pub(crate) fn validate_built_in_registry_items(
+    items: &[RegistryItem],
+) -> Result<(), RegistryError> {
     validate_registry_graph(items)?;
 
     let tokens = items
