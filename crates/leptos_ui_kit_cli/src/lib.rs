@@ -12,8 +12,9 @@ use std::{
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
     InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add,
-    apply_init, apply_sync, hash_content_bytes, inspect_managed_css_blocks_at_path,
-    install_lock_path, parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
+    apply_init, apply_sync, check_pending_recovery, hash_content_bytes,
+    inspect_managed_css_blocks_at_path, install_lock_path, parse_install_lock_str_at_path,
+    plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
@@ -806,6 +807,14 @@ fn registry_item_source_output(
 
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
     let mut checks = Vec::new();
+
+    match check_pending_recovery(cwd) {
+        Ok(()) => checks.push(DoctorCheck::pass(
+            "transaction_recovery",
+            "no pending durable transaction recovery",
+        )),
+        Err(error) => checks.push(DoctorCheck::fail("transaction_recovery", error.to_string())),
+    }
 
     match build_info_output(cwd) {
         Ok(info) => {
@@ -2374,6 +2383,36 @@ leptos_router = "0.9.0-alpha"
         assert!(
             output.contains("install lock item membership equals the resolved registry closure")
         );
+    }
+
+    #[test]
+    fn doctor_surfaces_pending_or_invalid_transaction_recovery_state() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path();
+        create_doctor_project(root);
+        let transactions = root.join("src/components/ui/_kit/.transactions");
+        fs::create_dir_all(&transactions).expect("create transaction directory");
+        let journal = transactions.join("transaction-00000000000000000000000000000000.json");
+        fs::write(&journal, b"not a valid journal\n").expect("write invalid journal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&transactions, fs::Permissions::from_mode(0o700))
+                .expect("transaction directory mode");
+            fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).expect("journal mode");
+        }
+        let before = fs::read(&journal).expect("journal before doctor");
+
+        let doctor = build_doctor_output(root, false, false, false);
+
+        assert_doctor_check(
+            &doctor,
+            "transaction_recovery",
+            DoctorCheckStatus::Fail,
+            "transaction journal",
+        );
+        assert_eq!(fs::read(journal).expect("journal after doctor"), before);
     }
 
     #[test]

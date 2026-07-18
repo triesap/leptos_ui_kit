@@ -31,6 +31,7 @@ pub(crate) fn plan_sync_with_config_writer(
     project_root: &Path,
     config_writer: KitConfigWriter,
 ) -> Result<SyncPlan, CodegenError> {
+    crate::transaction::check_pending_recovery(project_root)?;
     let context = PlanningContext::open(project_root)?;
     plan_sync_with_context(&context, project_root, config_writer)
 }

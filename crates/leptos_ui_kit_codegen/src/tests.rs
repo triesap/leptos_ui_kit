@@ -4406,6 +4406,17 @@ fn failed_rollback_retains_a_strict_recovery_required_journal() {
             .map(Vec::len),
         Some(2)
     );
+    let recovered = WriteLock::acquire(root).expect("next writer recovers durable transaction");
+    drop(recovered);
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("recovered first target"),
+        b"first-before\n"
+    );
+    assert_eq!(
+        fs::read(root.join("styles/second.css")).expect("recovered second target"),
+        b"second-before\n"
+    );
+    assert!(!transactions.exists());
     assert_exact_persistent_coordination(root);
 }
 
@@ -4446,6 +4457,102 @@ fn rollback_removes_every_transaction_created_target_directory() {
     assert!(!root.join("src/components/ui/generated").exists());
     assert!(!root.join("src/components/ui/_kit/.transactions").exists());
     assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn third_state_application_edits_block_recovery_without_mutating_evidence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let journal = seed_failed_rollback_journal(root);
+    fs::write(root.join("styles/first.css"), b"application edit\n").expect("write third state");
+    let before = snapshot_project_files(root);
+
+    let error = WriteLock::acquire(root).expect_err("third state blocks recovery");
+
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+    assert_eq!(snapshot_project_files(root), before);
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("third-state target"),
+        b"application edit\n"
+    );
+    assert!(journal.exists());
+}
+
+#[test]
+fn invalid_wrong_project_and_unsupported_journals_block_without_mutation() {
+    for case in ["corrupt", "wrong-project", "unsupported", "unknown-field"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let journal = seed_failed_rollback_journal(root);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal).expect("read journal"))
+                .expect("parse seeded journal");
+        match case {
+            "corrupt" => fs::write(&journal, b"not json\n").expect("corrupt journal"),
+            "wrong-project" => {
+                let device = value
+                    .pointer_mut("/project/device")
+                    .expect("project device");
+                *device =
+                    serde_json::Value::from(device.as_u64().expect("numeric project device") + 1);
+                fs::write(
+                    &journal,
+                    serde_json::to_vec_pretty(&value).expect("serialize wrong project"),
+                )
+                .expect("write wrong project");
+            }
+            "unsupported" => {
+                value["version"] = serde_json::Value::from(2);
+                fs::write(
+                    &journal,
+                    serde_json::to_vec_pretty(&value).expect("serialize version"),
+                )
+                .expect("write version");
+            }
+            "unknown-field" => {
+                value["unexpected"] = serde_json::Value::Bool(true);
+                fs::write(
+                    &journal,
+                    serde_json::to_vec_pretty(&value).expect("serialize unknown field"),
+                )
+                .expect("write unknown field");
+            }
+            _ => unreachable!("known invalid-journal case"),
+        }
+        let before = snapshot_project_files(root);
+
+        let error = WriteLock::acquire(root).expect_err(case);
+
+        assert!(matches!(
+            error,
+            CodegenError::InvalidCoordinationState { .. }
+        ));
+        assert_eq!(snapshot_project_files(root), before, "{case}");
+    }
+}
+
+#[test]
+fn dry_run_reports_pending_recovery_without_mutating_the_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    seed_failed_rollback_journal(root);
+    let before = snapshot_project_files(root);
+
+    let error = plan_init(root).expect_err("dry run reports pending recovery");
+
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+    assert_eq!(snapshot_project_files(root), before);
+}
+
+fn seed_failed_rollback_journal(root: &Path) -> PathBuf {
+    let (files, changes) = setup_two_file_update(root);
+    let fault_fs = Arc::new(FaultFs::fail_from(FsOperation::Rename, 2));
+    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
+        .expect_err("seed failed rollback");
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+    let journals = transaction_journal_paths(root);
+    assert_eq!(journals.len(), 1);
+    journals.into_iter().next().expect("journal path")
 }
 
 #[test]

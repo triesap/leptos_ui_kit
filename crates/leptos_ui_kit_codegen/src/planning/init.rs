@@ -23,6 +23,7 @@ pub(crate) fn plan_init_with_config_provider<F>(
 where
     F: FnOnce() -> Result<String, ConfigError>,
 {
+    crate::transaction::check_pending_recovery(project_root)?;
     let context = PlanningContext::open(project_root)?;
     plan_init_with_context(&context, project_root, canonical_config)
 }

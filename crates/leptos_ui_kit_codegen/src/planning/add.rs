@@ -26,6 +26,7 @@ pub(crate) fn plan_add_with_config_writer(
     item_name: &str,
     config_writer: KitConfigWriter,
 ) -> Result<AddPlan, CodegenError> {
+    crate::transaction::check_pending_recovery(project_root)?;
     let context = PlanningContext::open(project_root)?;
     plan_add_with_context(&context, project_root, item_name, config_writer)
 }

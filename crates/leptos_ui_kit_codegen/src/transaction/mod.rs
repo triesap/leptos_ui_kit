@@ -7,7 +7,7 @@ pub use lock::{DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock};
 #[cfg(test)]
 pub(crate) use lock::{KIT_ADVISORY_LOCK_CONTENT, KIT_COORDINATION_IGNORE_CONTENT};
 pub(crate) use replace::apply_planned_files_locked;
-pub use replace::write_file_atomic;
+pub use replace::{check_pending_recovery, write_file_atomic};
 
 #[cfg(test)]
 pub(crate) use fs::{FaultFs, FsEvent, FsOperation};

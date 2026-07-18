@@ -287,6 +287,13 @@ impl PlanningContext {
         Ok(self.observe(logical_path)?.preimage)
     }
 
+    pub(crate) fn inspect_path_uncached(
+        &self,
+        logical_path: &str,
+    ) -> Result<PathPreimage, CodegenError> {
+        Ok(self.inspect_uncached(logical_path)?.preimage)
+    }
+
     pub(crate) fn finish_snapshot(&self) -> PlanSnapshot {
         PlanSnapshot {
             root: self.root.clone(),

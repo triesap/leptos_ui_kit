@@ -125,6 +125,7 @@ fn root_symbols_and_function_signatures_remain_available_downstream() {
     let _: fn(&str) -> Result<(), CodegenError> = validate_logical_write_path;
     let _: fn(&Path, &str) -> Result<PathBuf, CodegenError> = validate_project_write_path;
     let _: fn(&Path) -> Result<WriteLock, CodegenError> = WriteLock::acquire;
+    let _: fn(&Path) -> Result<(), CodegenError> = check_pending_recovery;
     let _: fn(&Path, &str, &[u8]) -> Result<(), CodegenError> = write_file_atomic;
     let _: fn(Option<&str>) -> Result<String, CodegenError> = patch_components_mod;
     let _: fn(Option<&str>, &[UiModuleExport]) -> Result<String, CodegenError> = patch_ui_mod;

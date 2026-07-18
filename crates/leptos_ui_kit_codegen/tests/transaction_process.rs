@@ -185,6 +185,53 @@ fn unknown_coordination_lock_is_rejected_without_replacement() {
 }
 
 #[test]
+fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
+    for attempt in 1..=8 {
+        let sandbox = tempdir().expect("process-test sandbox");
+        let project = sandbox.path().join("project");
+        let control = sandbox.path().join("control");
+        setup_project(&project);
+        fs::create_dir(&control).expect("create process control directory");
+        let lock = WriteLock::acquire(&project).expect("bootstrap coordination");
+        drop(lock);
+        let before = project_tree(&project);
+        let mut worker = spawn_worker("apply-init", &project, &control, "crash-writer");
+        let deadline = Instant::now() + BARRIER_TIMEOUT;
+        let mut saw_journal = false;
+        while Instant::now() < deadline {
+            if transaction_journal_is_valid(&project) {
+                saw_journal = true;
+                worker.kill_and_wait();
+                break;
+            }
+            if worker.try_status().is_some() {
+                break;
+            }
+            thread::yield_now();
+        }
+        if !saw_journal {
+            worker.wait_success();
+            continue;
+        }
+
+        let mut recovery = spawn_worker("recover", &project, &control, "recovery");
+        recovery.wait_success();
+        assert_eq!(
+            project_tree(&project),
+            before,
+            "fresh-process recovery after crash attempt {attempt}"
+        );
+        assert!(
+            !project
+                .join("src/components/ui/_kit/.transactions")
+                .exists()
+        );
+        return;
+    }
+    panic!("could not observe a durable in-flight journal before the worker completed");
+}
+
+#[test]
 fn transaction_process_worker() {
     let Some(role) = env::var_os(WORKER_ROLE_ENV) else {
         return;
@@ -198,6 +245,13 @@ fn transaction_process_worker() {
         "race" => worker_race(&project, &control, &id),
         "legacy" => worker_legacy(&project, &control, &id),
         "invalid" => worker_invalid(&project, &control, &id),
+        "apply-init" => {
+            apply_init(&project).expect("worker applies init");
+        }
+        "recover" => {
+            let lock = WriteLock::acquire(&project).expect("fresh worker recovers transaction");
+            drop(lock);
+        }
         other => panic!("unknown transaction-process worker role {other}"),
     }
 }
@@ -397,6 +451,22 @@ fn file_identity(path: &Path) -> FileIdentity {
 fn setup_project(root: &Path) {
     fs::create_dir_all(root.join("src")).expect("create project source directory");
     fs::write(root.join("index.html"), INDEX_HTML).expect("write project index");
+}
+
+fn transaction_journal_is_valid(project: &Path) -> bool {
+    let transactions = project.join("src/components/ui/_kit/.transactions");
+    let Ok(entries) = fs::read_dir(transactions) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let name = entry.file_name();
+        name.to_str()
+            .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
+            && fs::read(entry.path())
+                .ok()
+                .and_then(|content| serde_json::from_slice::<serde_json::Value>(&content).ok())
+                .is_some()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

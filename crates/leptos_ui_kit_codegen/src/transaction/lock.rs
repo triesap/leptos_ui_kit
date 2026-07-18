@@ -30,6 +30,7 @@ const LOCK_CANDIDATE_PREFIX: &str = "lock-bootstrap-";
 const IGNORE_CANDIDATE_PREFIX: &str = "ignore-bootstrap-";
 const TRANSACTION_JOURNAL_PREFIX: &str = "transaction-";
 const TRANSACTION_JOURNAL_SUFFIX: &str = ".json";
+const JOURNAL_UPDATE_PREFIX: &str = "journal-update-";
 const LOCK_CANDIDATE_RANDOM_BYTES: usize = 16;
 const LOCK_CANDIDATE_CREATE_ATTEMPTS: usize = 8;
 const CLEANUP_QUIESCENCE_ATTEMPTS: usize = 8;
@@ -260,6 +261,7 @@ impl WriteLock {
             kit_directory,
             opened,
         )?;
+        super::replace::recover_pending_transaction(context, fs.as_ref())?;
 
         Ok(Self {
             path: opened.path,
@@ -1404,7 +1406,7 @@ fn cleanup_stale_lock_candidates(
                 source,
             })?;
             let name = entry.file_name();
-            if transaction_journal_name(&name) {
+            if transaction_journal_name(&name) || journal_update_name(&name) {
                 journal_present = true;
                 continue;
             }
@@ -1835,6 +1837,19 @@ fn transaction_journal_name(name: &OsStr) -> bool {
     };
     name.strip_prefix(TRANSACTION_JOURNAL_PREFIX)
         .and_then(|value| value.strip_suffix(TRANSACTION_JOURNAL_SUFFIX))
+        .is_some_and(|suffix| {
+            suffix.len() == LOCK_CANDIDATE_RANDOM_BYTES * 2
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn journal_update_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
         .is_some_and(|suffix| {
             suffix.len() == LOCK_CANDIDATE_RANDOM_BYTES * 2
                 && suffix

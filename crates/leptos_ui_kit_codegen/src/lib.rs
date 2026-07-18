@@ -46,7 +46,9 @@ pub use planning::{
     plan_init, plan_sync,
 };
 #[doc(inline)]
-pub use transaction::{DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, write_file_atomic};
+pub use transaction::{
+    DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, check_pending_recovery, write_file_atomic,
+};
 
 #[cfg(test)]
 use digest::hash_bytes;

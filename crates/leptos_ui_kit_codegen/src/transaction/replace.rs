@@ -1,14 +1,14 @@
 use std::{
     collections::{BTreeSet, HashSet},
-    io,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use cap_fs_ext::DirExt;
-use cap_std::fs::Dir;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 #[cfg(unix)]
 use cap_std::fs::DirBuilder;
+use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::path_safety::PlanningContext;
@@ -545,6 +545,581 @@ fn random_auxiliary_path(
     Ok(AuxiliaryFile { name, path })
 }
 
+struct RecoveryInventory {
+    kit_directory: Dir,
+    transactions_directory: Dir,
+    transactions_path: PathBuf,
+    journal_name: String,
+    journal_path: PathBuf,
+    update_names: Vec<String>,
+    data: TransactionJournalData,
+}
+
+pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
+    let context = PlanningContext::open(project_root)?;
+    let Some(inventory) = load_recovery_inventory(&context)? else {
+        return Ok(());
+    };
+    Err(CodegenError::RecoveryRequired {
+        journal_path: inventory.journal_path,
+        reason: "a durable transaction journal must be recovered by the next mutating command"
+            .to_owned(),
+    })
+}
+
+pub(super) fn recover_pending_transaction(
+    context: &PlanningContext,
+    fs: &dyn FsOps,
+) -> Result<(), CodegenError> {
+    let Some(inventory) = load_recovery_inventory(context)? else {
+        return Ok(());
+    };
+    validate_recovery_application_state(context, &inventory)?;
+
+    for entry in inventory.data.entries.iter().rev() {
+        let current = context.inspect_path_uncached(&entry.logical_path)?;
+        if target_matches_preimage(&current, &entry.preimage) {
+            continue;
+        }
+        if !target_matches_planned(&current, entry) {
+            return Err(third_state_error(
+                &inventory.journal_path,
+                &entry.logical_path,
+            ));
+        }
+        let (parent, target_name) = context.open_parent(&entry.logical_path)?;
+        let target_path = context.project_root().join(&entry.logical_path);
+        match &entry.preimage {
+            JournalPreimage::Absent => fs
+                .remove_file(&parent, Path::new(&target_name), &target_path)
+                .map_err(|source| CodegenError::Io {
+                    path: target_path,
+                    source,
+                })?,
+            JournalPreimage::RegularFile { .. } => {
+                let backup_name = entry
+                    .backup_name
+                    .as_deref()
+                    .expect("validated regular-file journal entry has a backup");
+                let backup_path = target_path
+                    .parent()
+                    .expect("target has a parent")
+                    .join(backup_name);
+                fs.rename(
+                    &parent,
+                    Path::new(backup_name),
+                    &backup_path,
+                    &parent,
+                    Path::new(&target_name),
+                    &target_path,
+                )
+                .map_err(|source| CodegenError::Io {
+                    path: target_path,
+                    source,
+                })?;
+            }
+        }
+    }
+
+    cleanup_recovery_auxiliaries(context, fs, &inventory)?;
+    cleanup_created_directories_strict(context, fs, &inventory.data.created_directories)?;
+    for name in &inventory.update_names {
+        let path = inventory.transactions_path.join(name);
+        match fs.remove_file(&inventory.transactions_directory, Path::new(name), &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(CodegenError::Io { path, source }),
+        }
+    }
+    let journal = DurableJournal {
+        kit_directory: inventory.kit_directory,
+        transactions_directory: inventory.transactions_directory,
+        transactions_path: inventory.transactions_path,
+        name: inventory.journal_name,
+        path: inventory.journal_path,
+        data: inventory.data,
+    };
+    journal.remove(fs)
+}
+
+fn load_recovery_inventory(
+    context: &PlanningContext,
+) -> Result<Option<RecoveryInventory>, CodegenError> {
+    let kit_directory = match context.open_directory(KIT_DIRECTORY_PATH) {
+        Ok(directory) => directory,
+        Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let transactions_path = context
+        .project_root()
+        .join(KIT_DIRECTORY_PATH)
+        .join(TRANSACTIONS_DIRECTORY_NAME);
+    let metadata = match kit_directory.symlink_metadata(TRANSACTIONS_DIRECTORY_NAME) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CodegenError::Io {
+                path: transactions_path,
+                source,
+            });
+        }
+    };
+    validate_transaction_directory_metadata(&transactions_path, &metadata)?;
+    let transactions_directory = kit_directory
+        .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
+        .map_err(|source| CodegenError::UnsafePath {
+            path: transactions_path.display().to_string(),
+            reason: format!("failed to open transaction directory without following: {source}"),
+        })?;
+    validate_transaction_directory_metadata(
+        &transactions_path,
+        &transactions_directory
+            .dir_metadata()
+            .map_err(|source| CodegenError::Io {
+                path: transactions_path.clone(),
+                source,
+            })?,
+    )?;
+
+    let mut journal_names = Vec::new();
+    let mut update_names = Vec::new();
+    for entry in transactions_directory
+        .entries()
+        .map_err(|source| CodegenError::Io {
+            path: transactions_path.clone(),
+            source,
+        })?
+    {
+        let name = entry
+            .map_err(|source| CodegenError::Io {
+                path: transactions_path.clone(),
+                source,
+            })?
+            .file_name()
+            .into_string()
+            .map_err(|name| CodegenError::InvalidCoordinationState {
+                path: transactions_path.display().to_string(),
+                reason: format!("non-UTF-8 transaction entry: {}", name.to_string_lossy()),
+            })?;
+        if transaction_journal_name(&name) {
+            journal_names.push(name);
+        } else if journal_update_name(&name) {
+            update_names.push(name);
+        } else {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: transactions_path.join(&name).display().to_string(),
+                reason: "unexpected transaction recovery entry".to_owned(),
+            });
+        }
+    }
+    journal_names.sort();
+    update_names.sort();
+    if journal_names.is_empty() {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: transactions_path.display().to_string(),
+            reason: "transaction directory has no durable primary journal".to_owned(),
+        });
+    }
+    if journal_names.len() != 1 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: transactions_path.display().to_string(),
+            reason: "multiple durable transaction journals are present".to_owned(),
+        });
+    }
+    let journal_name = journal_names.pop().expect("one journal name");
+    let journal_path = transactions_path.join(&journal_name);
+    let data = read_and_validate_journal(
+        context,
+        &transactions_directory,
+        &journal_name,
+        &journal_path,
+    )?;
+    for name in &update_names {
+        validate_recovery_private_file(
+            &transactions_directory,
+            name,
+            &transactions_path.join(name),
+        )?;
+    }
+    Ok(Some(RecoveryInventory {
+        kit_directory,
+        transactions_directory,
+        transactions_path,
+        journal_name,
+        journal_path,
+        update_names,
+        data,
+    }))
+}
+
+fn read_and_validate_journal(
+    context: &PlanningContext,
+    directory: &Dir,
+    name: &str,
+    path: &Path,
+) -> Result<TransactionJournalData, CodegenError> {
+    validate_recovery_private_file(directory, name, path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    let mut file = directory
+        .open_with(name, &options)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let metadata = file.metadata().map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.len() > 1024 * 1024 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "transaction journal exceeds the one-megabyte limit".to_owned(),
+        });
+    }
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let data: TransactionJournalData = serde_json::from_slice(&content).map_err(|source| {
+        CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: format!("invalid transaction journal: {source}"),
+        }
+    })?;
+    validate_journal_data(context, name, path, &data)?;
+    Ok(data)
+}
+
+fn validate_journal_data(
+    context: &PlanningContext,
+    name: &str,
+    path: &Path,
+    data: &TransactionJournalData,
+) -> Result<(), CodegenError> {
+    if data.version != TRANSACTION_JOURNAL_VERSION {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: format!("unsupported transaction journal version {}", data.version),
+        });
+    }
+    if name
+        != format!(
+            "{TRANSACTION_JOURNAL_PREFIX}{}{TRANSACTION_JOURNAL_SUFFIX}",
+            data.transaction_id
+        )
+        || !random_suffix(&data.transaction_id)
+    {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "journal filename and transaction identifier disagree".to_owned(),
+        });
+    }
+    let (canonical_root, device, inode) = context.project_identity();
+    if data.project.canonical_root != canonical_root.to_string_lossy()
+        || data.project.device != device
+        || data.project.inode != inode
+    {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "journal belongs to a different project identity".to_owned(),
+        });
+    }
+    if data.entries.is_empty() {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "transaction journal has an empty cohort".to_owned(),
+        });
+    }
+    let paths = data
+        .entries
+        .iter()
+        .map(|entry| entry.logical_path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths).map_err(|error| {
+        CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: format!("journal contains an unsafe cohort: {error}"),
+        }
+    })?;
+    for entry in &data.entries {
+        if !random_auxiliary_name(&entry.stage_name, STAGE_PREFIX)
+            || !hash_string(&entry.planned_hash)
+            || match &entry.preimage {
+                JournalPreimage::Absent => entry.backup_name.is_some(),
+                JournalPreimage::RegularFile { content_hash, .. } => {
+                    !hash_string(content_hash)
+                        || !entry
+                            .backup_name
+                            .as_deref()
+                            .is_some_and(|name| random_auxiliary_name(name, BACKUP_PREFIX))
+                }
+            }
+        {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: path.display().to_string(),
+                reason: format!("invalid journal entry for {}", entry.logical_path),
+            });
+        }
+    }
+    let count = match data.state {
+        JournalState::Prepared | JournalState::Applied => None,
+        JournalState::Replacing { index } => Some(index),
+        JournalState::Committed { count } | JournalState::RollingBack { count } => Some(count),
+    };
+    if count.is_some_and(|count| count > data.entries.len()) {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "journal progress exceeds its cohort".to_owned(),
+        });
+    }
+    for directory in &data.created_directories {
+        if Path::new(directory).is_absolute()
+            || Path::new(directory)
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !data.entries.iter().any(|entry| {
+                Path::new(&entry.logical_path)
+                    .parent()
+                    .is_some_and(|parent| parent.starts_with(directory))
+            })
+        {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: path.display().to_string(),
+                reason: format!("invalid created-directory entry {directory}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_recovery_application_state(
+    context: &PlanningContext,
+    inventory: &RecoveryInventory,
+) -> Result<(), CodegenError> {
+    for entry in &inventory.data.entries {
+        let current = context.inspect_path_uncached(&entry.logical_path)?;
+        if !target_matches_preimage(&current, &entry.preimage)
+            && !target_matches_planned(&current, entry)
+        {
+            return Err(third_state_error(
+                &inventory.journal_path,
+                &entry.logical_path,
+            ));
+        }
+        let (parent, _) = context.open_parent(&entry.logical_path)?;
+        let target_path = context.project_root().join(&entry.logical_path);
+        let stage_path = target_path
+            .parent()
+            .expect("target has a parent")
+            .join(&entry.stage_name);
+        if let Some(hash) = read_optional_auxiliary_hash(&parent, &entry.stage_name, &stage_path)?
+            && hash != entry.planned_hash
+        {
+            return Err(third_state_error(
+                &inventory.journal_path,
+                &entry.logical_path,
+            ));
+        }
+        if let JournalPreimage::RegularFile { content_hash, .. } = &entry.preimage {
+            let backup_name = entry
+                .backup_name
+                .as_deref()
+                .expect("validated regular entry has backup");
+            let backup_path = target_path
+                .parent()
+                .expect("target has a parent")
+                .join(backup_name);
+            let backup = read_optional_auxiliary_hash(&parent, backup_name, &backup_path)?;
+            if backup.as_deref().is_some_and(|hash| hash != content_hash)
+                || (target_matches_planned(&current, entry) && backup.is_none())
+            {
+                return Err(third_state_error(
+                    &inventory.journal_path,
+                    &entry.logical_path,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_recovery_auxiliaries(
+    context: &PlanningContext,
+    fs: &dyn FsOps,
+    inventory: &RecoveryInventory,
+) -> Result<(), CodegenError> {
+    for entry in inventory.data.entries.iter().rev() {
+        let (parent, _) = context.open_parent(&entry.logical_path)?;
+        let target_path = context.project_root().join(&entry.logical_path);
+        for name in [
+            Some(entry.stage_name.as_str()),
+            entry.backup_name.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = target_path
+                .parent()
+                .expect("target has a parent")
+                .join(name);
+            match fs.remove_file(&parent, Path::new(name), &path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(CodegenError::Io { path, source }),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_optional_auxiliary_hash(
+    parent: &Dir,
+    name: &str,
+    path: &Path,
+) -> Result<Option<String>, CodegenError> {
+    match parent.symlink_metadata(name) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CodegenError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    validate_recovery_regular_file(parent, name, path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(Some(crate::hash_content_bytes(&content)))
+}
+
+fn validate_recovery_regular_file(
+    parent: &Dir,
+    name: &str,
+    path: &Path,
+) -> Result<(), CodegenError> {
+    current_regular_file_identity(parent, Path::new(name)).map_err(|source| {
+        CodegenError::UnsafePath {
+            path: path.display().to_string(),
+            reason: format!("recovery entry is not a no-follow regular file: {source}"),
+        }
+    })?;
+    Ok(())
+}
+
+fn validate_recovery_private_file(
+    parent: &Dir,
+    name: &str,
+    path: &Path,
+) -> Result<(), CodegenError> {
+    validate_recovery_regular_file(parent, name, path)?;
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o7777 != 0o600 {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: path.display().to_string(),
+                reason: "recovery entry must have mode 0600".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn target_matches_preimage(current: &PathPreimage, expected: &JournalPreimage) -> bool {
+    match (current, expected) {
+        (PathPreimage::Absent, JournalPreimage::Absent) => true,
+        (
+            PathPreimage::RegularFile { content_hash, mode },
+            JournalPreimage::RegularFile {
+                content_hash: expected_hash,
+                readonly,
+                posix_mode,
+            },
+        ) => {
+            content_hash == expected_hash
+                && mode.readonly == *readonly
+                && mode.posix_mode == *posix_mode
+        }
+        _ => false,
+    }
+}
+
+fn target_matches_planned(current: &PathPreimage, entry: &JournalEntry) -> bool {
+    matches!(
+        current,
+        PathPreimage::RegularFile { content_hash, .. } if content_hash == &entry.planned_hash
+    )
+}
+
+fn third_state_error(journal_path: &Path, logical_path: &str) -> CodegenError {
+    CodegenError::RecoveryRequired {
+        journal_path: journal_path.to_path_buf(),
+        reason: format!(
+            "project path {logical_path} is neither its recorded preimage nor planned transaction state; preserve the application edit and journal for manual inspection"
+        ),
+    }
+}
+
+fn transaction_journal_name(name: &str) -> bool {
+    name.strip_prefix(TRANSACTION_JOURNAL_PREFIX)
+        .and_then(|value| value.strip_suffix(TRANSACTION_JOURNAL_SUFFIX))
+        .is_some_and(random_suffix)
+}
+
+fn journal_update_name(name: &str) -> bool {
+    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
+        .is_some_and(random_suffix)
+}
+
+fn random_auxiliary_name(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(random_suffix)
+}
+
+fn random_suffix(value: &str) -> bool {
+    value.len() == AUXILIARY_RANDOM_BYTES * 2
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn hash_string(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 impl DurableJournal {
     fn create(
         transaction: &PlanningContext,
@@ -896,11 +1471,14 @@ fn preserve_preimage_mode(
     stage_path: &Path,
     preimage: Option<&PathPreimage>,
 ) -> Result<(), CodegenError> {
-    let Some(PathPreimage::RegularFile { mode, .. }) = preimage else {
-        return Ok(());
+    #[cfg(unix)]
+    let posix_mode = match preimage {
+        Some(PathPreimage::RegularFile { mode, .. }) => mode.posix_mode,
+        Some(PathPreimage::Absent) => Some(0o644),
+        None => None,
     };
     #[cfg(unix)]
-    if let Some(posix_mode) = mode.posix_mode {
+    if let Some(posix_mode) = posix_mode {
         fs.set_file_mode(&created.file, stage_path, posix_mode)
             .map_err(|source| CodegenError::Io {
                 path: stage_path.to_path_buf(),
@@ -908,7 +1486,7 @@ fn preserve_preimage_mode(
             })?;
     }
     #[cfg(not(unix))]
-    let _ = (fs, created, stage_path, mode);
+    let _ = (fs, created, stage_path, preimage);
     Ok(())
 }
 
