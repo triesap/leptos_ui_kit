@@ -297,6 +297,12 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
     ) -> io::Result<CreatedFile>;
     fn set_file_mode(&self, file: &File, path: &Path, mode: u32) -> io::Result<()>;
+    fn set_preserved_file_mode(
+        &self,
+        file: &File,
+        path: &Path,
+        mode: PreservedFileMode,
+    ) -> io::Result<()>;
     fn set_path_mode(&self, parent: &Dir, name: &Path, path: &Path, mode: u32) -> io::Result<()>;
     fn set_directory_mode(&self, directory: &Dir, path: &Path, mode: u32) -> io::Result<()>;
     fn write_handle(&self, file: &mut File, path: &Path, content: &[u8]) -> io::Result<()>;
@@ -333,6 +339,7 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         target: HardLinkEndpoint<'_>,
         target_parent: DirectoryEndpoint<'_>,
         expected_target_parent: &ExactDirectoryObservation,
+        parent_sync_kind: ParentSyncKind,
     ) -> ImmutablePublicationOutcome;
     #[allow(dead_code)]
     fn rename_directory_noreplace(
@@ -537,7 +544,7 @@ impl FsOps for SystemFs {
         expected_source: &ExactFileObservation,
         destination: HardLinkEndpoint<'_>,
     ) -> io::Result<ExclusiveFileCopy> {
-        create_exclusive_file_copy(source, expected_source, destination)
+        create_exclusive_file_copy(self, source, expected_source, destination)
     }
 
     #[cfg(windows)]
@@ -598,6 +605,15 @@ impl FsOps for SystemFs {
             let _ = (file, mode);
             Ok(())
         }
+    }
+
+    fn set_preserved_file_mode(
+        &self,
+        file: &File,
+        _path: &Path,
+        mode: PreservedFileMode,
+    ) -> io::Result<()> {
+        set_exact_file_mode(file, mode)
     }
 
     fn set_path_mode(&self, parent: &Dir, name: &Path, _path: &Path, mode: u32) -> io::Result<()> {
@@ -709,6 +725,7 @@ impl FsOps for SystemFs {
         target: HardLinkEndpoint<'_>,
         target_parent: DirectoryEndpoint<'_>,
         expected_target_parent: &ExactDirectoryObservation,
+        parent_sync_kind: ParentSyncKind,
     ) -> ImmutablePublicationOutcome {
         publish_immutable_exact(
             self,
@@ -717,6 +734,7 @@ impl FsOps for SystemFs {
             target,
             target_parent,
             expected_target_parent,
+            parent_sync_kind,
         )
     }
 
@@ -1544,6 +1562,7 @@ fn publish_immutable_exact<F>(
     target: HardLinkEndpoint<'_>,
     target_parent: DirectoryEndpoint<'_>,
     expected_target_parent: &ExactDirectoryObservation,
+    parent_sync_kind: ParentSyncKind,
 ) -> ImmutablePublicationOutcome
 where
     F: FsOps + ?Sized,
@@ -1604,9 +1623,25 @@ where
                     source,
                 }
             }
-            Err(_) => ImmutablePublicationOutcome::NotPublished {
-                partial: Some(partial_before),
-                source,
+            Err(observation)
+                if observation.partial.as_ref() == Some(&partial_before)
+                    && observation
+                        .published
+                        .as_ref()
+                        .is_some_and(|published| published.identity != partial_before.identity) =>
+            {
+                ImmutablePublicationOutcome::NotPublished {
+                    partial: Some(partial_before),
+                    source,
+                }
+            }
+            Err(observation) => ImmutablePublicationOutcome::VisibleDurabilityUnknown {
+                partial: observation.partial.unwrap_or(partial_before),
+                published: observation.published,
+                source: io::Error::other(format!(
+                    "{source}; exact publication reconciliation also failed: {}",
+                    observation.source
+                )),
             },
         };
     }
@@ -1648,7 +1683,7 @@ where
             };
         }
     };
-    if let Err(source) = fs.sync_parent(target_parent, &linked_parent, ParentSyncKind::Target) {
+    if let Err(source) = fs.sync_parent(target_parent, &linked_parent, parent_sync_kind) {
         return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
             partial: linked_partial,
             published: Some(published_before_sync),
@@ -1717,7 +1752,7 @@ where
             };
         }
     };
-    if let Err(source) = fs.sync_parent(target_parent, &cleanup_parent, ParentSyncKind::Target) {
+    if let Err(source) = fs.sync_parent(target_parent, &cleanup_parent, parent_sync_kind) {
         return ImmutablePublicationOutcome::DurableWithPartialResidual {
             last_linked_published: durable_published,
             last_linked_partial: durable_partial,
@@ -2016,11 +2051,15 @@ fn set_exact_file_mode(file: &File, mode: PreservedFileMode) -> io::Result<()> {
     }
 }
 
-fn create_exclusive_file_copy(
+fn create_exclusive_file_copy<F>(
+    fs: &F,
     source: HardLinkEndpoint<'_>,
     expected_source: &ExactFileObservation,
     destination: HardLinkEndpoint<'_>,
-) -> io::Result<ExclusiveFileCopy> {
+) -> io::Result<ExclusiveFileCopy>
+where
+    F: FsOps + ?Sized,
+{
     require_exact_identity_support()?;
     ensure_same_parent(
         source.parent,
@@ -2040,6 +2079,7 @@ fn create_exclusive_file_copy(
             ),
         ));
     }
+    fs.before_read_handle(source.path)?;
     let mut source_file = open_regular_file_nofollow(source.parent, source.name)?;
     let source_handle_before = regular_metadata_state(&source_file.metadata()?, source.path)?;
     if source_handle_before != source_path_before {
@@ -2053,7 +2093,7 @@ fn create_exclusive_file_copy(
     let CreatedFile {
         file: mut destination_file,
         identity: destination_identity,
-    } = SystemFs.create_new_file(
+    } = fs.create_new_file(
         destination.parent,
         destination.name,
         destination.path,
@@ -2080,13 +2120,14 @@ fn create_exclusive_file_copy(
             if count == 0 {
                 break;
             }
-            destination_file.write_all(&buffer[..count])?;
+            fs.write_handle(&mut destination_file, destination.path, &buffer[..count])?;
             source_hasher.update(&buffer[..count]);
             copied_len = copied_len
                 .checked_add(count as u64)
                 .ok_or_else(|| io::Error::other("regular-file length overflow while copying"))?;
         }
-        destination_file.flush()?;
+        fs.flush_file(&destination_file, destination.path)?;
+        fs.sync_handle(&destination_file, destination.path)?;
 
         let source_hash = format!("sha256:{:x}", source_hasher.finalize());
         let source_handle_after = regular_metadata_state(&source_file.metadata()?, source.path)?;
@@ -2103,7 +2144,9 @@ fn create_exclusive_file_copy(
             ));
         }
 
-        set_exact_file_mode(&destination_file, expected_source.mode)?;
+        fs.set_preserved_file_mode(&destination_file, destination.path, expected_source.mode)?;
+        fs.sync_handle(&destination_file, destination.path)?;
+        fs.before_read_handle(destination.path)?;
         let (copy_hash, copy_len) = hash_file(&mut destination_file)?;
         destination_file.seek(SeekFrom::End(0))?;
         let copy_handle = regular_metadata_state(&destination_file.metadata()?, destination.path)?;
@@ -2162,6 +2205,7 @@ fn create_exclusive_file_copy(
         Ok(copy) => Ok(copy),
         Err(source_error) => {
             let cleanup = remove_created_file_if_owned(
+                fs,
                 destination.parent,
                 destination.name,
                 destination.path,
@@ -2178,14 +2222,17 @@ fn create_exclusive_file_copy(
     }
 }
 
-fn remove_created_file_if_owned(
+fn remove_created_file_if_owned<F>(
+    fs: &F,
     parent: &Dir,
     name: &Path,
     path: &Path,
     expected_identity: (u64, u64),
-) -> io::Result<()> {
-    let metadata = parent.symlink_metadata(name)?;
-    let state = regular_metadata_state(&metadata, path)?;
+) -> io::Result<()>
+where
+    F: FsOps + ?Sized,
+{
+    let state = fs.observe_regular_file(parent, name, path)?;
     if state.identity != expected_identity {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2195,7 +2242,7 @@ fn remove_created_file_if_owned(
             ),
         ));
     }
-    parent.remove_file(name)
+    fs.remove_file_exact(parent, name, path, &state)
 }
 
 fn remove_exact_file<F>(
@@ -2885,7 +2932,7 @@ impl FsOps for FaultFs {
             source.path,
             Some(destination.path),
         )?;
-        let copy = SystemFs.create_exclusive_copy(source, expected_source, destination)?;
+        let copy = create_exclusive_file_copy(self, source, expected_source, destination)?;
         self.after_success(FsOperation::CreateExclusiveCopy, source.path)?;
         Ok(copy)
     }
@@ -2915,6 +2962,16 @@ impl FsOps for FaultFs {
     fn set_file_mode(&self, file: &File, path: &Path, mode: u32) -> io::Result<()> {
         self.before(FsOperation::SetFileMode, path, None)?;
         SystemFs.set_file_mode(file, path, mode)
+    }
+
+    fn set_preserved_file_mode(
+        &self,
+        file: &File,
+        path: &Path,
+        mode: PreservedFileMode,
+    ) -> io::Result<()> {
+        self.before(FsOperation::SetFileMode, path, None)?;
+        SystemFs.set_preserved_file_mode(file, path, mode)
     }
 
     fn set_path_mode(&self, parent: &Dir, name: &Path, path: &Path, mode: u32) -> io::Result<()> {
@@ -3001,6 +3058,7 @@ impl FsOps for FaultFs {
         target: HardLinkEndpoint<'_>,
         target_parent: DirectoryEndpoint<'_>,
         expected_target_parent: &ExactDirectoryObservation,
+        parent_sync_kind: ParentSyncKind,
     ) -> ImmutablePublicationOutcome {
         if let Err(source) = self.before(
             FsOperation::PublishImmutable,
@@ -3019,6 +3077,7 @@ impl FsOps for FaultFs {
             target,
             target_parent,
             expected_target_parent,
+            parent_sync_kind,
         )
     }
 
@@ -3409,6 +3468,7 @@ mod exact_state_tests {
             fixture.endpoint("target", &target_path),
             parent_endpoint,
             &parent,
+            ParentSyncKind::Target,
         );
         let published = match outcome {
             ImmutablePublicationOutcome::Durable { published } => published,
@@ -3444,6 +3504,7 @@ mod exact_state_tests {
             occupied.endpoint("target", &target_path),
             parent_endpoint,
             &parent,
+            ParentSyncKind::Target,
         ) {
             ImmutablePublicationOutcome::NotPublished {
                 partial: Some(observed),
@@ -3483,6 +3544,7 @@ mod exact_state_tests {
             uncertain.endpoint("target", &target_path),
             parent_endpoint,
             &parent,
+            ParentSyncKind::Target,
         ) {
             ImmutablePublicationOutcome::VisibleDurabilityUnknown {
                 partial,
@@ -3520,6 +3582,7 @@ mod exact_state_tests {
             residual.endpoint("target", &target_path),
             parent_endpoint,
             &parent,
+            ParentSyncKind::Target,
         ) {
             ImmutablePublicationOutcome::DurableWithPartialResidual {
                 last_linked_published,
@@ -3559,6 +3622,7 @@ mod exact_state_tests {
             cleanup_sync.endpoint("target", &target_path),
             parent_endpoint,
             &parent,
+            ParentSyncKind::Target,
         ) {
             ImmutablePublicationOutcome::DurableWithPartialResidual {
                 partial_absent_in_process,

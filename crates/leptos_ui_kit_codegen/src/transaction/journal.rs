@@ -708,7 +708,7 @@ impl ProjectBindingV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) enum JournalOperationV2 {
+pub(crate) enum JournalOperationV2 {
     Init,
     Add,
     Sync,
@@ -3996,10 +3996,46 @@ pub(super) fn parse_transaction_directory_name(
     Ok(transaction_id)
 }
 
-pub(super) fn finalization_lease_name(transaction_id: &TransactionId) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FinalizationFileKindV2 {
+    Record,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FinalizationFileNameV2 {
+    transaction_id: TransactionId,
+    generation: u64,
+    kind: FinalizationFileKindV2,
+}
+
+impl FinalizationFileNameV2 {
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) const fn kind(&self) -> FinalizationFileKindV2 {
+        self.kind
+    }
+}
+
+pub(super) fn finalization_record_name(transaction_id: &TransactionId, generation: u64) -> String {
     format!(
-        "{FINALIZATION_PREFIX}{}{JOURNAL_SUFFIX}",
-        transaction_id.as_str()
+        "{FINALIZATION_PREFIX}{}-{generation:0width$}{JOURNAL_SUFFIX}",
+        transaction_id.as_str(),
+        width = SEQUENCE_DECIMAL_WIDTH,
+    )
+}
+
+pub(super) fn finalization_partial_name(transaction_id: &TransactionId, generation: u64) -> String {
+    format!(
+        "{}{}",
+        finalization_record_name(transaction_id, generation),
+        PARTIAL_SUFFIX.trim_start_matches(JOURNAL_SUFFIX),
     )
 }
 
@@ -4045,20 +4081,55 @@ pub(super) fn parse_bootstrap_owner_name(name: &str) -> Result<TransactionId, Jo
     Ok(transaction_id)
 }
 
-pub(super) fn parse_finalization_lease_name(
+pub(super) fn parse_finalization_file_name(
     name: &str,
-) -> Result<TransactionId, JournalModelError> {
-    let value = name
+) -> Result<FinalizationFileNameV2, JournalModelError> {
+    let (value, kind) = if let Some(value) = name
+        .strip_prefix(FINALIZATION_PREFIX)
+        .and_then(|value| value.strip_suffix(PARTIAL_SUFFIX))
+    {
+        (value, FinalizationFileKindV2::Partial)
+    } else if let Some(value) = name
         .strip_prefix(FINALIZATION_PREFIX)
         .and_then(|value| value.strip_suffix(JOURNAL_SUFFIX))
-        .ok_or_else(|| JournalModelError::new("invalid v2 finalization-lease name"))?;
-    let transaction_id = TransactionId::parse(value)?;
-    if finalization_lease_name(&transaction_id) != name {
+    {
+        (value, FinalizationFileKindV2::Record)
+    } else {
+        return Err(JournalModelError::new("invalid v2 finalization filename"));
+    };
+    let (transaction, generation) = value
+        .rsplit_once('-')
+        .ok_or_else(|| JournalModelError::new("finalization filename has no generation"))?;
+    if generation.len() != SEQUENCE_DECIMAL_WIDTH
+        || !generation.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(JournalModelError::new(
-            "finalization-lease name is not canonical",
+            "finalization generation is not canonical fixed-width decimal",
         ));
     }
-    Ok(transaction_id)
+    let transaction_id = TransactionId::parse(transaction)?;
+    let generation = generation
+        .parse::<u64>()
+        .map_err(|_| JournalModelError::new("finalization generation exceeds u64"))?;
+    let parsed = FinalizationFileNameV2 {
+        transaction_id,
+        generation,
+        kind,
+    };
+    let canonical = match kind {
+        FinalizationFileKindV2::Record => {
+            finalization_record_name(&parsed.transaction_id, parsed.generation)
+        }
+        FinalizationFileKindV2::Partial => {
+            finalization_partial_name(&parsed.transaction_id, parsed.generation)
+        }
+    };
+    if canonical != name {
+        return Err(JournalModelError::new(
+            "finalization filename is not canonical",
+        ));
+    }
+    Ok(parsed)
 }
 
 pub(super) fn stage_name(transaction_id: &TransactionId, ordinal: ArtifactOrdinal) -> String {
@@ -4291,7 +4362,7 @@ impl PartialEnvelopeHeaderV2 {
         Ok(())
     }
 
-    fn validate_binding(
+    pub(super) fn validate_binding(
         &self,
         transaction_id: &TransactionId,
         project: &ProjectBindingV2,
@@ -4561,8 +4632,64 @@ impl FinalizationLeaseV2 {
         Ok(lease)
     }
 
-    pub(super) fn name(&self) -> String {
-        finalization_lease_name(&self.transaction_id)
+    pub(super) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) fn canonical_root_hash(&self) -> &Sha256Digest {
+        &self.canonical_root_hash
+    }
+
+    pub(super) fn owner_tag(&self) -> &Sha256Digest {
+        &self.owner_tag
+    }
+
+    pub(super) const fn outcome(&self) -> FinalizationOutcomeV2 {
+        self.outcome
+    }
+
+    pub(super) const fn terminal_sequence(&self) -> u64 {
+        self.terminal_sequence
+    }
+
+    pub(super) fn workspace_parent_before(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_before
+    }
+
+    pub(super) fn workspace_parent_current(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_current
+    }
+
+    pub(super) fn workspace_name(&self) -> &str {
+        &self.workspace_name
+    }
+
+    pub(super) fn workspace(&self) -> &PresenceV2<ExactDirectoryStateV2> {
+        &self.workspace
+    }
+
+    pub(super) fn bootstrap(&self) -> &WorkspaceBootstrapBindingV2 {
+        &self.bootstrap
+    }
+
+    pub(super) fn bootstrap_intent_current(&self) -> &PresenceV2<ExactFileStateV2> {
+        &self.bootstrap_intent_current
+    }
+
+    pub(super) fn bootstrap_current(&self) -> &PresenceV2<ExactFileStateV2> {
+        &self.bootstrap_current
+    }
+
+    pub(super) fn record_name(&self) -> String {
+        finalization_record_name(&self.transaction_id, self.generation)
+    }
+
+    pub(super) fn partial_name(&self) -> String {
+        finalization_partial_name(&self.transaction_id, self.generation)
     }
 
     pub(super) fn state(&self) -> FinalizationStateV2 {
@@ -5319,6 +5446,20 @@ mod tests {
         assert_eq!(parsed.kind(), JournalFileKindV2::Partial);
         assert!(parse_journal_file_name("transaction-v2-bad-1.json").is_err());
 
+        let final_record =
+            parse_finalization_file_name(&finalization_record_name(&transaction_id, u64::MAX))
+                .unwrap();
+        assert_eq!(final_record.transaction_id(), &transaction_id);
+        assert_eq!(final_record.generation(), u64::MAX);
+        assert_eq!(final_record.kind(), FinalizationFileKindV2::Record);
+        let final_partial =
+            parse_finalization_file_name(&finalization_partial_name(&transaction_id, u64::MAX))
+                .unwrap();
+        assert_eq!(final_partial.transaction_id(), &transaction_id);
+        assert_eq!(final_partial.generation(), u64::MAX);
+        assert_eq!(final_partial.kind(), FinalizationFileKindV2::Partial);
+        assert!(parse_finalization_file_name("finalization-v2-bad.json").is_err());
+
         let identity = ObjectIdentityV2::from_u128(u128::MAX - 1, u128::MAX);
         let bytes = serde_json::to_vec(&identity).unwrap();
         assert_eq!(
@@ -5424,6 +5565,10 @@ mod tests {
         let parent_after = exact_directory(1, 3, 0o755, 10);
         let removed = lease.mark_workspace_removed(parent_after).unwrap();
         lease.validate_successor(&removed).unwrap();
+        assert_eq!(lease.generation(), 0);
+        assert_eq!(removed.generation(), 1);
+        assert_ne!(lease.record_name(), removed.record_name());
+        assert_ne!(lease.partial_name(), removed.partial_name());
         assert_eq!(removed.state(), FinalizationStateV2::WorkspaceRemoved);
         assert_eq!(
             FinalizationLeaseV2::from_json_slice(&removed.to_json_bytes().unwrap()).unwrap(),
