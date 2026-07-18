@@ -85,6 +85,7 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn after_final_revalidation(&self, path: &Path) -> io::Result<()>;
+    fn before_target_publication(&self, path: &Path) -> io::Result<()>;
     fn rename(
         &self,
         from_parent: &Dir,
@@ -324,6 +325,10 @@ impl FsOps for SystemFs {
         Ok(())
     }
 
+    fn before_target_publication(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
     fn rename(
         &self,
         from_parent: &Dir,
@@ -410,6 +415,7 @@ pub(crate) enum FsOperation {
     RemoveDirectory,
     BeforeFinalRevalidation,
     AfterFinalRevalidation,
+    BeforeTargetPublication,
     Rename,
     RenameJournal,
 }
@@ -500,6 +506,7 @@ pub(crate) struct FaultFs {
     pauses_after_success: Vec<PauseAfterSuccess>,
     final_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     post_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
+    publication_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
 }
 
 #[cfg(test)]
@@ -525,6 +532,7 @@ impl FaultFs {
             pauses_after_success: Vec::new(),
             final_revalidation_mutation: std::sync::Mutex::new(None),
             post_revalidation_mutation: std::sync::Mutex::new(None),
+            publication_mutation: std::sync::Mutex::new(None),
         }
     }
 
@@ -596,6 +604,16 @@ impl FaultFs {
     pub(crate) fn mutate_after_final_revalidation(path: PathBuf, content: Vec<u8>) -> Self {
         let fs = Self::passthrough();
         *fs.post_revalidation_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::WriteFile {
+                target: path,
+                content,
+            });
+        fs
+    }
+
+    pub(crate) fn mutate_before_target_publication(path: PathBuf, content: Vec<u8>) -> Self {
+        let fs = Self::passthrough();
+        *fs.publication_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::WriteFile {
                 target: path,
                 content,
@@ -881,6 +899,25 @@ impl FsOps for FaultFs {
                 .post_revalidation_mutation
                 .lock()
                 .expect("mutation lock");
+            if mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.target() == path)
+            {
+                mutation.take()
+            } else {
+                None
+            }
+        };
+        if let Some(mutation) = mutation {
+            mutation.apply()?;
+        }
+        Ok(())
+    }
+
+    fn before_target_publication(&self, path: &Path) -> io::Result<()> {
+        self.before(FsOperation::BeforeTargetPublication, path, None)?;
+        let mutation = {
+            let mut mutation = self.publication_mutation.lock().expect("mutation lock");
             if mutation
                 .as_ref()
                 .is_some_and(|mutation| mutation.target() == path)

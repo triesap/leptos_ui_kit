@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
 #[cfg(unix)]
 use cap_std::fs::DirBuilder;
 use cap_std::fs::{Dir, OpenOptions};
@@ -16,7 +16,7 @@ use crate::path_safety::PlanningContext;
 use crate::path_safety::capture_plan_snapshot;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, PathPreimage, PlanSnapshot, PlannedFile,
-    validate_planned_write_paths,
+    PlannedFileAction, validate_planned_write_paths,
 };
 
 use super::{
@@ -25,12 +25,11 @@ use super::{
 };
 
 const AUXILIARY_RANDOM_BYTES: usize = 16;
-const AUXILIARY_CREATE_ATTEMPTS: usize = 16;
 const STAGE_PREFIX: &str = ".leptos-ui-kit-stage-";
 const BACKUP_PREFIX: &str = ".leptos-ui-kit-backup-";
 const KIT_DIRECTORY_PATH: &str = "src/components/ui/_kit";
 const TRANSACTIONS_DIRECTORY_NAME: &str = ".transactions";
-const TRANSACTION_JOURNAL_VERSION: u32 = 1;
+const TRANSACTION_JOURNAL_VERSION: u32 = 2;
 const TRANSACTION_JOURNAL_PREFIX: &str = "transaction-";
 const TRANSACTION_JOURNAL_SUFFIX: &str = ".json";
 const JOURNAL_UPDATE_PREFIX: &str = "journal-update-";
@@ -38,6 +37,10 @@ const JOURNAL_UPDATE_PREFIX: &str = "journal-update-";
 struct AuxiliaryFile {
     name: String,
     path: PathBuf,
+    identity: (u64, u64),
+    content_hash: String,
+    length: u64,
+    posix_mode: Option<u32>,
 }
 
 struct StagedFile {
@@ -46,10 +49,12 @@ struct StagedFile {
     target_name: String,
     parent: Dir,
     stage: AuxiliaryFile,
-    stage_identity: (u64, u64),
     planned_hash: String,
+    planned_length: u64,
+    planned_posix_mode: Option<u32>,
+    preimage: JournalPreimage,
     backup: Option<AuxiliaryFile>,
-    created_directories: Vec<String>,
+    created_directories: Vec<JournalDirectory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +65,7 @@ struct TransactionJournalData {
     project: JournalProject,
     state: JournalState,
     entries: Vec<JournalEntry>,
-    created_directories: Vec<String>,
+    created_directories: Vec<JournalDirectory>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +79,8 @@ struct JournalProject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum JournalState {
+    Intent,
+    Preparing { index: usize },
     Prepared,
     Replacing { index: usize },
     Committed { count: usize },
@@ -84,11 +91,44 @@ enum JournalState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JournalEntry {
+    ordinal: usize,
     logical_path: String,
+    action: JournalAction,
     stage_name: String,
+    stage_identity: Option<JournalIdentity>,
+    stage_hash: Option<String>,
+    stage_length: Option<u64>,
+    stage_posix_mode: Option<u32>,
     backup_name: Option<String>,
+    backup_identity: Option<JournalIdentity>,
+    backup_hash: Option<String>,
+    backup_length: Option<u64>,
+    backup_posix_mode: Option<u32>,
     preimage: JournalPreimage,
     planned_hash: String,
+    planned_length: u64,
+    planned_posix_mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum JournalAction {
+    Create,
+    Update,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JournalIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JournalDirectory {
+    logical_path: String,
+    identity: Option<JournalIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,51 +199,138 @@ fn apply_planned_files_locked_with(
         .collect::<Vec<_>>();
     validate_planned_write_paths(&paths)?;
     validate_preimages(&paths, snapshot)?;
+    validate_actions(files, snapshot)?;
     snapshot.revalidate_all(transaction)?;
 
     if files.is_empty() {
         return Ok(());
     }
 
-    let ordered = ordered_files(files, changes);
+    let ordered = ordered_files(files, changes)?;
+    let mut journal = DurableJournal::create_intent(transaction, fs.as_ref(), &ordered, snapshot)?;
     let mut staged = Vec::with_capacity(ordered.len());
-    for file in ordered {
+    for (index, file) in ordered.into_iter().enumerate() {
+        journal.data.state = JournalState::Preparing { index };
+        if let Err(error) = journal.persist(fs.as_ref()) {
+            return Err(rollback_or_recovery_required(
+                transaction,
+                fs.as_ref(),
+                &staged,
+                journal,
+                0,
+                error,
+            ));
+        }
+        let stage_name = journal.data.entries[index].stage_name.clone();
         match stage_bytes(
             transaction,
             &file.path,
             file.content.as_bytes(),
             snapshot,
             fs.as_ref(),
+            &stage_name,
         ) {
-            Ok(file) => staged.push(file),
+            Ok(staged_file) => {
+                record_stage(&mut journal.data.entries[index], &staged_file);
+                merge_created_directories(
+                    &mut journal.data.created_directories,
+                    &staged_file.created_directories,
+                );
+                staged.push(staged_file);
+                if let Err(error) = journal.persist(fs.as_ref()) {
+                    return Err(rollback_or_recovery_required(
+                        transaction,
+                        fs.as_ref(),
+                        &staged,
+                        journal,
+                        0,
+                        error,
+                    ));
+                }
+            }
             Err(error) => {
-                cleanup_prepared_cohort(transaction, fs.as_ref(), &staged);
-                return Err(error);
+                return Err(rollback_or_recovery_required(
+                    transaction,
+                    fs.as_ref(),
+                    &staged,
+                    journal,
+                    0,
+                    error,
+                ));
             }
         }
     }
 
     if let Err(error) = snapshot.revalidate_all(transaction) {
-        cleanup_prepared_cohort(transaction, fs.as_ref(), &staged);
-        return Err(error);
+        return Err(rollback_or_recovery_required(
+            transaction,
+            fs.as_ref(),
+            &staged,
+            journal,
+            0,
+            error,
+        ));
     }
 
     for index in 0..staged.len() {
-        match backup_file(transaction, &staged[index], snapshot, fs.as_ref()) {
-            Ok(backup) => staged[index].backup = backup,
+        let backup_name = journal.data.entries[index].backup_name.clone();
+        match backup_file(
+            transaction,
+            &staged[index],
+            snapshot,
+            fs.as_ref(),
+            backup_name.as_deref(),
+        ) {
+            Ok(backup) => {
+                staged[index].backup = backup;
+                record_backup(&mut journal.data.entries[index], &staged[index]);
+                if let Err(error) = journal.persist(fs.as_ref()) {
+                    return Err(rollback_or_recovery_required(
+                        transaction,
+                        fs.as_ref(),
+                        &staged,
+                        journal,
+                        0,
+                        error,
+                    ));
+                }
+            }
             Err(error) => {
-                cleanup_prepared_cohort(transaction, fs.as_ref(), &staged);
-                return Err(error);
+                return Err(rollback_or_recovery_required(
+                    transaction,
+                    fs.as_ref(),
+                    &staged,
+                    journal,
+                    0,
+                    error,
+                ));
             }
         }
     }
 
     if let Err(error) = snapshot.revalidate_all(transaction) {
-        cleanup_prepared_cohort(transaction, fs.as_ref(), &staged);
-        return Err(error);
+        return Err(rollback_or_recovery_required(
+            transaction,
+            fs.as_ref(),
+            &staged,
+            journal,
+            0,
+            error,
+        ));
     }
 
-    commit_staged_cohort(transaction, staged, snapshot, fs.as_ref())
+    journal.data.state = JournalState::Prepared;
+    if let Err(error) = journal.persist(fs.as_ref()) {
+        return Err(rollback_or_recovery_required(
+            transaction,
+            fs.as_ref(),
+            &staged,
+            journal,
+            0,
+            error,
+        ));
+    }
+    commit_staged_cohort(transaction, staged, snapshot, fs.as_ref(), journal)
 }
 
 fn commit_staged_cohort(
@@ -211,14 +338,8 @@ fn commit_staged_cohort(
     staged: Vec<StagedFile>,
     snapshot: &PlanSnapshot,
     fs: &dyn FsOps,
+    mut journal: DurableJournal,
 ) -> Result<(), CodegenError> {
-    let mut journal = match DurableJournal::create(transaction, fs, &staged, snapshot) {
-        Ok(journal) => journal,
-        Err(error) => {
-            cleanup_prepared_cohort(transaction, fs, &staged);
-            return Err(error);
-        }
-    };
     let mut committed = 0;
     for (index, file) in staged.iter().enumerate() {
         journal.data.state = JournalState::Replacing { index };
@@ -282,23 +403,109 @@ pub fn write_file_atomic(
     let fs = SystemFs;
     validate_preimages(&[logical_path.to_owned()], &snapshot)?;
     snapshot.revalidate_all(&transaction)?;
-    let mut staged = stage_bytes(&transaction, logical_path, content, &snapshot, &fs)?;
-    if let Err(error) = snapshot.revalidate_all(&transaction) {
-        cleanup_prepared_cohort(&transaction, &fs, std::slice::from_ref(&staged));
-        return Err(error);
+    let mut journal =
+        DurableJournal::create_atomic_intent(&transaction, &fs, logical_path, content, &snapshot)?;
+    journal.data.state = JournalState::Preparing { index: 0 };
+    journal.persist(&fs)?;
+    let stage_name = journal.data.entries[0].stage_name.clone();
+    let mut staged = match stage_bytes(
+        &transaction,
+        logical_path,
+        content,
+        &snapshot,
+        &fs,
+        &stage_name,
+    ) {
+        Ok(staged) => staged,
+        Err(error) => {
+            return Err(rollback_or_recovery_required(
+                &transaction,
+                &fs,
+                &[],
+                journal,
+                0,
+                error,
+            ));
+        }
+    };
+    record_stage(&mut journal.data.entries[0], &staged);
+    merge_created_directories(
+        &mut journal.data.created_directories,
+        &staged.created_directories,
+    );
+    if let Err(error) = journal.persist(&fs) {
+        return Err(rollback_or_recovery_required(
+            &transaction,
+            &fs,
+            std::slice::from_ref(&staged),
+            journal,
+            0,
+            error,
+        ));
     }
-    match backup_file(&transaction, &staged, &snapshot, &fs) {
+    if let Err(error) = snapshot.revalidate_all(&transaction) {
+        return Err(rollback_or_recovery_required(
+            &transaction,
+            &fs,
+            std::slice::from_ref(&staged),
+            journal,
+            0,
+            error,
+        ));
+    }
+    let backup_name = journal.data.entries[0].backup_name.clone();
+    match backup_file(
+        &transaction,
+        &staged,
+        &snapshot,
+        &fs,
+        backup_name.as_deref(),
+    ) {
         Ok(backup) => staged.backup = backup,
         Err(error) => {
-            cleanup_prepared_cohort(&transaction, &fs, std::slice::from_ref(&staged));
-            return Err(error);
+            return Err(rollback_or_recovery_required(
+                &transaction,
+                &fs,
+                std::slice::from_ref(&staged),
+                journal,
+                0,
+                error,
+            ));
         }
     }
-    if let Err(error) = snapshot.revalidate_all(&transaction) {
-        cleanup_prepared_cohort(&transaction, &fs, std::slice::from_ref(&staged));
-        return Err(error);
+    record_backup(&mut journal.data.entries[0], &staged);
+    if let Err(error) = journal.persist(&fs) {
+        return Err(rollback_or_recovery_required(
+            &transaction,
+            &fs,
+            std::slice::from_ref(&staged),
+            journal,
+            0,
+            error,
+        ));
     }
-    commit_staged_cohort(&transaction, vec![staged], &snapshot, &fs)?;
+    if let Err(error) = snapshot.revalidate_all(&transaction) {
+        return Err(rollback_or_recovery_required(
+            &transaction,
+            &fs,
+            std::slice::from_ref(&staged),
+            journal,
+            0,
+            error,
+        ));
+    }
+    journal.data.state = JournalState::Prepared;
+    if let Err(error) = journal.persist(&fs) {
+        return Err(rollback_or_recovery_required(
+            &transaction,
+            &fs,
+            std::slice::from_ref(&staged),
+            journal,
+            0,
+            error,
+        ));
+    }
+    commit_staged_cohort(&transaction, vec![staged], &snapshot, &fs, journal)?;
     drop(lock);
     Ok(())
 }
@@ -323,21 +530,69 @@ fn validate_preimages(paths: &[String], snapshot: &PlanSnapshot) -> Result<(), C
     Ok(())
 }
 
-fn ordered_files<'a>(files: &'a [PlannedFile], changes: &[ChangeRecord]) -> Vec<&'a PlannedFile> {
+fn validate_actions(files: &[PlannedFile], snapshot: &PlanSnapshot) -> Result<(), CodegenError> {
+    for file in files {
+        let expected = match snapshot.preimage(&file.path) {
+            Some(PathPreimage::Absent) => PlannedFileAction::Create,
+            Some(PathPreimage::RegularFile { .. }) => PlannedFileAction::Update,
+            None => continue,
+        };
+        if file.action != expected {
+            return Err(CodegenError::PreimageConflict {
+                path: file.path.clone(),
+                reason: format!(
+                    "planned {:?} action disagrees with the observed {:?} preimage action",
+                    file.action, expected
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ordered_files<'a>(
+    files: &'a [PlannedFile],
+    changes: &[ChangeRecord],
+) -> Result<Vec<&'a PlannedFile>, CodegenError> {
     let lock_paths = changes
         .iter()
         .filter(|change| change.kind == ChangeKind::WriteLockFile)
         .map(|change| change.path.as_str())
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
+    let unique_lock_paths = lock_paths.iter().copied().collect::<BTreeSet<_>>();
+    if lock_paths.len() != unique_lock_paths.len() || unique_lock_paths.len() > 1 {
+        return Err(CodegenError::PreimageConflict {
+            path: "<transaction cohort>".to_owned(),
+            reason: "install-lock change records must select at most one unique path".to_owned(),
+        });
+    }
+    if let Some(lock_path) = unique_lock_paths.first()
+        && !files.iter().any(|file| file.path == **lock_path)
+    {
+        return Err(CodegenError::PreimageConflict {
+            path: (*lock_path).to_owned(),
+            reason: "install-lock change record is not part of the replacement cohort".to_owned(),
+        });
+    }
+    let cohort_contains_install_lock = files
+        .iter()
+        .any(|file| file.path == crate::DEFAULT_KIT_LOCK_PATH);
+    if cohort_contains_install_lock != unique_lock_paths.contains(crate::DEFAULT_KIT_LOCK_PATH) {
+        return Err(CodegenError::PreimageConflict {
+            path: crate::DEFAULT_KIT_LOCK_PATH.to_owned(),
+            reason: "the install lock must have exactly one matching lock-last change record"
+                .to_owned(),
+        });
+    }
     let mut ordered = files.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
-        let left_is_lock = lock_paths.contains(left.path.as_str());
-        let right_is_lock = lock_paths.contains(right.path.as_str());
+        let left_is_lock = unique_lock_paths.contains(left.path.as_str());
+        let right_is_lock = unique_lock_paths.contains(right.path.as_str());
         left_is_lock
             .cmp(&right_is_lock)
             .then_with(|| left.path.cmp(&right.path))
     });
-    ordered
+    Ok(ordered)
 }
 
 fn stage_bytes(
@@ -346,8 +601,9 @@ fn stage_bytes(
     content: &[u8],
     snapshot: &PlanSnapshot,
     fs: &dyn FsOps,
+    stage_name: &str,
 ) -> Result<StagedFile, CodegenError> {
-    let created_directories =
+    let created_directory_paths =
         transaction.ensure_parent_with(logical_path, |directory, created| {
             let path = transaction.project_root().join(directory);
             if created {
@@ -361,16 +617,36 @@ fn stage_bytes(
         })?;
     let (parent, target_name) = transaction.open_parent(logical_path)?;
     let target_path = transaction.project_root().join(logical_path);
-    let (stage, mut created) =
-        create_random_auxiliary(transaction, fs, &parent, logical_path, STAGE_PREFIX, 0o600)?;
+    let stage_path = target_path
+        .parent()
+        .expect("validated target has a parent")
+        .join(stage_name);
+    #[cfg(unix)]
+    let creation_mode = if matches!(snapshot.preimage(logical_path), Some(PathPreimage::Absent)) {
+        0o666
+    } else {
+        0o600
+    };
+    #[cfg(not(unix))]
+    let creation_mode = 0o600;
+    let mut created = fs
+        .create_new_file(&parent, Path::new(stage_name), &stage_path, creation_mode)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "create exclusive transaction stage",
+                logical_path,
+                stage_path.clone(),
+                source,
+            )
+        })?;
 
     let result = (|| {
-        fs.write_handle(&mut created.file, &stage.path, content)
+        fs.write_handle(&mut created.file, &stage_path, content)
             .map_err(|source| {
                 filesystem_operation_error(
                     "write transaction stage",
                     logical_path,
-                    stage.path.clone(),
+                    stage_path.clone(),
                     source,
                 )
             })?;
@@ -378,27 +654,76 @@ fn stage_bytes(
             fs,
             &created,
             logical_path,
-            &stage.path,
+            &stage_path,
             snapshot.preimage(logical_path),
         )?;
-        fs.sync_handle(&created.file, &stage.path)
+        fs.sync_handle(&created.file, &stage_path)
             .map_err(|source| {
                 filesystem_operation_error(
                     "sync transaction stage",
                     logical_path,
-                    stage.path.clone(),
+                    stage_path.clone(),
                     source,
                 )
             })?;
         Ok(())
     })();
     let stage_identity = created.identity;
+    let stage_posix_mode = opened_posix_mode(&created.file).map_err(|source| {
+        filesystem_operation_error(
+            "inspect transaction stage mode",
+            logical_path,
+            stage_path.clone(),
+            source,
+        )
+    })?;
     drop(created.file);
     if let Err(error) = result {
-        let _ = fs.remove_file(&parent, Path::new(&stage.name), &stage.path);
-        cleanup_created_directories(transaction, fs, &created_directories);
+        let _ = fs.remove_file(&parent, Path::new(stage_name), &stage_path);
+        cleanup_created_directory_paths(transaction, fs, &created_directory_paths);
         return Err(error);
     }
+
+    let created_directories = created_directory_paths
+        .iter()
+        .map(|logical_path| {
+            let directory = transaction.open_directory(logical_path)?;
+            let metadata = directory
+                .dir_metadata()
+                .map_err(|source| CodegenError::Io {
+                    path: transaction.project_root().join(logical_path),
+                    source,
+                })?;
+            Ok(JournalDirectory {
+                logical_path: logical_path.clone(),
+                identity: Some(JournalIdentity {
+                    device: MetadataExt::dev(&metadata),
+                    inode: MetadataExt::ino(&metadata),
+                }),
+            })
+        })
+        .collect::<Result<Vec<_>, CodegenError>>()?;
+
+    let planned_hash = crate::hash_content_bytes(content);
+    let preimage = match snapshot
+        .preimage(logical_path)
+        .expect("staged target has a recorded preimage")
+    {
+        PathPreimage::Absent => JournalPreimage::Absent,
+        PathPreimage::RegularFile { content_hash, mode } => JournalPreimage::RegularFile {
+            content_hash: content_hash.clone(),
+            readonly: mode.readonly,
+            posix_mode: mode.posix_mode,
+        },
+    };
+    let stage = AuxiliaryFile {
+        name: stage_name.to_owned(),
+        path: stage_path,
+        identity: stage_identity,
+        content_hash: planned_hash.clone(),
+        length: content.len() as u64,
+        posix_mode: stage_posix_mode,
+    };
 
     Ok(StagedFile {
         logical_path: logical_path.to_owned(),
@@ -406,8 +731,10 @@ fn stage_bytes(
         target_name,
         parent,
         stage,
-        stage_identity,
-        planned_hash: crate::hash_content_bytes(content),
+        planned_hash,
+        planned_length: content.len() as u64,
+        planned_posix_mode: stage_posix_mode,
+        preimage,
         backup: None,
         created_directories,
     })
@@ -418,6 +745,7 @@ fn backup_file(
     file: &StagedFile,
     snapshot: &PlanSnapshot,
     fs: &dyn FsOps,
+    backup_name: Option<&str>,
 ) -> Result<Option<AuxiliaryFile>, CodegenError> {
     if matches!(
         snapshot.preimage(&file.logical_path),
@@ -426,42 +754,155 @@ fn backup_file(
         return Ok(None);
     }
 
+    let backup_name = backup_name.ok_or_else(|| CodegenError::InvalidCoordinationState {
+        path: file.logical_path.clone(),
+        reason: "existing target is missing its transaction-bound backup name".to_owned(),
+    })?;
     snapshot.revalidate_path(transaction, &file.logical_path)?;
-    for _ in 0..AUXILIARY_CREATE_ATTEMPTS {
-        let backup = random_auxiliary_path(transaction, &file.logical_path, BACKUP_PREFIX)?;
-        let endpoint = HardLinkEndpoint::new(&file.parent, Path::new(&backup.name), &backup.path);
-        match fs.hard_link(
-            &[],
-            HardLinkEndpoint::new(
-                &file.parent,
-                Path::new(&file.target_name),
-                &file.target_path,
-            ),
-            endpoint,
-        ) {
-            Ok(()) => {
-                if let Err(error) = snapshot.revalidate_path(transaction, &file.logical_path) {
-                    let _ = fs.remove_file(&file.parent, Path::new(&backup.name), &backup.path);
-                    return Err(error);
-                }
-                return Ok(Some(backup));
-            }
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(source) => {
-                return Err(filesystem_operation_error(
-                    "create transaction backup",
-                    &file.logical_path,
-                    backup.path,
-                    source,
-                ));
-            }
-        }
+    fs.before_read_handle(&file.target_path).map_err(|source| {
+        filesystem_operation_error(
+            "prepare transaction backup read",
+            &file.logical_path,
+            file.target_path.clone(),
+            source,
+        )
+    })?;
+    let mut target_options = OpenOptions::new();
+    target_options.read(true);
+    target_options.follow(FollowSymlinks::No);
+    target_options.nonblock(true);
+    let mut target = file
+        .parent
+        .open_with(&file.target_name, &target_options)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "open transaction backup source",
+                &file.logical_path,
+                file.target_path.clone(),
+                source,
+            )
+        })?;
+    let target_metadata = target.metadata().map_err(|source| {
+        filesystem_operation_error(
+            "inspect transaction backup source",
+            &file.logical_path,
+            file.target_path.clone(),
+            source,
+        )
+    })?;
+    if !target_metadata.is_file() || target_metadata.file_type().is_symlink() {
+        return Err(CodegenError::UnsafePath {
+            path: file.logical_path.clone(),
+            reason: "transaction backup source is not a no-follow regular file".to_owned(),
+        });
     }
-    Err(auxiliary_collision_error(
-        &file.target_path,
-        &file.logical_path,
-        "backup",
-    ))
+    let mut content = Vec::new();
+    target.read_to_end(&mut content).map_err(|source| {
+        filesystem_operation_error(
+            "read transaction backup source",
+            &file.logical_path,
+            file.target_path.clone(),
+            source,
+        )
+    })?;
+    let content_hash = crate::hash_content_bytes(&content);
+    let expected = snapshot
+        .preimage(&file.logical_path)
+        .expect("backup path has a validated preimage");
+    let expected_mode = match expected {
+        PathPreimage::RegularFile {
+            content_hash: expected_hash,
+            mode,
+        } => {
+            if &content_hash != expected_hash {
+                return Err(CodegenError::PreimageConflict {
+                    path: file.logical_path.clone(),
+                    reason: "target bytes changed while copying the recovery backup".to_owned(),
+                });
+            }
+            mode.posix_mode
+        }
+        PathPreimage::Absent => unreachable!("absent targets do not create backups"),
+    };
+    let backup_path = file
+        .target_path
+        .parent()
+        .expect("validated target has a parent")
+        .join(backup_name);
+    let mut created = fs
+        .create_new_file(&file.parent, Path::new(backup_name), &backup_path, 0o600)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "create independent transaction backup",
+                &file.logical_path,
+                backup_path.clone(),
+                source,
+            )
+        })?;
+    let result = (|| {
+        fs.write_handle(&mut created.file, &backup_path, &content)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "write independent transaction backup",
+                    &file.logical_path,
+                    backup_path.clone(),
+                    source,
+                )
+            })?;
+        #[cfg(unix)]
+        if let Some(mode) = expected_mode {
+            fs.set_file_mode(&created.file, &backup_path, mode)
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "preserve transaction backup mode",
+                        &file.logical_path,
+                        backup_path.clone(),
+                        source,
+                    )
+                })?;
+        }
+        fs.sync_handle(&created.file, &backup_path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync independent transaction backup",
+                    &file.logical_path,
+                    backup_path.clone(),
+                    source,
+                )
+            })?;
+        fs.sync_directory(&file.parent, &file.target_path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync transaction backup directory",
+                    &file.logical_path,
+                    file.target_path.clone(),
+                    source,
+                )
+            })
+    })();
+    let identity = created.identity;
+    let posix_mode = opened_posix_mode(&created.file).map_err(|source| {
+        filesystem_operation_error(
+            "inspect transaction backup mode",
+            &file.logical_path,
+            backup_path.clone(),
+            source,
+        )
+    })?;
+    drop(created.file);
+    if let Err(error) = result {
+        let _ = fs.remove_file(&file.parent, Path::new(backup_name), &backup_path);
+        return Err(error);
+    }
+    snapshot.revalidate_path(transaction, &file.logical_path)?;
+    Ok(Some(AuxiliaryFile {
+        name: backup_name.to_owned(),
+        path: backup_path,
+        identity,
+        content_hash,
+        length: content.len() as u64,
+        posix_mode,
+    }))
 }
 
 fn commit_staged_file(
@@ -490,96 +931,290 @@ fn commit_staged_file(
             )
         })?;
     snapshot.revalidate_path(transaction, &file.logical_path)?;
-    let actual_stage_identity =
-        current_regular_file_identity(&file.parent, Path::new(&file.stage.name)).map_err(
-            |source| CodegenError::UnsafePath {
-                path: file.stage.path.display().to_string(),
-                reason: format!("transaction stage changed before commit: {source}"),
-            },
-        )?;
-    if actual_stage_identity != file.stage_identity {
-        return Err(CodegenError::UnsafePath {
-            path: file.stage.path.display().to_string(),
-            reason: "transaction stage changed identity before commit".to_owned(),
-        });
+    validate_auxiliary(&file.parent, &file.stage, &file.logical_path, "stage")?;
+    if let Some(backup) = &file.backup {
+        validate_auxiliary(&file.parent, backup, &file.logical_path, "backup")?;
     }
     let (commit_parent, target_name) = transaction.open_parent(&file.logical_path)?;
     transaction.ensure_same_directory(&file.logical_path, &file.parent, &commit_parent)?;
     snapshot.revalidate_path(transaction, &file.logical_path)?;
-    fs.rename(
-        &file.parent,
-        Path::new(&file.stage.name),
-        &file.stage.path,
-        &commit_parent,
-        Path::new(&target_name),
-        &file.target_path,
-    )
-    .map_err(|source| {
-        filesystem_operation_error(
-            "replace target",
-            &file.logical_path,
-            file.target_path.clone(),
+    fs.before_target_publication(&file.target_path)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "prepare atomic target publication",
+                &file.logical_path,
+                file.target_path.clone(),
+                source,
+            )
+        })?;
+    if matches!(
+        snapshot.preimage(&file.logical_path),
+        Some(PathPreimage::RegularFile { .. })
+    ) {
+        snapshot.revalidate_path(transaction, &file.logical_path)?;
+    }
+    match snapshot
+        .preimage(&file.logical_path)
+        .expect("commit target has a validated preimage")
+    {
+        PathPreimage::Absent => {
+            fs.hard_link(
+                &[],
+                HardLinkEndpoint::new(&file.parent, Path::new(&file.stage.name), &file.stage.path),
+                HardLinkEndpoint::new(&commit_parent, Path::new(&target_name), &file.target_path),
+            )
+            .map_err(|source| {
+                if source.kind() == io::ErrorKind::AlreadyExists {
+                    CodegenError::PreimageConflict {
+                        path: file.logical_path.clone(),
+                        reason: "expected-absent target appeared before no-clobber publication"
+                            .to_owned(),
+                    }
+                } else {
+                    filesystem_operation_error(
+                        "publish absent target without clobber",
+                        &file.logical_path,
+                        file.target_path.clone(),
+                        source,
+                    )
+                }
+            })?;
+        }
+        PathPreimage::RegularFile { .. } => {
+            fs.rename(
+                &file.parent,
+                Path::new(&file.stage.name),
+                &file.stage.path,
+                &commit_parent,
+                Path::new(&target_name),
+                &file.target_path,
+            )
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "replace target",
+                    &file.logical_path,
+                    file.target_path.clone(),
+                    source,
+                )
+            })?;
+        }
+    }
+    fs.sync_directory(&commit_parent, &file.target_path)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "sync replaced target directory",
+                &file.logical_path,
+                file.target_path.clone(),
+                source,
+            )
+        })?;
+    validate_installed_target(&commit_parent, &target_name, file)?;
+    if matches!(
+        snapshot.preimage(&file.logical_path),
+        Some(PathPreimage::Absent)
+    ) {
+        validate_auxiliary(&file.parent, &file.stage, &file.logical_path, "stage")?;
+        fs.remove_file(&file.parent, Path::new(&file.stage.name), &file.stage.path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "remove published target stage link",
+                    &file.logical_path,
+                    file.stage.path.clone(),
+                    source,
+                )
+            })?;
+        fs.sync_directory(&file.parent, &file.target_path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync published target stage cleanup",
+                    &file.logical_path,
+                    file.target_path.clone(),
+                    source,
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn validate_auxiliary(
+    parent: &Dir,
+    auxiliary: &AuxiliaryFile,
+    logical_path: &str,
+    kind: &str,
+) -> Result<(), CodegenError> {
+    let identity =
+        current_regular_file_identity(parent, Path::new(&auxiliary.name)).map_err(|source| {
+            CodegenError::UnsafePath {
+                path: auxiliary.path.display().to_string(),
+                reason: format!("transaction {kind} is not a no-follow regular file: {source}"),
+            }
+        })?;
+    if identity != auxiliary.identity {
+        return Err(CodegenError::UnsafePath {
+            path: auxiliary.path.display().to_string(),
+            reason: format!("transaction {kind} changed identity"),
+        });
+    }
+    let observed = read_auxiliary(parent, &auxiliary.name, &auxiliary.path)?;
+    if observed.identity != auxiliary.identity
+        || observed.content_hash != auxiliary.content_hash
+        || observed.length != auxiliary.length
+        || observed.posix_mode != auxiliary.posix_mode
+    {
+        return Err(CodegenError::RecoveryRequired {
+            journal_path: auxiliary.path.clone(),
+            reason: format!(
+                "transaction {kind} for {logical_path} changed content, length, mode, or identity"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_installed_target(
+    parent: &Dir,
+    target_name: &str,
+    file: &StagedFile,
+) -> Result<(), CodegenError> {
+    let observed = read_auxiliary(parent, target_name, &file.target_path)?;
+    if observed.content_hash != file.planned_hash
+        || observed.length != file.planned_length
+        || observed.posix_mode != file.planned_posix_mode
+    {
+        return Err(CodegenError::PreimageConflict {
+            path: file.logical_path.clone(),
+            reason: "published target did not retain the planned bytes, length, and mode"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedArtifact {
+    identity: (u64, u64),
+    content_hash: String,
+    length: u64,
+    posix_mode: Option<u32>,
+}
+
+fn read_auxiliary(parent: &Dir, name: &str, path: &Path) -> Result<ObservedArtifact, CodegenError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    let mut file = parent
+        .open_with(name, &options)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
             source,
-        )
+        })?;
+    let metadata = file.metadata().map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CodegenError::UnsafePath {
+            path: path.display().to_string(),
+            reason: "transaction artifact is not a no-follow regular file".to_owned(),
+        });
+    }
+    #[cfg(windows)]
+    if cap_fs_ext::OsMetadataExt::file_attributes(&metadata) & 0x0000_0400 != 0 {
+        return Err(CodegenError::UnsafePath {
+            path: path.display().to_string(),
+            reason: "transaction artifact is a Windows reparse point".to_owned(),
+        });
+    }
+    let identity = (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata));
+    let length = metadata.len();
+    let posix_mode = metadata_posix_mode(&metadata);
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .map_err(|source| CodegenError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if content.len() as u64 != length {
+        return Err(CodegenError::UnsafePath {
+            path: path.display().to_string(),
+            reason: "transaction artifact length changed while it was read".to_owned(),
+        });
+    }
+    Ok(ObservedArtifact {
+        identity,
+        content_hash: crate::hash_content_bytes(&content),
+        length,
+        posix_mode,
     })
 }
 
-fn create_random_auxiliary(
-    transaction: &PlanningContext,
-    fs: &dyn FsOps,
-    expected_parent: &Dir,
-    logical_target: &str,
-    prefix: &str,
-    mode: u32,
-) -> Result<(AuxiliaryFile, CreatedFile), CodegenError> {
-    for _ in 0..AUXILIARY_CREATE_ATTEMPTS {
-        let auxiliary = random_auxiliary_path(transaction, logical_target, prefix)?;
-        match fs.create_new_file(
-            expected_parent,
-            Path::new(&auxiliary.name),
-            &auxiliary.path,
-            mode,
-        ) {
-            Ok(created) => return Ok((auxiliary, created)),
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(source) => {
-                return Err(filesystem_operation_error(
-                    "create exclusive transaction stage",
-                    logical_target,
-                    auxiliary.path,
-                    source,
-                ));
-            }
-        }
-    }
-    Err(auxiliary_collision_error(
-        &transaction.project_root().join(logical_target),
-        logical_target,
-        "stage",
-    ))
+fn opened_posix_mode(file: &cap_std::fs::File) -> io::Result<Option<u32>> {
+    file.metadata()
+        .map(|metadata| metadata_posix_mode(&metadata))
 }
 
-fn random_auxiliary_path(
-    transaction: &PlanningContext,
-    logical_target: &str,
-    prefix: &str,
-) -> Result<AuxiliaryFile, CodegenError> {
-    let mut random = [0_u8; AUXILIARY_RANDOM_BYTES];
-    getrandom::fill(&mut random).map_err(|error| CodegenError::Io {
-        path: transaction.project_root().join(logical_target),
-        source: io::Error::other(format!("generate random transaction filename: {error}")),
-    })?;
-    let mut name = String::with_capacity(prefix.len() + random.len() * 2);
-    name.push_str(prefix);
-    for byte in random {
-        use std::fmt::Write as _;
-        write!(&mut name, "{byte:02x}").expect("writing to String cannot fail");
+fn metadata_posix_mode(metadata: &cap_std::fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt;
+
+        Some(metadata.permissions().mode() & 0o7777)
     }
-    let parent = Path::new(logical_target)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    let path = transaction.project_root().join(parent).join(&name);
-    Ok(AuxiliaryFile { name, path })
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+fn record_stage(entry: &mut JournalEntry, staged: &StagedFile) {
+    entry.stage_identity = Some(staged.stage.identity.into());
+    entry.stage_hash = Some(staged.stage.content_hash.clone());
+    entry.stage_length = Some(staged.stage.length);
+    entry.stage_posix_mode = staged.stage.posix_mode;
+    entry.planned_posix_mode = staged.planned_posix_mode;
+}
+
+fn record_backup(entry: &mut JournalEntry, staged: &StagedFile) {
+    if let Some(backup) = &staged.backup {
+        entry.backup_identity = Some(backup.identity.into());
+        entry.backup_hash = Some(backup.content_hash.clone());
+        entry.backup_length = Some(backup.length);
+        entry.backup_posix_mode = backup.posix_mode;
+    }
+}
+
+fn merge_created_directories(
+    existing: &mut Vec<JournalDirectory>,
+    additional: &[JournalDirectory],
+) {
+    for directory in additional {
+        if let Some(current) = existing
+            .iter_mut()
+            .find(|current| current.logical_path == directory.logical_path)
+        {
+            *current = directory.clone();
+        } else {
+            existing.push(directory.clone());
+        }
+    }
+    existing.sort_by(|left, right| {
+        path_depth(&left.logical_path)
+            .cmp(&path_depth(&right.logical_path))
+            .then_with(|| left.logical_path.cmp(&right.logical_path))
+    });
+    existing.dedup_by(|left, right| left.logical_path == right.logical_path);
+}
+
+impl From<(u64, u64)> for JournalIdentity {
+    fn from((device, inode): (u64, u64)) -> Self {
+        Self { device, inode }
+    }
+}
+
+fn transaction_artifact_name(prefix: &str, transaction_id: &str, ordinal: usize) -> String {
+    format!("{prefix}{transaction_id}-{ordinal:08x}")
 }
 
 struct RecoveryInventory {
@@ -613,6 +1248,21 @@ pub(super) fn recover_pending_transaction(
     };
     validate_recovery_application_state(context, &inventory)?;
 
+    if matches!(inventory.data.state, JournalState::Applied) {
+        for entry in &inventory.data.entries {
+            let current = context.inspect_path_uncached(&entry.logical_path)?;
+            if !target_matches_planned(&current, entry) {
+                return Err(third_state_error(
+                    &inventory.journal_path,
+                    &entry.logical_path,
+                ));
+            }
+        }
+        cleanup_recovery_auxiliaries(context, fs, &inventory)?;
+        cleanup_recovery_updates(fs, &inventory)?;
+        return recovery_journal(inventory).remove(fs);
+    }
+
     for entry in inventory.data.entries.iter().rev() {
         let current = context.inspect_path_uncached(&entry.logical_path)?;
         if target_matches_preimage(&current, &entry.preimage) {
@@ -633,7 +1283,7 @@ pub(super) fn recover_pending_transaction(
                     filesystem_operation_error(
                         "recover absent target",
                         &entry.logical_path,
-                        target_path,
+                        target_path.clone(),
                         source,
                     )
                 })?,
@@ -658,16 +1308,32 @@ pub(super) fn recover_pending_transaction(
                     filesystem_operation_error(
                         "recover target backup",
                         &entry.logical_path,
-                        target_path,
+                        target_path.clone(),
                         source,
                     )
                 })?;
             }
         }
+        fs.sync_directory(&parent, &target_path).map_err(|source| {
+            filesystem_operation_error(
+                "sync recovered target directory",
+                &entry.logical_path,
+                target_path,
+                source,
+            )
+        })?;
     }
 
     cleanup_recovery_auxiliaries(context, fs, &inventory)?;
     cleanup_created_directories_strict(context, fs, &inventory.data.created_directories)?;
+    cleanup_recovery_updates(fs, &inventory)?;
+    recovery_journal(inventory).remove(fs)
+}
+
+fn cleanup_recovery_updates(
+    fs: &dyn FsOps,
+    inventory: &RecoveryInventory,
+) -> Result<(), CodegenError> {
     for name in &inventory.update_names {
         let path = inventory.transactions_path.join(name);
         match fs.remove_file(&inventory.transactions_directory, Path::new(name), &path) {
@@ -683,15 +1349,18 @@ pub(super) fn recover_pending_transaction(
             }
         }
     }
-    let journal = DurableJournal {
+    Ok(())
+}
+
+fn recovery_journal(inventory: RecoveryInventory) -> DurableJournal {
+    DurableJournal {
         kit_directory: inventory.kit_directory,
         transactions_directory: inventory.transactions_directory,
         transactions_path: inventory.transactions_path,
         name: inventory.journal_name,
         path: inventory.journal_path,
         data: inventory.data,
-    };
-    journal.remove(fs)
+    }
 }
 
 fn load_recovery_inventory(
@@ -768,6 +1437,9 @@ fn load_recovery_inventory(
     }
     journal_names.sort();
     update_names.sort();
+    if journal_names.is_empty() && update_names.is_empty() {
+        return Ok(None);
+    }
     if journal_names.is_empty() {
         return Err(CodegenError::InvalidCoordinationState {
             path: transactions_path.display().to_string(),
@@ -789,6 +1461,12 @@ fn load_recovery_inventory(
         &journal_path,
     )?;
     for name in &update_names {
+        if !journal_update_name_for_transaction(name, &data.transaction_id) {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: transactions_path.join(name).display().to_string(),
+                reason: "journal update is not bound to the active transaction".to_owned(),
+            });
+        }
         validate_recovery_private_file(
             &transactions_directory,
             name,
@@ -839,7 +1517,28 @@ fn read_and_validate_journal(
             path: path.to_path_buf(),
             source,
         })?;
-    let data: TransactionJournalData = serde_json::from_slice(&content).map_err(|source| {
+    let envelope: serde_json::Value = serde_json::from_slice(&content).map_err(|source| {
+        CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: format!("invalid transaction journal: {source}"),
+        }
+    })?;
+    let version = envelope
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "transaction journal has no numeric version".to_owned(),
+        })?;
+    if version != u64::from(TRANSACTION_JOURNAL_VERSION) {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: format!(
+                "unsupported transaction journal version {version}; version-one journals are not reinterpreted as version two"
+            ),
+        });
+    }
+    let data: TransactionJournalData = serde_json::from_value(envelope).map_err(|source| {
         CodegenError::InvalidCoordinationState {
             path: path.display().to_string(),
             reason: format!("invalid transaction journal: {source}"),
@@ -900,17 +1599,53 @@ fn validate_journal_data(
             reason: format!("journal contains an unsafe cohort: {error}"),
         }
     })?;
-    for entry in &data.entries {
-        if !random_auxiliary_name(&entry.stage_name, STAGE_PREFIX)
+    for (ordinal, entry) in data.entries.iter().enumerate() {
+        let action_matches = matches!(
+            (&entry.action, &entry.preimage),
+            (JournalAction::Create, JournalPreimage::Absent)
+                | (JournalAction::Update, JournalPreimage::RegularFile { .. })
+        );
+        let stage_ready = artifact_fields_valid(
+            entry.stage_identity,
+            entry.stage_hash.as_deref(),
+            entry.stage_length,
+            entry.stage_posix_mode,
+        );
+        let backup_ready = artifact_fields_valid(
+            entry.backup_identity,
+            entry.backup_hash.as_deref(),
+            entry.backup_length,
+            entry.backup_posix_mode,
+        );
+        if entry.ordinal != ordinal
+            || !transaction_artifact_name_valid(
+                &entry.stage_name,
+                STAGE_PREFIX,
+                &data.transaction_id,
+                ordinal,
+            )
             || !hash_string(&entry.planned_hash)
+            || !action_matches
+            || !stage_ready
             || match &entry.preimage {
-                JournalPreimage::Absent => entry.backup_name.is_some(),
+                JournalPreimage::Absent => {
+                    entry.backup_name.is_some()
+                        || entry.backup_identity.is_some()
+                        || entry.backup_hash.is_some()
+                        || entry.backup_length.is_some()
+                        || entry.backup_posix_mode.is_some()
+                }
                 JournalPreimage::RegularFile { content_hash, .. } => {
                     !hash_string(content_hash)
-                        || !entry
-                            .backup_name
-                            .as_deref()
-                            .is_some_and(|name| random_auxiliary_name(name, BACKUP_PREFIX))
+                        || !entry.backup_name.as_deref().is_some_and(|name| {
+                            transaction_artifact_name_valid(
+                                name,
+                                BACKUP_PREFIX,
+                                &data.transaction_id,
+                                ordinal,
+                            )
+                        })
+                        || !backup_ready
                 }
             }
         {
@@ -921,7 +1656,8 @@ fn validate_journal_data(
         }
     }
     let count = match data.state {
-        JournalState::Prepared | JournalState::Applied => None,
+        JournalState::Intent | JournalState::Prepared | JournalState::Applied => None,
+        JournalState::Preparing { index } => Some(index),
         JournalState::Replacing { index } => Some(index),
         JournalState::Committed { count } | JournalState::RollingBack { count } => Some(count),
     };
@@ -932,19 +1668,19 @@ fn validate_journal_data(
         });
     }
     for directory in &data.created_directories {
-        if Path::new(directory).is_absolute()
-            || Path::new(directory)
+        if Path::new(&directory.logical_path).is_absolute()
+            || Path::new(&directory.logical_path)
                 .components()
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))
             || !data.entries.iter().any(|entry| {
                 Path::new(&entry.logical_path)
                     .parent()
-                    .is_some_and(|parent| parent.starts_with(directory))
+                    .is_some_and(|parent| parent.starts_with(&directory.logical_path))
             })
         {
             return Err(CodegenError::InvalidCoordinationState {
                 path: path.display().to_string(),
-                reason: format!("invalid created-directory entry {directory}"),
+                reason: format!("invalid created-directory entry {}", directory.logical_path),
             });
         }
     }
@@ -965,14 +1701,36 @@ fn validate_recovery_application_state(
                 &entry.logical_path,
             ));
         }
-        let (parent, _) = context.open_parent(&entry.logical_path)?;
+        let (parent, _) = match context.open_parent(&entry.logical_path) {
+            Ok(parent) => parent,
+            Err(CodegenError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound
+                    && entry.stage_identity.is_none()
+                    && entry.backup_identity.is_none()
+                    && target_matches_preimage(&current, &entry.preimage) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let target_path = context.project_root().join(&entry.logical_path);
         let stage_path = target_path
             .parent()
             .expect("target has a parent")
             .join(&entry.stage_name);
-        if let Some(hash) = read_optional_auxiliary_hash(&parent, &entry.stage_name, &stage_path)?
-            && hash != entry.planned_hash
+        if let Some(observed) = read_optional_auxiliary(&parent, &entry.stage_name, &stage_path)?
+            && (observed.content_hash != entry.planned_hash
+                || observed.length != entry.planned_length
+                || entry
+                    .planned_posix_mode
+                    .is_some_and(|mode| observed.posix_mode != Some(mode))
+                || !artifact_matches_record(
+                    &observed,
+                    entry.stage_identity,
+                    entry.stage_hash.as_deref(),
+                    entry.stage_length,
+                    entry.stage_posix_mode,
+                ))
         {
             return Err(third_state_error(
                 &inventory.journal_path,
@@ -988,9 +1746,19 @@ fn validate_recovery_application_state(
                 .parent()
                 .expect("target has a parent")
                 .join(backup_name);
-            let backup = read_optional_auxiliary_hash(&parent, backup_name, &backup_path)?;
-            if backup.as_deref().is_some_and(|hash| hash != content_hash)
-                || (target_matches_planned(&current, entry) && backup.is_none())
+            let backup = read_optional_auxiliary(&parent, backup_name, &backup_path)?;
+            if backup.as_ref().is_some_and(|observed| {
+                observed.content_hash != *content_hash
+                    || !artifact_matches_record(
+                        observed,
+                        entry.backup_identity,
+                        entry.backup_hash.as_deref(),
+                        entry.backup_length,
+                        entry.backup_posix_mode,
+                    )
+            }) || (!matches!(inventory.data.state, JournalState::Applied)
+                && target_matches_planned(&current, entry)
+                && backup.is_none())
             {
                 return Err(third_state_error(
                     &inventory.journal_path,
@@ -1008,21 +1776,56 @@ fn cleanup_recovery_auxiliaries(
     inventory: &RecoveryInventory,
 ) -> Result<(), CodegenError> {
     for entry in inventory.data.entries.iter().rev() {
-        let (parent, _) = context.open_parent(&entry.logical_path)?;
+        let (parent, _) = match context.open_parent(&entry.logical_path) {
+            Ok(parent) => parent,
+            Err(CodegenError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound
+                    && entry.stage_identity.is_none()
+                    && entry.backup_identity.is_none() =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let target_path = context.project_root().join(&entry.logical_path);
-        for name in [
-            Some(entry.stage_name.as_str()),
-            entry.backup_name.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for (name, identity, hash, length, mode) in [
+            (
+                Some(entry.stage_name.as_str()),
+                entry.stage_identity,
+                entry.stage_hash.as_deref(),
+                entry.stage_length,
+                entry.stage_posix_mode,
+            ),
+            (
+                entry.backup_name.as_deref(),
+                entry.backup_identity,
+                entry.backup_hash.as_deref(),
+                entry.backup_length,
+                entry.backup_posix_mode,
+            ),
+        ] {
+            let Some(name) = name else { continue };
             let path = target_path
                 .parent()
                 .expect("target has a parent")
                 .join(name);
+            if let Some(observed) = read_optional_auxiliary(&parent, name, &path)?
+                && !artifact_matches_record(&observed, identity, hash, length, mode)
+            {
+                return Err(third_state_error(
+                    &inventory.journal_path,
+                    &entry.logical_path,
+                ));
+            }
             match fs.remove_file(&parent, Path::new(name), &path) {
-                Ok(()) => {}
+                Ok(()) => fs.sync_directory(&parent, &target_path).map_err(|source| {
+                    filesystem_operation_error(
+                        "sync recovery auxiliary cleanup",
+                        &entry.logical_path,
+                        target_path.clone(),
+                        source,
+                    )
+                })?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(filesystem_operation_error(
@@ -1038,11 +1841,11 @@ fn cleanup_recovery_auxiliaries(
     Ok(())
 }
 
-fn read_optional_auxiliary_hash(
+fn read_optional_auxiliary(
     parent: &Dir,
     name: &str,
     path: &Path,
-) -> Result<Option<String>, CodegenError> {
+) -> Result<Option<ObservedArtifact>, CodegenError> {
     match parent.symlink_metadata(name) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1054,23 +1857,20 @@ fn read_optional_auxiliary_hash(
         }
     }
     validate_recovery_regular_file(parent, name, path)?;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    options.follow(FollowSymlinks::No);
-    options.nonblock(true);
-    let mut file = parent
-        .open_with(name, &options)
-        .map_err(|source| CodegenError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)
-        .map_err(|source| CodegenError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    Ok(Some(crate::hash_content_bytes(&content)))
+    read_auxiliary(parent, name, path).map(Some)
+}
+
+fn artifact_matches_record(
+    observed: &ObservedArtifact,
+    identity: Option<JournalIdentity>,
+    hash: Option<&str>,
+    length: Option<u64>,
+    posix_mode: Option<u32>,
+) -> bool {
+    identity.is_none_or(|identity| observed.identity == (identity.device, identity.inode))
+        && hash.is_none_or(|hash| observed.content_hash == hash)
+        && length.is_none_or(|length| observed.length == length)
+        && posix_mode.is_none_or(|mode| observed.posix_mode == Some(mode))
 }
 
 fn validate_recovery_regular_file(
@@ -1135,7 +1935,11 @@ fn target_matches_preimage(current: &PathPreimage, expected: &JournalPreimage) -
 fn target_matches_planned(current: &PathPreimage, entry: &JournalEntry) -> bool {
     matches!(
         current,
-        PathPreimage::RegularFile { content_hash, .. } if content_hash == &entry.planned_hash
+        PathPreimage::RegularFile { content_hash, mode }
+            if content_hash == &entry.planned_hash
+                && entry
+                    .planned_posix_mode
+                    .is_none_or(|expected| mode.posix_mode == Some(expected))
     )
 }
 
@@ -1155,12 +1959,43 @@ fn transaction_journal_name(name: &str) -> bool {
 }
 
 fn journal_update_name(name: &str) -> bool {
-    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
-        .is_some_and(random_suffix)
+    let Some(suffix) = name.strip_prefix(JOURNAL_UPDATE_PREFIX) else {
+        return false;
+    };
+    let Some((transaction_id, update_id)) = suffix.split_once('-') else {
+        return false;
+    };
+    random_suffix(transaction_id) && random_suffix(update_id)
 }
 
-fn random_auxiliary_name(name: &str, prefix: &str) -> bool {
-    name.strip_prefix(prefix).is_some_and(random_suffix)
+fn journal_update_name_for_transaction(name: &str, transaction_id: &str) -> bool {
+    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
+        .and_then(|suffix| suffix.split_once('-'))
+        .is_some_and(|(candidate, update_id)| {
+            candidate == transaction_id && random_suffix(update_id)
+        })
+}
+
+fn transaction_artifact_name_valid(
+    name: &str,
+    prefix: &str,
+    transaction_id: &str,
+    ordinal: usize,
+) -> bool {
+    name == transaction_artifact_name(prefix, transaction_id, ordinal)
+}
+
+fn artifact_fields_valid(
+    identity: Option<JournalIdentity>,
+    hash: Option<&str>,
+    length: Option<u64>,
+    _posix_mode: Option<u32>,
+) -> bool {
+    match (identity, hash, length) {
+        (None, None, None) => true,
+        (Some(_), Some(hash), Some(_)) => hash_string(hash),
+        _ => false,
+    }
 }
 
 fn random_suffix(value: &str) -> bool {
@@ -1179,11 +2014,102 @@ fn hash_string(value: &str) -> bool {
     })
 }
 
+struct JournalEntrySpec {
+    logical_path: String,
+    action: JournalAction,
+    planned_hash: String,
+    planned_length: u64,
+}
+
+fn predeclare_missing_directories(
+    transaction: &PlanningContext,
+    specs: &[JournalEntrySpec],
+) -> Result<Vec<JournalDirectory>, CodegenError> {
+    let mut paths = BTreeSet::new();
+    for spec in specs {
+        let mut current = PathBuf::new();
+        let Some(parent) = Path::new(&spec.logical_path).parent() else {
+            continue;
+        };
+        for component in parent.components() {
+            let std::path::Component::Normal(component) = component else {
+                continue;
+            };
+            current.push(component);
+            let logical_path = current.to_string_lossy().replace('\\', "/");
+            match transaction.open_directory(&logical_path) {
+                Ok(_) => {}
+                Err(CodegenError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    paths.insert(logical_path);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(paths
+        .into_iter()
+        .map(|logical_path| JournalDirectory {
+            logical_path,
+            identity: None,
+        })
+        .collect())
+}
+
 impl DurableJournal {
-    fn create(
+    fn create_intent(
         transaction: &PlanningContext,
         fs: &dyn FsOps,
-        staged: &[StagedFile],
+        files: &[&PlannedFile],
+        snapshot: &PlanSnapshot,
+    ) -> Result<Self, CodegenError> {
+        let specs = files
+            .iter()
+            .map(|file| JournalEntrySpec {
+                logical_path: file.path.clone(),
+                action: match file.action {
+                    PlannedFileAction::Create => JournalAction::Create,
+                    PlannedFileAction::Update => JournalAction::Update,
+                },
+                planned_hash: crate::hash_content_bytes(file.content.as_bytes()),
+                planned_length: file.content.len() as u64,
+            })
+            .collect::<Vec<_>>();
+        Self::create_intent_from_specs(transaction, fs, &specs, snapshot)
+    }
+
+    fn create_atomic_intent(
+        transaction: &PlanningContext,
+        fs: &dyn FsOps,
+        logical_path: &str,
+        content: &[u8],
+        snapshot: &PlanSnapshot,
+    ) -> Result<Self, CodegenError> {
+        let action = match snapshot
+            .preimage(logical_path)
+            .expect("atomic target has a recorded preimage")
+        {
+            PathPreimage::Absent => JournalAction::Create,
+            PathPreimage::RegularFile { .. } => JournalAction::Update,
+        };
+        Self::create_intent_from_specs(
+            transaction,
+            fs,
+            &[JournalEntrySpec {
+                logical_path: logical_path.to_owned(),
+                action,
+                planned_hash: crate::hash_content_bytes(content),
+                planned_length: content.len() as u64,
+            }],
+            snapshot,
+        )
+    }
+
+    fn create_intent_from_specs(
+        transaction: &PlanningContext,
+        fs: &dyn FsOps,
+        specs: &[JournalEntrySpec],
         snapshot: &PlanSnapshot,
     ) -> Result<Self, CodegenError> {
         let kit_directory = transaction.open_directory(KIT_DIRECTORY_PATH)?;
@@ -1250,22 +2176,13 @@ impl DurableJournal {
             format!("{TRANSACTION_JOURNAL_PREFIX}{transaction_id}{TRANSACTION_JOURNAL_SUFFIX}");
         let path = transactions_path.join(&name);
         let (canonical_root, device, inode) = transaction.project_identity();
-        let mut created_directories = staged
+        let entries = specs
             .iter()
-            .flat_map(|file| file.created_directories.iter().cloned())
-            .collect::<Vec<_>>();
-        created_directories.sort_by(|left, right| {
-            path_depth(left)
-                .cmp(&path_depth(right))
-                .then_with(|| left.cmp(right))
-        });
-        created_directories.dedup();
-        let entries = staged
-            .iter()
-            .map(|file| {
+            .enumerate()
+            .map(|(ordinal, spec)| {
                 let preimage = match snapshot
-                    .preimage(&file.logical_path)
-                    .expect("staged path has a validated preimage")
+                    .preimage(&spec.logical_path)
+                    .expect("intent path has a validated preimage")
                 {
                     PathPreimage::Absent => JournalPreimage::Absent,
                     PathPreimage::RegularFile { content_hash, mode } => {
@@ -1277,14 +2194,29 @@ impl DurableJournal {
                     }
                 };
                 JournalEntry {
-                    logical_path: file.logical_path.clone(),
-                    stage_name: file.stage.name.clone(),
-                    backup_name: file.backup.as_ref().map(|backup| backup.name.clone()),
+                    ordinal,
+                    logical_path: spec.logical_path.clone(),
+                    action: spec.action,
+                    stage_name: transaction_artifact_name(STAGE_PREFIX, &transaction_id, ordinal),
+                    stage_identity: None,
+                    stage_hash: None,
+                    stage_length: None,
+                    stage_posix_mode: None,
+                    backup_name: matches!(&preimage, JournalPreimage::RegularFile { .. }).then(
+                        || transaction_artifact_name(BACKUP_PREFIX, &transaction_id, ordinal),
+                    ),
+                    backup_identity: None,
+                    backup_hash: None,
+                    backup_length: None,
+                    backup_posix_mode: None,
                     preimage,
-                    planned_hash: file.planned_hash.clone(),
+                    planned_hash: spec.planned_hash.clone(),
+                    planned_length: spec.planned_length,
+                    planned_posix_mode: None,
                 }
             })
             .collect();
+        let created_directories = predeclare_missing_directories(transaction, specs)?;
         let data = TransactionJournalData {
             version: TRANSACTION_JOURNAL_VERSION,
             transaction_id,
@@ -1293,7 +2225,7 @@ impl DurableJournal {
                 device,
                 inode,
             },
-            state: JournalState::Prepared,
+            state: JournalState::Intent,
             entries,
             created_directories,
         };
@@ -1326,25 +2258,41 @@ impl DurableJournal {
                 &self.path,
                 0o600,
             )
-            .map_err(|source| CodegenError::Io {
-                path: self.path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "create durable transaction intent",
+                    KIT_DIRECTORY_PATH,
+                    self.path.clone(),
+                    source,
+                )
             })?;
         let result = (|| {
             fs.write_handle(&mut created.file, &self.path, &content)
-                .map_err(|source| CodegenError::Io {
-                    path: self.path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "write durable transaction journal",
+                        KIT_DIRECTORY_PATH,
+                        self.path.clone(),
+                        source,
+                    )
                 })?;
             fs.sync_handle(&created.file, &self.path)
-                .map_err(|source| CodegenError::Io {
-                    path: self.path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "sync durable transaction journal",
+                        KIT_DIRECTORY_PATH,
+                        self.path.clone(),
+                        source,
+                    )
                 })?;
             fs.sync_directory(&self.transactions_directory, &self.transactions_path)
-                .map_err(|source| CodegenError::Io {
-                    path: self.transactions_path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "sync transaction journal directory",
+                        KIT_DIRECTORY_PATH,
+                        self.transactions_path.clone(),
+                        source,
+                    )
                 })
         })();
         drop(created.file);
@@ -1360,7 +2308,11 @@ impl DurableJournal {
 
     fn persist(&self, fs: &dyn FsOps) -> Result<(), CodegenError> {
         let content = serialize_journal(&self.data, &self.path)?;
-        let update_name = format!("{JOURNAL_UPDATE_PREFIX}{}", random_hex(&self.path)?);
+        let update_name = format!(
+            "{JOURNAL_UPDATE_PREFIX}{}-{}",
+            self.data.transaction_id,
+            random_hex(&self.path)?
+        );
         let update_path = self.transactions_path.join(&update_name);
         let mut created = fs
             .create_new_file(
@@ -1369,20 +2321,32 @@ impl DurableJournal {
                 &update_path,
                 0o600,
             )
-            .map_err(|source| CodegenError::Io {
-                path: update_path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "create transaction journal update",
+                    KIT_DIRECTORY_PATH,
+                    update_path.clone(),
+                    source,
+                )
             })?;
         let prepare = (|| {
             fs.write_handle(&mut created.file, &update_path, &content)
-                .map_err(|source| CodegenError::Io {
-                    path: update_path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "write transaction journal update",
+                        KIT_DIRECTORY_PATH,
+                        update_path.clone(),
+                        source,
+                    )
                 })?;
             fs.sync_handle(&created.file, &update_path)
-                .map_err(|source| CodegenError::Io {
-                    path: update_path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "sync transaction journal update",
+                        KIT_DIRECTORY_PATH,
+                        update_path.clone(),
+                        source,
+                    )
                 })
         })();
         drop(created.file);
@@ -1407,15 +2371,21 @@ impl DurableJournal {
                 Path::new(&update_name),
                 &update_path,
             );
-            return Err(CodegenError::Io {
-                path: self.path.clone(),
+            return Err(filesystem_operation_error(
+                "publish transaction journal update",
+                KIT_DIRECTORY_PATH,
+                self.path.clone(),
                 source,
-            });
+            ));
         }
         fs.sync_directory(&self.transactions_directory, &self.transactions_path)
-            .map_err(|source| CodegenError::Io {
-                path: self.transactions_path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync published transaction journal",
+                    KIT_DIRECTORY_PATH,
+                    self.transactions_path.clone(),
+                    source,
+                )
             })
     }
 
@@ -1425,14 +2395,22 @@ impl DurableJournal {
             Path::new(&self.name),
             &self.path,
         )
-        .map_err(|source| CodegenError::Io {
-            path: self.path.clone(),
-            source,
+        .map_err(|source| {
+            filesystem_operation_error(
+                "remove durable transaction journal",
+                KIT_DIRECTORY_PATH,
+                self.path.clone(),
+                source,
+            )
         })?;
         fs.sync_directory(&self.transactions_directory, &self.transactions_path)
-            .map_err(|source| CodegenError::Io {
-                path: self.transactions_path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync removed transaction journal",
+                    KIT_DIRECTORY_PATH,
+                    self.transactions_path.clone(),
+                    source,
+                )
             })?;
         drop(self.transactions_directory);
         fs.remove_dir(
@@ -1440,14 +2418,22 @@ impl DurableJournal {
             Path::new(TRANSACTIONS_DIRECTORY_NAME),
             &self.transactions_path,
         )
-        .map_err(|source| CodegenError::Io {
-            path: self.transactions_path.clone(),
-            source,
+        .map_err(|source| {
+            filesystem_operation_error(
+                "remove empty transaction directory",
+                KIT_DIRECTORY_PATH,
+                self.transactions_path.clone(),
+                source,
+            )
         })?;
         fs.sync_directory(&self.kit_directory, &self.transactions_path)
-            .map_err(|source| CodegenError::Io {
-                path: self.transactions_path,
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync transaction directory removal",
+                    KIT_DIRECTORY_PATH,
+                    self.transactions_path,
+                    source,
+                )
             })
     }
 }
@@ -1534,7 +2520,7 @@ fn preserve_preimage_mode(
     #[cfg(unix)]
     let posix_mode = match preimage {
         Some(PathPreimage::RegularFile { mode, .. }) => mode.posix_mode,
-        Some(PathPreimage::Absent) => Some(0o644),
+        Some(PathPreimage::Absent) => None,
         None => None,
     };
     #[cfg(unix)]
@@ -1564,7 +2550,19 @@ fn rollback_or_recovery_required(
 ) -> CodegenError {
     journal.data.state = JournalState::RollingBack { count: committed };
     let journal_update = journal.persist(fs);
-    let rollback = rollback_transaction(transaction, fs, staged, committed);
+    let preserve_unattributed_edit = matches!(
+        &original,
+        CodegenError::PreimageConflict { .. }
+            | CodegenError::UnsafePath { .. }
+            | CodegenError::ProjectRootChanged { .. }
+    );
+    let rollback = rollback_transaction(
+        transaction,
+        fs,
+        staged,
+        &journal.data.created_directories,
+        preserve_unattributed_edit,
+    );
     if rollback.is_ok() {
         let journal_path = journal.path.clone();
         match journal.remove(fs) {
@@ -1594,12 +2592,41 @@ fn rollback_transaction(
     transaction: &PlanningContext,
     fs: &dyn FsOps,
     staged: &[StagedFile],
-    committed: usize,
+    created_directories: &[JournalDirectory],
+    preserve_unattributed_edit: bool,
 ) -> Result<(), CodegenError> {
-    for file in staged.iter().take(committed).rev() {
+    for file in staged.iter().rev() {
+        let current = match transaction.inspect_path_uncached(&file.logical_path) {
+            Ok(current) => current,
+            Err(_) if preserve_unattributed_edit => continue,
+            Err(error) => return Err(error),
+        };
+        if target_matches_preimage(&current, &file.preimage) {
+            continue;
+        }
+        if !matches!(
+            current,
+            PathPreimage::RegularFile { ref content_hash, ref mode }
+                if content_hash == &file.planned_hash
+                    && file
+                        .planned_posix_mode
+                        .is_none_or(|expected| mode.posix_mode == Some(expected))
+        ) {
+            if preserve_unattributed_edit {
+                continue;
+            }
+            return Err(CodegenError::RecoveryRequired {
+                journal_path: file.target_path.clone(),
+                reason: format!(
+                    "cannot roll back third-state application path {}",
+                    file.logical_path
+                ),
+            });
+        }
         match &file.backup {
-            Some(backup) => fs
-                .rename(
+            Some(backup) => {
+                validate_auxiliary(&file.parent, backup, &file.logical_path, "backup")?;
+                fs.rename(
                     &file.parent,
                     Path::new(&backup.name),
                     &backup.path,
@@ -1614,9 +2641,19 @@ fn rollback_transaction(
                         file.target_path.clone(),
                         source,
                     )
-                })?,
-            None => fs
-                .remove_file(
+                })?;
+                fs.sync_directory(&file.parent, &file.target_path)
+                    .map_err(|source| {
+                        filesystem_operation_error(
+                            "sync restored target directory",
+                            &file.logical_path,
+                            file.target_path.clone(),
+                            source,
+                        )
+                    })?;
+            }
+            None => {
+                fs.remove_file(
                     &file.parent,
                     Path::new(&file.target_name),
                     &file.target_path,
@@ -1628,27 +2665,24 @@ fn rollback_transaction(
                         file.target_path.clone(),
                         source,
                     )
-                })?,
+                })?;
+                fs.sync_directory(&file.parent, &file.target_path)
+                    .map_err(|source| {
+                        filesystem_operation_error(
+                            "sync removed rollback target directory",
+                            &file.logical_path,
+                            file.target_path.clone(),
+                            source,
+                        )
+                    })?;
+            }
         }
     }
     cleanup_auxiliaries_strict(fs, staged)?;
-    let created_directories = staged
-        .iter()
-        .flat_map(|file| file.created_directories.iter().cloned())
-        .collect::<Vec<_>>();
-    cleanup_created_directories_strict(transaction, fs, &created_directories)
+    cleanup_created_directories_strict(transaction, fs, created_directories)
 }
 
-fn cleanup_prepared_cohort(transaction: &PlanningContext, fs: &dyn FsOps, staged: &[StagedFile]) {
-    cleanup_uncommitted_auxiliaries(fs, staged);
-    let created_directories = staged
-        .iter()
-        .flat_map(|file| file.created_directories.iter().cloned())
-        .collect::<Vec<_>>();
-    cleanup_created_directories(transaction, fs, &created_directories);
-}
-
-fn cleanup_created_directories(
+fn cleanup_created_directory_paths(
     transaction: &PlanningContext,
     fs: &dyn FsOps,
     directories: &[String],
@@ -1678,8 +2712,32 @@ fn cleanup_auxiliaries_strict(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(
             .into_iter()
             .flatten()
         {
+            if let Some(observed) =
+                read_optional_auxiliary(&file.parent, &auxiliary.name, &auxiliary.path)?
+                && (observed.identity != auxiliary.identity
+                    || observed.content_hash != auxiliary.content_hash
+                    || observed.length != auxiliary.length
+                    || observed.posix_mode != auxiliary.posix_mode)
+            {
+                return Err(CodegenError::RecoveryRequired {
+                    journal_path: auxiliary.path.clone(),
+                    reason: format!(
+                        "refusing to remove substituted transaction artifact for {}",
+                        file.logical_path
+                    ),
+                });
+            }
             match fs.remove_file(&file.parent, Path::new(&auxiliary.name), &auxiliary.path) {
-                Ok(()) => {}
+                Ok(()) => fs
+                    .sync_directory(&file.parent, &file.target_path)
+                    .map_err(|source| {
+                        filesystem_operation_error(
+                            "sync transaction auxiliary cleanup",
+                            &file.logical_path,
+                            file.target_path.clone(),
+                            source,
+                        )
+                    })?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(source) => {
                     return Err(filesystem_operation_error(
@@ -1698,25 +2756,56 @@ fn cleanup_auxiliaries_strict(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(
 fn cleanup_created_directories_strict(
     transaction: &PlanningContext,
     fs: &dyn FsOps,
-    directories: &[String],
+    directories: &[JournalDirectory],
 ) -> Result<(), CodegenError> {
-    let mut unique = directories.iter().cloned().collect::<HashSet<_>>();
-    let mut directories = unique.drain().collect::<Vec<_>>();
+    let mut directories = directories.to_vec();
     directories.sort_by(|left, right| {
-        path_depth(right)
-            .cmp(&path_depth(left))
-            .then_with(|| right.cmp(left))
+        path_depth(&right.logical_path)
+            .cmp(&path_depth(&left.logical_path))
+            .then_with(|| right.logical_path.cmp(&left.logical_path))
     });
-    for logical_path in directories {
-        let (parent, name) = transaction.open_parent(&logical_path)?;
-        let path = transaction.project_root().join(&logical_path);
+    directories.dedup_by(|left, right| left.logical_path == right.logical_path);
+    for directory in directories {
+        let path = transaction.project_root().join(&directory.logical_path);
+        let current = match transaction.open_directory(&directory.logical_path) {
+            Ok(current) => current,
+            Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = current.dir_metadata().map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if directory.identity.is_some_and(|identity| {
+            (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata))
+                != (identity.device, identity.inode)
+        }) {
+            return Err(CodegenError::RecoveryRequired {
+                journal_path: path,
+                reason: format!(
+                    "refusing to remove substituted transaction-created directory {}",
+                    directory.logical_path
+                ),
+            });
+        }
+        drop(current);
+        let (parent, name) = transaction.open_parent(&directory.logical_path)?;
         match fs.remove_dir(&parent, Path::new(&name), &path) {
-            Ok(()) => {}
+            Ok(()) => fs.sync_directory(&parent, &path).map_err(|source| {
+                filesystem_operation_error(
+                    "sync transaction-created directory removal",
+                    &directory.logical_path,
+                    path.clone(),
+                    source,
+                )
+            })?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(filesystem_operation_error(
                     "remove transaction-created directory",
-                    logical_path,
+                    directory.logical_path,
                     path,
                     source,
                 ));
@@ -1731,22 +2820,27 @@ fn finish_successful_transaction(
     staged: &[StagedFile],
     journal: DurableJournal,
 ) -> Result<(), CodegenError> {
-    cleanup_successful_backups(fs, staged)?;
-    journal.remove(fs)
-}
-
-fn cleanup_uncommitted_auxiliaries(fs: &dyn FsOps, staged: &[StagedFile]) {
-    for file in staged.iter().rev() {
-        if let Some(backup) = &file.backup {
-            let _ = fs.remove_file(&file.parent, Path::new(&backup.name), &backup.path);
-        }
-        let _ = fs.remove_file(&file.parent, Path::new(&file.stage.name), &file.stage.path);
+    let journal_path = journal.path.clone();
+    if let Err(error) = cleanup_successful_backups(fs, staged) {
+        return Err(CodegenError::RecoveryRequired {
+            journal_path,
+            reason: format!(
+                "transaction is durably committed but finish-only cleanup failed: {error}"
+            ),
+        });
     }
+    journal
+        .remove(fs)
+        .map_err(|error| CodegenError::RecoveryRequired {
+            journal_path,
+            reason: format!("transaction is durably committed but journal cleanup failed: {error}"),
+        })
 }
 
 fn cleanup_successful_backups(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(), CodegenError> {
     for file in staged.iter().rev() {
         if let Some(backup) = &file.backup {
+            validate_auxiliary(&file.parent, backup, &file.logical_path, "backup")?;
             fs.remove_file(&file.parent, Path::new(&backup.name), &backup.path)
                 .map_err(|source| {
                     filesystem_operation_error(
@@ -1756,21 +2850,18 @@ fn cleanup_successful_backups(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(
                         source,
                     )
                 })?;
+            fs.sync_directory(&file.parent, &file.target_path)
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "sync committed backup cleanup",
+                        &file.logical_path,
+                        file.target_path.clone(),
+                        source,
+                    )
+                })?;
         }
     }
     Ok(())
-}
-
-fn auxiliary_collision_error(target: &Path, logical_path: &str, kind: &str) -> CodegenError {
-    CodegenError::FilesystemOperation {
-        operation: "allocate exclusive transaction filename",
-        logical_path: logical_path.to_owned(),
-        path: target.to_path_buf(),
-        source: io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("could not allocate an exclusive random {kind} filename"),
-        ),
-    }
 }
 
 fn filesystem_operation_error(

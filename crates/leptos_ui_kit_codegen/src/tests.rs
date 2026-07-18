@@ -3893,6 +3893,43 @@ fn target_changes_after_final_revalidation_are_caught_before_rename() {
     }
 }
 
+#[test]
+fn expected_absent_publication_never_clobbers_a_last_moment_creator() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let target = root.join("styles/kit.css");
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture absence");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Create,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::CreateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::mutate_before_target_publication(
+        target.clone(),
+        b"raced-at-publication\n".to_vec(),
+    ));
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("no-clobber publication must lose to the creator");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert_eq!(
+        fs::read(&target).expect("raced target"),
+        b"raced-at-publication\n"
+    );
+    assert!(fault_fs.events().iter().any(|event| {
+        event.operation == FsOperation::HardLink
+            && event.destination.as_deref() == Some(target.as_path())
+    }));
+}
+
 #[cfg(unix)]
 #[test]
 fn parent_swap_after_cohort_validation_is_caught_before_rename() {
@@ -4023,7 +4060,8 @@ fn newly_created_parent_identity_is_bound_through_commit() {
         apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
             .expect_err("replacement parent with an ordinary directory must conflict");
 
-    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+    assert!(parent.is_dir(), "substituted parent is preserved");
     assert!(!parent.join("kit.css").exists());
     let staged_paths = fs::read_dir(&moved_parent)
         .expect("read detached stage parent")
@@ -4171,28 +4209,101 @@ fn transaction_stages_the_complete_sorted_cohort_and_commits_the_install_lock_la
                     .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
         })
         .expect("complete cohort staging");
-    let first_rename = events
+    let first_publication = events
         .iter()
-        .position(|event| event.operation == FsOperation::Rename)
-        .expect("first commit rename");
-    assert!(last_stage < first_rename);
-    let renames = events
+        .position(|event| {
+            event.operation == FsOperation::HardLink
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+        })
+        .expect("first no-clobber publication");
+    assert!(last_stage < first_publication);
+    let publications = events
         .into_iter()
-        .filter(|event| event.operation == FsOperation::Rename)
+        .filter(|event| {
+            event.operation == FsOperation::HardLink
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+        })
         .collect::<Vec<FsEvent>>();
-    assert_eq!(renames.len(), 3);
+    assert_eq!(publications.len(), 3);
     assert_eq!(
-        renames[0].destination.as_deref(),
+        publications[0].destination.as_deref(),
         Some(root.join("styles/first.css").as_path())
     );
     assert_eq!(
-        renames[1].destination.as_deref(),
+        publications[1].destination.as_deref(),
         Some(root.join("styles/second.css").as_path())
     );
     assert_eq!(
-        renames[2].destination.as_deref(),
+        publications[2].destination.as_deref(),
         Some(root.join(DEFAULT_KIT_LOCK_PATH).as_path())
     );
+}
+
+#[test]
+fn action_and_install_lock_mismatches_fail_before_transaction_preparation() {
+    for case in ["action", "duplicate-lock", "missing-lock", "stale-lock"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("styles")).expect("styles");
+        let target_path = if case == "missing-lock" {
+            DEFAULT_KIT_LOCK_PATH
+        } else {
+            "styles/kit.css"
+        };
+        let files = vec![PlannedFile {
+            path: target_path.to_owned(),
+            action: if case == "action" {
+                PlannedFileAction::Update
+            } else {
+                PlannedFileAction::Create
+            },
+            content: "planned\n".to_owned(),
+        }];
+        let changes = match case {
+            "action" => vec![ChangeRecord::new(
+                ChangeKind::CreateFile,
+                "styles/kit.css",
+                true,
+            )],
+            "duplicate-lock" => vec![
+                ChangeRecord::new(ChangeKind::WriteLockFile, "styles/kit.css", true),
+                ChangeRecord::new(ChangeKind::WriteLockFile, "styles/kit.css", true),
+            ],
+            "missing-lock" => vec![ChangeRecord::new(
+                ChangeKind::CreateFile,
+                DEFAULT_KIT_LOCK_PATH,
+                true,
+            )],
+            "stale-lock" => vec![ChangeRecord::new(
+                ChangeKind::WriteLockFile,
+                "styles/missing.lock",
+                true,
+            )],
+            _ => unreachable!("known case"),
+        };
+
+        let error =
+            apply_planned_files_with(root, &files, &changes, Arc::new(FaultFs::passthrough()))
+                .expect_err(case);
+
+        assert!(
+            matches!(error, CodegenError::PreimageConflict { .. }),
+            "{case}: {error}"
+        );
+        assert!(!root.join(target_path).exists(), "{case}");
+        assert!(
+            !root.join("src/components/ui/_kit/.transactions").exists(),
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -4258,15 +4369,46 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
     apply_planned_files_with(root, &files, &changes, fault_fs.clone()).expect("apply updates");
 
     let events = fault_fs.events();
+    let backup_creations = events
+        .iter()
+        .filter(|event| {
+            event.operation == FsOperation::CreateNewFile
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-backup-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        backup_creations.len(),
+        2,
+        "one independent backup per target"
+    );
     let last_backup = events
         .iter()
-        .rposition(|event| event.operation == FsOperation::HardLink)
-        .expect("backup hard links");
+        .rposition(|event| {
+            event.operation == FsOperation::CreateNewFile
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-backup-"))
+        })
+        .expect("independent backup creation");
     let first_rename = events
         .iter()
         .position(|event| event.operation == FsOperation::Rename)
         .expect("first rename");
     assert!(last_backup < first_rename);
+    assert!(!events.iter().any(|event| {
+        event.operation == FsOperation::HardLink
+            && event.destination.as_ref().is_some_and(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-backup-"))
+            })
+    }));
     assert_eq!(
         events[first_rename].destination.as_deref(),
         Some(root.join("styles/first.css").as_path())
@@ -4296,7 +4438,7 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
 }
 
 #[test]
-fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state() {
+fn absent_publication_failure_rolls_back_the_complete_cohort_and_removes_transaction_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
@@ -4316,15 +4458,15 @@ fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state()
         ChangeRecord::new(ChangeKind::CreateFile, "styles/first.css", true),
         ChangeRecord::new(ChangeKind::CreateFile, "styles/second.css", true),
     ];
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::Rename, 2));
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::HardLink, 4));
 
     let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("second rename must fail");
+        .expect_err("second no-clobber publication must fail");
 
     assert!(matches!(
         error,
         CodegenError::FilesystemOperation {
-            operation: "replace target",
+            operation: "publish absent target without clobber",
             ..
         }
     ));
@@ -4397,7 +4539,7 @@ fn failed_rollback_retains_a_strict_recovery_required_journal() {
             .expect("strict valid journal JSON");
     assert_eq!(
         value.get("version").and_then(|value| value.as_u64()),
-        Some(1)
+        Some(2)
     );
     assert_eq!(
         value
@@ -4412,6 +4554,34 @@ fn failed_rollback_retains_a_strict_recovery_required_journal() {
             .map(Vec::len),
         Some(2)
     );
+    let transaction_id = value
+        .get("transactionId")
+        .and_then(serde_json::Value::as_str)
+        .expect("transaction identifier");
+    let first_entry = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|entries| entries.first())
+        .expect("first journal entry");
+    assert_eq!(
+        first_entry
+            .get("stageName")
+            .and_then(serde_json::Value::as_str),
+        Some(format!(".leptos-ui-kit-stage-{transaction_id}-00000000").as_str())
+    );
+    let backup_name = first_entry
+        .get("backupName")
+        .and_then(serde_json::Value::as_str)
+        .expect("transaction-bound backup name");
+    assert_eq!(
+        backup_name,
+        format!(".leptos-ui-kit-backup-{transaction_id}-00000000")
+    );
+    assert_ne!(
+        coordination_file_identity(&root.join("styles/first.css")),
+        coordination_file_identity(&root.join("styles").join(backup_name)),
+        "recovery backup must be an independent inode"
+    );
     let recovered = WriteLock::acquire(root).expect("next writer recovers durable transaction");
     drop(recovered);
     assert_eq!(
@@ -4424,6 +4594,59 @@ fn failed_rollback_retains_a_strict_recovery_required_journal() {
     );
     assert!(!transactions.exists());
     assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn committed_cleanup_failure_is_finish_only_and_preserves_desired_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/kit.css"), b"before\n").expect("seed target");
+    let bootstrap = WriteLock::acquire(root).expect("bootstrap coordination");
+    drop(bootstrap);
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "after\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+
+    let error = apply_planned_files_with(
+        root,
+        &files,
+        &changes,
+        Arc::new(FaultFs::fail_nth(FsOperation::RemoveFile, 1)),
+    )
+    .expect_err("committed cleanup failure");
+
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+    assert_eq!(
+        fs::read(root.join("styles/kit.css")).expect("desired target"),
+        b"after\n"
+    );
+    let journal = transaction_journal_paths(root)
+        .pop()
+        .expect("committed journal");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(journal).expect("journal bytes")).expect("journal JSON");
+    assert_eq!(
+        value
+            .pointer("/state/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("applied")
+    );
+
+    let recovered = WriteLock::acquire(root).expect("finish-only recovery");
+    drop(recovered);
+    assert_eq!(
+        fs::read(root.join("styles/kit.css")).expect("recovered target"),
+        b"after\n"
+    );
+    assert!(transaction_journal_paths(root).is_empty());
 }
 
 #[test]
@@ -4454,15 +4677,15 @@ fn rollback_removes_every_transaction_created_target_directory() {
             true,
         ),
     ];
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::Rename, 2));
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::HardLink, 4));
 
     let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("second commit rename fails");
+        .expect_err("second no-clobber publication fails");
 
     assert!(matches!(
         error,
         CodegenError::FilesystemOperation {
-            operation: "replace target",
+            operation: "publish absent target without clobber",
             ..
         }
     ));
@@ -4514,7 +4737,7 @@ fn invalid_wrong_project_and_unsupported_journals_block_without_mutation() {
                 .expect("write wrong project");
             }
             "unsupported" => {
-                value["version"] = serde_json::Value::from(2);
+                value["version"] = serde_json::Value::from(1);
                 fs::write(
                     &journal,
                     serde_json::to_vec_pretty(&value).expect("serialize version"),
@@ -4582,6 +4805,9 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
         FsOperation::SyncHandle,
         FsOperation::SyncDirectory,
         FsOperation::HardLink,
+        FsOperation::BeforeFinalRevalidation,
+        FsOperation::AfterFinalRevalidation,
+        FsOperation::BeforeTargetPublication,
         FsOperation::RenameJournal,
         FsOperation::Rename,
         FsOperation::RemoveFile,
@@ -4628,9 +4854,9 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
 
 #[test]
 fn transaction_io_errors_name_the_operation_and_logical_project_path() {
-    for (operation, expected_operation) in [
-        (FsOperation::WriteHandle, "write transaction stage"),
-        (FsOperation::Rename, "replace target"),
+    for (operation, ordinal, expected_operation) in [
+        (FsOperation::WriteHandle, 3, "write transaction stage"),
+        (FsOperation::Rename, 1, "replace target"),
     ] {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path();
@@ -4648,7 +4874,7 @@ fn transaction_io_errors_name_the_operation_and_logical_project_path() {
             "styles/kit.css",
             true,
         )];
-        let fault_fs = Arc::new(FaultFs::fail_nth(operation, 1));
+        let fault_fs = Arc::new(FaultFs::fail_nth(operation, ordinal));
 
         let error = apply_planned_files_with(root, &files, &changes, fault_fs)
             .expect_err(expected_operation);
