@@ -87,7 +87,7 @@ impl fmt::Display for ConfigError {
             Self::MissingToolProvenance { package, binary } => {
                 write!(
                     f,
-                    "missing compiled tool provenance for {package}/{binary}; rebuild from canonical package metadata or set LEPTOS_UI_KIT_GIT_REV while building"
+                    "missing compiled tool provenance for {package}/{binary}; cannot write kit.json without a proven Git revision, so rebuild from canonical package metadata or set LEPTOS_UI_KIT_GIT_REV while building"
                 )
             }
         }
@@ -369,7 +369,11 @@ pub struct NormalizeOptions {
 }
 
 pub fn canonical_tool_config() -> Result<ToolConfig, ConfigError> {
-    let Some(rev) = option_env!("LEPTOS_UI_KIT_GIT_REV") else {
+    canonical_tool_config_from_revision(option_env!("LEPTOS_UI_KIT_GIT_REV"))
+}
+
+fn canonical_tool_config_from_revision(rev: Option<&str>) -> Result<ToolConfig, ConfigError> {
+    let Some(rev) = rev else {
         return Err(ConfigError::MissingToolProvenance {
             package: TOOL_PACKAGE,
             binary: TOOL_BINARY,
@@ -381,7 +385,7 @@ pub fn canonical_tool_config() -> Result<ToolConfig, ConfigError> {
         binary: TOOL_BINARY.to_owned(),
         source: ToolSourceConfig::Git {
             url: TOOL_GIT_URL.to_owned(),
-            rev: rev.to_owned(),
+            rev: rev.to_ascii_lowercase(),
         },
     };
     tool.validate()?;
@@ -389,7 +393,11 @@ pub fn canonical_tool_config() -> Result<ToolConfig, ConfigError> {
 }
 
 pub fn canonical_kit_config() -> Result<KitConfig, ConfigError> {
-    let tool = canonical_tool_config()?;
+    canonical_kit_config_from_tool(canonical_tool_config()?)
+}
+
+fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigError> {
+    tool.validate()?;
     let config = KitConfig {
         schema: KIT_SCHEMA_URL.to_owned(),
         schema_version: SCHEMA_VERSION.to_owned(),
@@ -419,6 +427,26 @@ pub fn canonical_kit_config() -> Result<KitConfig, ConfigError> {
         },
         items: Vec::new(),
     };
+    config.validate()?;
+    Ok(config)
+}
+
+/// Replaces a configuration's tool source with this binary's proven Git
+/// provenance immediately before the configuration is persisted.
+///
+/// Local builds without approved compiled provenance remain usable for
+/// read-only commands, but cannot claim an invented or stale tool revision in
+/// `kit.json`.
+pub fn kit_config_for_write(config: KitConfig) -> Result<KitConfig, ConfigError> {
+    kit_config_for_write_with_tool(config, canonical_tool_config())
+}
+
+fn kit_config_for_write_with_tool(
+    mut config: KitConfig,
+    tool: Result<ToolConfig, ConfigError>,
+) -> Result<KitConfig, ConfigError> {
+    config.validate()?;
+    config.tool = tool?;
     config.validate()?;
     Ok(config)
 }
@@ -712,8 +740,66 @@ fn join_checked(
 mod tests {
     use super::*;
 
+    const TEST_REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const TEST_REV_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    fn tool_config(rev: &str) -> ToolConfig {
+        canonical_tool_config_from_revision(Some(rev)).expect("known test provenance")
+    }
+
     fn valid_config_json() -> String {
-        canonical_kit_json().expect("serialize config")
+        let config =
+            canonical_kit_config_from_tool(tool_config(TEST_REV_A)).expect("canonical test config");
+        kit_config_to_json(&config).expect("serialize config")
+    }
+
+    #[test]
+    fn canonical_tool_config_distinguishes_known_invalid_and_unavailable_revisions() {
+        let known = canonical_tool_config_from_revision(Some(&TEST_REV_A.to_ascii_uppercase()))
+            .expect("known provenance");
+        let ToolSourceConfig::Git { rev, .. } = known.source;
+        assert_eq!(rev, TEST_REV_A);
+
+        assert!(matches!(
+            canonical_tool_config_from_revision(None),
+            Err(ConfigError::MissingToolProvenance {
+                package: TOOL_PACKAGE,
+                binary: TOOL_BINARY,
+            })
+        ));
+        assert!(matches!(
+            canonical_tool_config_from_revision(Some("short")),
+            Err(ConfigError::InvalidValue {
+                field: "tool.source.rev",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn config_write_boundary_stamps_known_provenance_and_rejects_unavailable_builds() {
+        let config = parse_kit_json_str(&valid_config_json()).expect("parse test config");
+        let stamped = kit_config_for_write_with_tool(config.clone(), Ok(tool_config(TEST_REV_B)))
+            .expect("stamp write provenance");
+        let ToolSourceConfig::Git { rev, .. } = stamped.tool.source;
+        assert_eq!(rev, TEST_REV_B);
+
+        let error = kit_config_for_write_with_tool(
+            config,
+            Err(ConfigError::MissingToolProvenance {
+                package: TOOL_PACKAGE,
+                binary: TOOL_BINARY,
+            }),
+        )
+        .expect_err("unavailable provenance must disable config writes");
+        assert!(matches!(
+            error,
+            ConfigError::MissingToolProvenance {
+                package: TOOL_PACKAGE,
+                binary: TOOL_BINARY,
+            }
+        ));
+        assert!(error.to_string().contains("cannot write kit.json"));
     }
 
     #[test]
@@ -734,8 +820,8 @@ mod tests {
 
     #[test]
     fn canonical_json_is_deterministic() {
-        let first = canonical_kit_json().expect("serialize first");
-        let second = canonical_kit_json().expect("serialize second");
+        let first = valid_config_json();
+        let second = valid_config_json();
 
         assert_eq!(first, second);
         assert!(first.ends_with('\n'));

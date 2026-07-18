@@ -17,8 +17,9 @@ use leptos_ui_kit_registry::{
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
     desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
     desired_builtin_status_item, desired_builtin_tabs_item, desired_builtin_tokens_item,
-    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
-    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
+    kit_config_for_write, kit_config_to_json, kit_config_with_desired_item,
+    load_built_in_registry_item, parse_kit_json_str, read_built_in_registry_source,
+    resolve_built_in_registry_items,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -491,10 +492,20 @@ impl UiModuleExport {
 }
 
 pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
+    plan_init_with_config_provider(project_root, canonical_kit_json)
+}
+
+fn plan_init_with_config_provider<F>(
+    project_root: &Path,
+    canonical_config: F,
+) -> Result<InitPlan, CodegenError>
+where
+    F: FnOnce() -> Result<String, ConfigError>,
+{
     let mut files = Vec::new();
     let mut changes = Vec::new();
 
-    plan_kit_json(project_root, &mut files, &mut changes)?;
+    plan_kit_json(project_root, &mut files, &mut changes, canonical_config)?;
     let config_content = planned_or_existing_kit_config_content(project_root, &files)?;
     let config = parse_kit_json_str(&config_content)?;
     plan_stylesheet(project_root, &mut files, &mut changes, &config)?;
@@ -517,6 +528,16 @@ pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
 }
 
 pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
+    plan_add_with_config_writer(project_root, item_name, kit_config_for_write)
+}
+
+type KitConfigWriter = fn(KitConfig) -> Result<KitConfig, ConfigError>;
+
+fn plan_add_with_config_writer(
+    project_root: &Path,
+    item_name: &str,
+    config_writer: KitConfigWriter,
+) -> Result<AddPlan, CodegenError> {
     let item = load_built_in_registry_item(item_name)?;
     let desired_items = resolve_built_in_registry_items(&[item_name.to_owned()])?
         .into_iter()
@@ -526,8 +547,9 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
     let init_plan = plan_init(project_root)?;
-    let config_content = planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
-    let config = parse_kit_json_str(&config_content)?;
+    let existing_config_content =
+        planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
+    let config = parse_kit_json_str(&existing_config_content)?;
     let state_path = install_lock_path(&config);
     let mut files = init_plan
         .files
@@ -541,7 +563,12 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         .collect::<Vec<_>>();
 
     let config = kit_config_with_desired_items(config, desired_items)?;
-    let config_content = kit_config_to_json(&config)?;
+    let candidate_config_content = kit_config_to_json(&config)?;
+    let (config, config_content) = if candidate_config_content == existing_config_content {
+        (config, candidate_config_content)
+    } else {
+        prepare_kit_config_write(config, config_writer)?
+    };
     upsert_planned_file(
         project_root,
         &mut files,
@@ -552,7 +579,14 @@ pub fn plan_add(project_root: &Path, item_name: &str) -> Result<AddPlan, Codegen
         Some(&item_id),
     )?;
 
-    let sync = plan_sync_from_config(project_root, files, changes, config, config_content)?;
+    let sync = plan_sync_from_config(
+        project_root,
+        files,
+        changes,
+        config,
+        config_content,
+        config_writer,
+    )?;
 
     Ok(AddPlan {
         project_root: sync.project_root,
@@ -605,6 +639,13 @@ fn kit_config_with_desired_items(
 }
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
+    plan_sync_with_config_writer(project_root, kit_config_for_write)
+}
+
+fn plan_sync_with_config_writer(
+    project_root: &Path,
+    config_writer: KitConfigWriter,
+) -> Result<SyncPlan, CodegenError> {
     let init_plan = plan_init(project_root)?;
     let config_content = planned_or_existing_kit_config_content(project_root, &init_plan.files)?;
     let config = parse_kit_json_str(&config_content)?;
@@ -620,7 +661,14 @@ pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
         .filter(|change| change.path != state_path)
         .collect::<Vec<_>>();
 
-    plan_sync_from_config(project_root, files, changes, config, config_content)
+    plan_sync_from_config(
+        project_root,
+        files,
+        changes,
+        config,
+        config_content,
+        config_writer,
+    )
 }
 
 pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
@@ -636,6 +684,7 @@ fn plan_sync_from_config(
     mut changes: Vec<ChangeRecord>,
     mut config: KitConfig,
     mut config_content: String,
+    config_writer: KitConfigWriter,
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
     let mut requested_names = config
@@ -652,7 +701,7 @@ fn plan_sync_from_config(
 
     if config.items != resolved_desired_items {
         config.items = resolved_desired_items;
-        config_content = kit_config_to_json(&config)?;
+        (config, config_content) = prepare_kit_config_write(config, config_writer)?;
         upsert_planned_file(
             project_root,
             &mut files,
@@ -725,6 +774,15 @@ fn plan_sync_from_config(
         diagnostics,
         lock,
     })
+}
+
+fn prepare_kit_config_write(
+    config: KitConfig,
+    config_writer: KitConfigWriter,
+) -> Result<(KitConfig, String), CodegenError> {
+    let config = config_writer(config)?;
+    let content = kit_config_to_json(&config)?;
+    Ok((config, content))
 }
 
 fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
@@ -2326,11 +2384,15 @@ fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
 }
 
-fn plan_kit_json(
+fn plan_kit_json<F>(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-) -> Result<(), CodegenError> {
+    canonical_config: F,
+) -> Result<(), CodegenError>
+where
+    F: FnOnce() -> Result<String, ConfigError>,
+{
     let path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
     if path.is_file() {
         parse_kit_json_str(&read_to_string(&path)?)?;
@@ -2342,7 +2404,7 @@ fn plan_kit_json(
         changes,
         DEFAULT_KIT_CONFIG_PATH,
         PlannedFileAction::Create,
-        canonical_kit_json()?,
+        canonical_config()?,
         ChangeKind::CreateFile,
     );
     Ok(())
@@ -2942,6 +3004,7 @@ fn read_to_string(path: &Path) -> Result<String, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leptos_ui_kit_registry::{TOOL_GIT_URL, ToolSourceConfig, canonical_tool_config};
 
     #[derive(Serialize)]
     struct DemoData {
@@ -3020,6 +3083,53 @@ mod tests {
         let error = plan_init(root).expect_err("invalid config should fail");
 
         assert!(matches!(error, CodegenError::Config(_)));
+    }
+
+    #[test]
+    fn init_plan_reports_typed_missing_provenance_before_config_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        let error = plan_init_with_config_provider(root, || {
+            Err(ConfigError::MissingToolProvenance {
+                package: leptos_ui_kit_registry::TOOL_PACKAGE,
+                binary: leptos_ui_kit_registry::TOOL_BINARY,
+            })
+        })
+        .expect_err("missing provenance must prevent config generation");
+
+        assert!(matches!(
+            error,
+            CodegenError::Config(ConfigError::MissingToolProvenance {
+                package: leptos_ui_kit_registry::TOOL_PACKAGE,
+                binary: leptos_ui_kit_registry::TOOL_BINARY,
+            })
+        ));
+        assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
+    }
+
+    #[test]
+    fn init_plan_does_not_require_compiled_provenance_for_an_existing_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        write_kit_config(root, canonical_kit_json().expect("canonical config"));
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+
+        plan_init_with_config_provider(root, || {
+            panic!("existing config must not request new compiled provenance")
+        })
+        .expect("plan from existing config");
     }
 
     #[test]
@@ -3649,6 +3759,70 @@ mod tests {
     }
 
     #[test]
+    fn add_stamps_only_when_it_otherwise_rewrites_config() {
+        let rewritten = tempfile::tempdir().expect("tempdir");
+        let rewritten_root = rewritten.path();
+        setup_empty_project(rewritten_root);
+        apply_init(rewritten_root).expect("init rewritten case");
+        write_alternate_tool_provenance(rewritten_root, false);
+
+        let error =
+            plan_add_with_config_writer(rewritten_root, "button", missing_config_write_provenance)
+                .expect_err("unavailable provenance must reject add config rewrite");
+        assert_missing_tool_provenance(error);
+        let plan = plan_add(rewritten_root, "button").expect("plan add");
+        let config = planned_kit_config(&plan.files).expect("planned config rewrite");
+        assert_eq!(
+            config.tool,
+            canonical_tool_config().expect("compiled provenance")
+        );
+
+        let unchanged = tempfile::tempdir().expect("tempdir");
+        let unchanged_root = unchanged.path();
+        setup_empty_project(unchanged_root);
+        apply_init(unchanged_root).expect("init unchanged case");
+        apply_add(unchanged_root, "button").expect("install button");
+        write_alternate_tool_provenance(unchanged_root, false);
+
+        let plan = plan_add_with_config_writer(
+            unchanged_root,
+            "button",
+            unexpected_config_write_provenance,
+        )
+        .expect("plan no-op config add");
+        assert!(planned_kit_config(&plan.files).is_none());
+    }
+
+    #[test]
+    fn sync_stamps_only_when_it_otherwise_rewrites_config() {
+        let rewritten = tempfile::tempdir().expect("tempdir");
+        let rewritten_root = rewritten.path();
+        setup_empty_project(rewritten_root);
+        apply_init(rewritten_root).expect("init rewritten case");
+        write_alternate_tool_provenance(rewritten_root, true);
+
+        let error = plan_sync_with_config_writer(rewritten_root, missing_config_write_provenance)
+            .expect_err("unavailable provenance must reject sync config rewrite");
+        assert_missing_tool_provenance(error);
+        let plan = plan_sync(rewritten_root).expect("plan closure rewrite");
+        let config = planned_kit_config(&plan.files).expect("planned config rewrite");
+        assert_eq!(
+            config.tool,
+            canonical_tool_config().expect("compiled provenance")
+        );
+
+        let unchanged = tempfile::tempdir().expect("tempdir");
+        let unchanged_root = unchanged.path();
+        setup_empty_project(unchanged_root);
+        apply_init(unchanged_root).expect("init unchanged case");
+        write_alternate_tool_provenance(unchanged_root, false);
+
+        let plan = plan_sync_with_config_writer(unchanged_root, unexpected_config_write_provenance)
+            .expect("plan no-op config sync");
+        assert!(planned_kit_config(&plan.files).is_none());
+    }
+
+    #[test]
     fn add_router_link_records_registry_dependencies_from_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -3727,6 +3901,65 @@ mod tests {
         let path = root.join(DEFAULT_KIT_CONFIG_PATH);
         fs::create_dir_all(path.parent().expect("kit config parent")).expect("create kit dir");
         fs::write(path, config).expect("write config");
+    }
+
+    fn setup_empty_project(root: &Path) {
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+    }
+
+    fn write_alternate_tool_provenance(root: &Path, request_button: bool) {
+        let path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config = parse_kit_json_str(&fs::read_to_string(&path).expect("read config"))
+            .expect("parse config");
+        if request_button {
+            config = kit_config_with_desired_item(config, desired_builtin_button_item())
+                .expect("request button");
+        }
+        let compiled = canonical_tool_config().expect("compiled provenance");
+        let ToolSourceConfig::Git { rev, .. } = compiled.source;
+        let alternate = if rev == "0000000000000000000000000000000000000000" {
+            "1111111111111111111111111111111111111111"
+        } else {
+            "0000000000000000000000000000000000000000"
+        };
+        config.tool.source = ToolSourceConfig::Git {
+            url: TOOL_GIT_URL.to_owned(),
+            rev: alternate.to_owned(),
+        };
+        write_kit_config(root, kit_config_to_json(&config).expect("serialize config"));
+    }
+
+    fn planned_kit_config(files: &[PlannedFile]) -> Option<KitConfig> {
+        files
+            .iter()
+            .find(|file| file.path == DEFAULT_KIT_CONFIG_PATH)
+            .map(|file| parse_kit_json_str(&file.content).expect("parse planned config"))
+    }
+
+    fn missing_config_write_provenance(_config: KitConfig) -> Result<KitConfig, ConfigError> {
+        Err(ConfigError::MissingToolProvenance {
+            package: leptos_ui_kit_registry::TOOL_PACKAGE,
+            binary: leptos_ui_kit_registry::TOOL_BINARY,
+        })
+    }
+
+    fn unexpected_config_write_provenance(_config: KitConfig) -> Result<KitConfig, ConfigError> {
+        panic!("unchanged config must not request compiled provenance")
+    }
+
+    fn assert_missing_tool_provenance(error: CodegenError) {
+        assert!(matches!(
+            error,
+            CodegenError::Config(ConfigError::MissingToolProvenance {
+                package: leptos_ui_kit_registry::TOOL_PACKAGE,
+                binary: leptos_ui_kit_registry::TOOL_BINARY,
+            })
+        ));
     }
 
     fn write_desired_button_config(root: &Path) {

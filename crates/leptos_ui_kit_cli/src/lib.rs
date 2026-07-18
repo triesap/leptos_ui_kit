@@ -18,9 +18,9 @@ use leptos_ui_kit_codegen::{
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
     DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
-    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output,
-    canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json, load_registry_item,
-    read_built_in_registry_source, resolve_built_in_registry_items,
+    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig,
+    build_info_output, canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json,
+    load_registry_item, read_built_in_registry_source, resolve_built_in_registry_items,
     validate_built_in_registry_health,
 };
 use serde::Serialize;
@@ -665,7 +665,14 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
 }
 
 fn render_version_output(json: bool) -> Result<String, String> {
-    let output = version_output()?;
+    render_version_output_with_tool(json, canonical_tool_config())
+}
+
+fn render_version_output_with_tool(
+    json: bool,
+    tool: Result<ToolConfig, ConfigError>,
+) -> Result<String, String> {
+    let output = version_output_with_tool(tool)?;
 
     if json {
         return serde_json::to_string_pretty(&CommandEnvelope::success("version", output))
@@ -675,8 +682,10 @@ fn render_version_output(json: bool) -> Result<String, String> {
     Ok(format!("{} {}", output.binary, output.version))
 }
 
-fn version_output() -> Result<VersionCommandOutput, String> {
-    let rev = match canonical_tool_config() {
+fn version_output_with_tool(
+    tool: Result<ToolConfig, ConfigError>,
+) -> Result<VersionCommandOutput, String> {
+    let rev = match tool {
         Ok(tool) => Some(match tool.source {
             ToolSourceConfig::Git { rev, .. } => rev,
         }),
@@ -2053,6 +2062,7 @@ mod tests {
         include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/button.css");
     const PINNED_SPINNER_CSS: &str =
         include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/spinner.css");
+    const TEST_TOOL_REV: &str = "0123456789abcdef0123456789abcdef01234567";
     const APP_TOKEN_OVERRIDES: &str = r#"
 /* application-owned token overrides */
 :root {
@@ -3267,8 +3277,13 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
-    fn version_json_outputs_tool_provenance() {
-        let output = render_version_output(true).expect("render version");
+    fn version_outputs_known_tool_provenance_in_human_and_json_modes() {
+        let human = render_version_output_with_tool(false, Ok(test_tool_config(TEST_TOOL_REV)))
+            .expect("render human version");
+        assert_eq!(human, "leptos_ui_kit 0.1.0");
+
+        let output = render_version_output_with_tool(true, Ok(test_tool_config(TEST_TOOL_REV)))
+            .expect("render JSON version");
         let value = serde_json::from_str::<serde_json::Value>(&output).expect("parse version JSON");
 
         assert_eq!(value["command"], "version");
@@ -3284,17 +3299,42 @@ leptos_router = "0.9.0-alpha"
             "https://github.com/triesap/leptos_ui_kit"
         );
         assert_eq!(value["data"]["source"].get("resolution"), None);
+        assert_eq!(value["data"]["source"]["rev"], TEST_TOOL_REV);
+    }
 
-        match canonical_tool_config() {
-            Ok(tool) => {
-                let ToolSourceConfig::Git { rev, .. } = tool.source;
-                assert_eq!(value["data"]["source"]["rev"], rev);
-            }
-            Err(ConfigError::MissingToolProvenance { .. }) => {
-                assert_eq!(value["data"]["source"].get("rev"), None);
-            }
-            Err(error) => panic!("unexpected compiled provenance error: {error}"),
-        }
+    #[test]
+    fn version_outputs_unavailable_provenance_honestly_in_human_and_json_modes() {
+        let human = render_version_output_with_tool(false, missing_tool_provenance())
+            .expect("render human version without provenance");
+        assert_eq!(human, "leptos_ui_kit 0.1.0");
+
+        let output = render_version_output_with_tool(true, missing_tool_provenance())
+            .expect("render JSON version without provenance");
+        let value = serde_json::from_str::<serde_json::Value>(&output).expect("parse version JSON");
+        assert_eq!(value["command"], "version");
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["data"]["source"]["kind"], "git");
+        assert_eq!(
+            value["data"]["source"]["url"],
+            "https://github.com/triesap/leptos_ui_kit"
+        );
+        assert_eq!(value["data"]["source"].get("rev"), None);
+    }
+
+    #[test]
+    fn version_rejects_invalid_compiled_provenance_without_fabricating_a_revision() {
+        let error = render_version_output_with_tool(
+            true,
+            Err(ConfigError::InvalidValue {
+                field: "tool.source.rev",
+                expected: "40-character git commit hash",
+                actual: "short".to_owned(),
+            }),
+        )
+        .expect_err("invalid provenance must fail");
+
+        assert!(error.contains("invalid compiled tool provenance"));
+        assert!(error.contains("tool.source.rev"));
     }
 
     #[test]
@@ -3306,6 +3346,24 @@ leptos_router = "0.9.0-alpha"
         .expect_err("version flag should be unsupported");
 
         assert!(error.contains("unsupported flag for version"));
+    }
+
+    fn test_tool_config(rev: &str) -> ToolConfig {
+        ToolConfig {
+            package: TOOL_PACKAGE.to_owned(),
+            binary: TOOL_BINARY.to_owned(),
+            source: ToolSourceConfig::Git {
+                url: TOOL_GIT_URL.to_owned(),
+                rev: rev.to_owned(),
+            },
+        }
+    }
+
+    fn missing_tool_provenance() -> Result<ToolConfig, ConfigError> {
+        Err(ConfigError::MissingToolProvenance {
+            package: TOOL_PACKAGE,
+            binary: TOOL_BINARY,
+        })
     }
 
     #[test]
