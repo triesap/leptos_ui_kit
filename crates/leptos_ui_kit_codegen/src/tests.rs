@@ -4321,7 +4321,13 @@ fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state()
     let error = apply_planned_files_with(root, &files, &changes, fault_fs)
         .expect_err("second rename must fail");
 
-    assert!(matches!(error, CodegenError::Io { .. }));
+    assert!(matches!(
+        error,
+        CodegenError::FilesystemOperation {
+            operation: "replace target",
+            ..
+        }
+    ));
     assert!(!root.join("styles/first.css").exists());
     assert!(!root.join("styles/second.css").exists());
     let stages = fs::read_dir(root.join("styles"))
@@ -4453,7 +4459,13 @@ fn rollback_removes_every_transaction_created_target_directory() {
     let error = apply_planned_files_with(root, &files, &changes, fault_fs)
         .expect_err("second commit rename fails");
 
-    assert!(matches!(error, CodegenError::Io { .. }));
+    assert!(matches!(
+        error,
+        CodegenError::FilesystemOperation {
+            operation: "replace target",
+            ..
+        }
+    ));
     assert!(!root.join("src/components/ui/generated").exists());
     assert!(!root.join("src/components/ui/_kit/.transactions").exists());
     assert_exact_persistent_coordination(root);
@@ -4611,6 +4623,48 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
                         });
             }
         }
+    }
+}
+
+#[test]
+fn transaction_io_errors_name_the_operation_and_logical_project_path() {
+    for (operation, expected_operation) in [
+        (FsOperation::WriteHandle, "write transaction stage"),
+        (FsOperation::Rename, "replace target"),
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path();
+        fs::create_dir_all(root.join("styles")).expect("styles");
+        fs::write(root.join("styles/kit.css"), b"before\n").expect("seed target");
+        let lock = WriteLock::acquire(root).expect("bootstrap coordination");
+        drop(lock);
+        let files = vec![PlannedFile {
+            path: "styles/kit.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "after\n".to_owned(),
+        }];
+        let changes = vec![ChangeRecord::new(
+            ChangeKind::UpdateFile,
+            "styles/kit.css",
+            true,
+        )];
+        let fault_fs = Arc::new(FaultFs::fail_nth(operation, 1));
+
+        let error = apply_planned_files_with(root, &files, &changes, fault_fs)
+            .expect_err(expected_operation);
+
+        assert!(matches!(
+            error,
+            CodegenError::FilesystemOperation {
+                operation: actual_operation,
+                logical_path,
+                ..
+            } if actual_operation == expected_operation && logical_path == "styles/kit.css"
+        ));
+        assert_eq!(
+            fs::read(root.join("styles/kit.css")).expect("unchanged target"),
+            b"before\n"
+        );
     }
 }
 

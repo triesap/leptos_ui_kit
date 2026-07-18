@@ -355,7 +355,9 @@ fn stage_bytes(
             } else {
                 fs.before_create_directory(&path)
             }
-            .map_err(|source| CodegenError::Io { path, source })
+            .map_err(|source| {
+                filesystem_operation_error("prepare parent directory", directory, path, source)
+            })
         })?;
     let (parent, target_name) = transaction.open_parent(logical_path)?;
     let target_path = transaction.project_root().join(logical_path);
@@ -364,15 +366,29 @@ fn stage_bytes(
 
     let result = (|| {
         fs.write_handle(&mut created.file, &stage.path, content)
-            .map_err(|source| CodegenError::Io {
-                path: stage.path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "write transaction stage",
+                    logical_path,
+                    stage.path.clone(),
+                    source,
+                )
             })?;
-        preserve_preimage_mode(fs, &created, &stage.path, snapshot.preimage(logical_path))?;
+        preserve_preimage_mode(
+            fs,
+            &created,
+            logical_path,
+            &stage.path,
+            snapshot.preimage(logical_path),
+        )?;
         fs.sync_handle(&created.file, &stage.path)
-            .map_err(|source| CodegenError::Io {
-                path: stage.path.clone(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync transaction stage",
+                    logical_path,
+                    stage.path.clone(),
+                    source,
+                )
             })?;
         Ok(())
     })();
@@ -432,14 +448,20 @@ fn backup_file(
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(source) => {
-                return Err(CodegenError::Io {
-                    path: backup.path,
+                return Err(filesystem_operation_error(
+                    "create transaction backup",
+                    &file.logical_path,
+                    backup.path,
                     source,
-                });
+                ));
             }
         }
     }
-    Err(auxiliary_collision_error(&file.target_path, "backup"))
+    Err(auxiliary_collision_error(
+        &file.target_path,
+        &file.logical_path,
+        "backup",
+    ))
 }
 
 fn commit_staged_file(
@@ -449,15 +471,23 @@ fn commit_staged_file(
     fs: &dyn FsOps,
 ) -> Result<(), CodegenError> {
     fs.before_final_revalidation(&file.target_path)
-        .map_err(|source| CodegenError::Io {
-            path: file.target_path.clone(),
-            source,
+        .map_err(|source| {
+            filesystem_operation_error(
+                "prepare final target validation",
+                &file.logical_path,
+                file.target_path.clone(),
+                source,
+            )
         })?;
     snapshot.revalidate_path(transaction, &file.logical_path)?;
     fs.after_final_revalidation(&file.target_path)
-        .map_err(|source| CodegenError::Io {
-            path: file.target_path.clone(),
-            source,
+        .map_err(|source| {
+            filesystem_operation_error(
+                "finish final target validation",
+                &file.logical_path,
+                file.target_path.clone(),
+                source,
+            )
         })?;
     snapshot.revalidate_path(transaction, &file.logical_path)?;
     let actual_stage_identity =
@@ -484,9 +514,13 @@ fn commit_staged_file(
         Path::new(&target_name),
         &file.target_path,
     )
-    .map_err(|source| CodegenError::Io {
-        path: file.target_path.clone(),
-        source,
+    .map_err(|source| {
+        filesystem_operation_error(
+            "replace target",
+            &file.logical_path,
+            file.target_path.clone(),
+            source,
+        )
     })
 }
 
@@ -509,15 +543,18 @@ fn create_random_auxiliary(
             Ok(created) => return Ok((auxiliary, created)),
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(source) => {
-                return Err(CodegenError::Io {
-                    path: auxiliary.path,
+                return Err(filesystem_operation_error(
+                    "create exclusive transaction stage",
+                    logical_target,
+                    auxiliary.path,
                     source,
-                });
+                ));
             }
         }
     }
     Err(auxiliary_collision_error(
         &transaction.project_root().join(logical_target),
+        logical_target,
         "stage",
     ))
 }
@@ -592,9 +629,13 @@ pub(super) fn recover_pending_transaction(
         match &entry.preimage {
             JournalPreimage::Absent => fs
                 .remove_file(&parent, Path::new(&target_name), &target_path)
-                .map_err(|source| CodegenError::Io {
-                    path: target_path,
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "recover absent target",
+                        &entry.logical_path,
+                        target_path,
+                        source,
+                    )
                 })?,
             JournalPreimage::RegularFile { .. } => {
                 let backup_name = entry
@@ -613,9 +654,13 @@ pub(super) fn recover_pending_transaction(
                     Path::new(&target_name),
                     &target_path,
                 )
-                .map_err(|source| CodegenError::Io {
-                    path: target_path,
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "recover target backup",
+                        &entry.logical_path,
+                        target_path,
+                        source,
+                    )
                 })?;
             }
         }
@@ -628,7 +673,14 @@ pub(super) fn recover_pending_transaction(
         match fs.remove_file(&inventory.transactions_directory, Path::new(name), &path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(CodegenError::Io { path, source }),
+            Err(source) => {
+                return Err(filesystem_operation_error(
+                    "remove recovery journal update",
+                    "src/components/ui/_kit/.transactions",
+                    path,
+                    source,
+                ));
+            }
         }
     }
     let journal = DurableJournal {
@@ -972,7 +1024,14 @@ fn cleanup_recovery_auxiliaries(
             match fs.remove_file(&parent, Path::new(name), &path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(CodegenError::Io { path, source }),
+                Err(source) => {
+                    return Err(filesystem_operation_error(
+                        "remove recovery auxiliary",
+                        &entry.logical_path,
+                        path,
+                        source,
+                    ));
+                }
             }
         }
     }
@@ -1468,6 +1527,7 @@ fn path_depth(path: &str) -> usize {
 fn preserve_preimage_mode(
     fs: &dyn FsOps,
     created: &CreatedFile,
+    logical_path: &str,
     stage_path: &Path,
     preimage: Option<&PathPreimage>,
 ) -> Result<(), CodegenError> {
@@ -1480,13 +1540,17 @@ fn preserve_preimage_mode(
     #[cfg(unix)]
     if let Some(posix_mode) = posix_mode {
         fs.set_file_mode(&created.file, stage_path, posix_mode)
-            .map_err(|source| CodegenError::Io {
-                path: stage_path.to_path_buf(),
-                source,
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "preserve target mode on transaction stage",
+                    logical_path,
+                    stage_path.to_path_buf(),
+                    source,
+                )
             })?;
     }
     #[cfg(not(unix))]
-    let _ = (fs, created, stage_path, preimage);
+    let _ = (fs, created, logical_path, stage_path, preimage);
     Ok(())
 }
 
@@ -1543,9 +1607,13 @@ fn rollback_transaction(
                     Path::new(&file.target_name),
                     &file.target_path,
                 )
-                .map_err(|source| CodegenError::Io {
-                    path: file.target_path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "restore target backup",
+                        &file.logical_path,
+                        file.target_path.clone(),
+                        source,
+                    )
                 })?,
             None => fs
                 .remove_file(
@@ -1553,9 +1621,13 @@ fn rollback_transaction(
                     Path::new(&file.target_name),
                     &file.target_path,
                 )
-                .map_err(|source| CodegenError::Io {
-                    path: file.target_path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "remove newly created target during rollback",
+                        &file.logical_path,
+                        file.target_path.clone(),
+                        source,
+                    )
                 })?,
         }
     }
@@ -1610,10 +1682,12 @@ fn cleanup_auxiliaries_strict(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(source) => {
-                    return Err(CodegenError::Io {
-                        path: auxiliary.path.clone(),
+                    return Err(filesystem_operation_error(
+                        "remove transaction auxiliary",
+                        &file.logical_path,
+                        auxiliary.path.clone(),
                         source,
-                    });
+                    ));
                 }
             }
         }
@@ -1639,7 +1713,14 @@ fn cleanup_created_directories_strict(
         match fs.remove_dir(&parent, Path::new(&name), &path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(CodegenError::Io { path, source }),
+            Err(source) => {
+                return Err(filesystem_operation_error(
+                    "remove transaction-created directory",
+                    logical_path,
+                    path,
+                    source,
+                ));
+            }
         }
     }
     Ok(())
@@ -1667,21 +1748,41 @@ fn cleanup_successful_backups(fs: &dyn FsOps, staged: &[StagedFile]) -> Result<(
     for file in staged.iter().rev() {
         if let Some(backup) = &file.backup {
             fs.remove_file(&file.parent, Path::new(&backup.name), &backup.path)
-                .map_err(|source| CodegenError::Io {
-                    path: backup.path.clone(),
-                    source,
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "remove committed target backup",
+                        &file.logical_path,
+                        backup.path.clone(),
+                        source,
+                    )
                 })?;
         }
     }
     Ok(())
 }
 
-fn auxiliary_collision_error(target: &Path, kind: &str) -> CodegenError {
-    CodegenError::Io {
+fn auxiliary_collision_error(target: &Path, logical_path: &str, kind: &str) -> CodegenError {
+    CodegenError::FilesystemOperation {
+        operation: "allocate exclusive transaction filename",
+        logical_path: logical_path.to_owned(),
         path: target.to_path_buf(),
         source: io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("could not allocate an exclusive random {kind} filename"),
         ),
+    }
+}
+
+fn filesystem_operation_error(
+    operation: &'static str,
+    logical_path: impl Into<String>,
+    path: PathBuf,
+    source: io::Error,
+) -> CodegenError {
+    CodegenError::FilesystemOperation {
+        operation,
+        logical_path: logical_path.into(),
+        path,
+        source,
     }
 }

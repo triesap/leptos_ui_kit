@@ -8,6 +8,12 @@ pub enum CodegenError {
         path: PathBuf,
         source: std::io::Error,
     },
+    FilesystemOperation {
+        operation: &'static str,
+        logical_path: String,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     Config(ConfigError),
     Registry(RegistryError),
     LockParse {
@@ -57,6 +63,16 @@ impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
+            Self::FilesystemOperation {
+                operation,
+                logical_path,
+                path,
+                source,
+            } => write!(
+                f,
+                "filesystem operation {operation} failed for project path {logical_path} at {}: {source}",
+                path.display()
+            ),
             Self::Config(error) => write!(f, "{error}"),
             Self::Registry(error) => write!(f, "{error}"),
             Self::LockParse { path, source } => {

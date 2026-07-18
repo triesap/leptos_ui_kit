@@ -591,6 +591,21 @@ fn public_error_variants_and_conversion_bounds_remain_constructible() {
         source: std::io::Error::other("io"),
     };
     assert!(matches!(io, CodegenError::Io { path: value, source: _ } if value == path));
+    let filesystem = CodegenError::FilesystemOperation {
+        operation: "replace target",
+        logical_path: "styles/kit.css".to_owned(),
+        path: path.clone(),
+        source: std::io::Error::other("failed"),
+    };
+    assert!(matches!(
+        filesystem,
+        CodegenError::FilesystemOperation {
+            operation: "replace target",
+            logical_path,
+            path: value,
+            source: _
+        } if logical_path == "styles/kit.css" && value == path
+    ));
     let parse = CodegenError::LockParse {
         path: path.clone(),
         source: serde_json::from_str::<Value>("{").expect_err("invalid json"),
@@ -659,6 +674,16 @@ fn public_error_variants_and_conversion_bounds_remain_constructible() {
         },
         CodegenError::InvalidCoordinationState { path, reason }
             if path == DEFAULT_KIT_WRITE_LOCK_PATH && reason == "unsupported marker"
+    ));
+    assert!(matches!(
+        CodegenError::RecoveryRequired {
+            journal_path: path.clone(),
+            reason: "recover".to_owned(),
+        },
+        CodegenError::RecoveryRequired {
+            journal_path,
+            reason
+        } if journal_path == path && reason == "recover"
     ));
     assert!(matches!(
         CodegenError::LockExists(path.clone()),
