@@ -7,6 +7,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Embed the complete built-in registry, Rust and CSS sources, theme contract,
+  and package-local public schemas in one deterministic runtime catalog.
+- Resolve package provenance from Cargo VCS metadata as a complete Git
+  revision and expose stable logical locators instead of build-machine paths.
+- Reject dirty, malformed, or wrong-crate Cargo VCS metadata instead of
+  attributing changed archive bytes to an unqualified base revision.
+- Expose typed logical built-in asset failures through public registry,
+  registry-health, and theme-contract errors, and deprecate the physical-root
+  content-hash compatibility API. Exhaustive error matches must handle the new
+  variants.
+- Add isolated archive acceptance proving both installed binaries keep working
+  after package source, build targets, and Cargo caches are deleted.
 - Add the packaged v1 semantic theme contract and CSS-only `tokens` foundation
   item, installed before every styled built-in component.
 - Replace component `:root` aliases with property-local semantic and structural

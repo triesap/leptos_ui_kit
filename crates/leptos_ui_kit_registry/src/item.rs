@@ -1210,7 +1210,6 @@ pub fn resolve_registry_targets(
 }
 
 #[deprecated(
-    since = "0.1.0",
     note = "physical registry roots are an authoring-only compatibility API; built-in items now expose a content hash derived from immutable embedded assets"
 )]
 pub fn registry_item_content_hash(

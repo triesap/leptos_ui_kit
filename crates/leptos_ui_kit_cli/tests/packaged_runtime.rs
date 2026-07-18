@@ -190,10 +190,15 @@ fn assert_package_revisions(packages: &BTreeMap<&str, PathBuf>, expected_rev: &s
             Some(expected_rev),
             "{name} archive revision"
         );
+        let expected_path = format!("crates/{name}");
         assert_eq!(
-            metadata["path_in_vcs"],
-            format!("crates/{name}"),
+            metadata.get("path_in_vcs").and_then(Value::as_str),
+            Some(expected_path.as_str()),
             "{name} archive source path"
+        );
+        assert!(
+            metadata.pointer("/git/dirty").is_none(),
+            "{name} clean archive must omit Cargo's dirty marker"
         );
     }
 }

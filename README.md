@@ -15,6 +15,13 @@ Apps do not depend on `leptos_ui_kit` at runtime. The CLI installs source files
 under `src/components/ui` and managed CSS blocks in `styles/kit.css` by
 default. `kit.json` may select another safe stylesheet under `styles/`.
 
+The installed binaries embed the built-in registry manifests, Rust and CSS
+sources, theme contract, and public schemas in a deterministic catalog. They
+do not require a package source checkout, build target, or Cargo cache at
+runtime. Clean Cargo package installations also retain the complete package
+Git revision reported by `--version --json`; dirty or wrong-crate package VCS
+metadata is rejected rather than reported as trusted provenance.
+
 ## Commands
 
 ```bash

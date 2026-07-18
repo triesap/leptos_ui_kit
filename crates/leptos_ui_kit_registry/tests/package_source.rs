@@ -189,7 +189,17 @@ fn extract_workspace(
                 .unwrap_or_else(|error| panic!("read {}: {error}", vcs_path.display())),
         )
         .unwrap_or_else(|error| panic!("parse {}: {error}", vcs_path.display()));
-        assert_eq!(vcs["path_in_vcs"], spec.path_in_vcs);
+        assert_eq!(
+            vcs.get("path_in_vcs").and_then(Value::as_str),
+            Some(spec.path_in_vcs),
+            "{} archive path_in_vcs",
+            spec.name
+        );
+        assert!(
+            vcs.pointer("/git/dirty").is_none(),
+            "{} clean archive must omit Cargo's dirty marker",
+            spec.name
+        );
         let rev = vcs["git"]["sha1"]
             .as_str()
             .unwrap_or_else(|| panic!("{} archive git.sha1", spec.name));

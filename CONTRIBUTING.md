@@ -11,11 +11,39 @@ Thanks for your interest in contributing to leptos_ui_kit.
 
 ## Development setup
 
-This repository is a Rust workspace. Typical tasks:
+This repository is a Rust workspace. Run the normal validation lane with:
 
-- `cargo fmt`
-- `cargo check`
-- `cargo test`
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
+```
+
+## Packaging validation
+
+Changes to package manifests, include lists, embedded assets, provenance, or
+the CLI installation flow also require the package lane:
+
+```bash
+cargo package --workspace --allow-dirty --no-verify --locked
+```
+
+Run both slow package acceptance tests explicitly:
+
+```bash
+cargo test -p leptos_ui_kit_registry --test package_source \
+  packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_git -- \
+  --ignored --exact --nocapture
+
+cargo test -p leptos_ui_kit_cli --test packaged_runtime \
+  installed_binaries_run_after_package_source_and_build_state_are_deleted -- \
+  --ignored --exact --nocapture
+```
+
+These ignored tests create and extract package archives in isolated workspaces.
+They prove that packaged crates use only local package inputs and that installed
+binaries keep working after package source and build state are deleted. Run
+them from a clean Git worktree; archive metadata marked dirty is rejected
+intentionally because its base revision does not identify the packaged bytes.
 
 ## MVP constraints
 

@@ -288,15 +288,7 @@ pub fn resolve_provenance(
     }
 
     if let Some(input) = cargo_vcs_json {
-        let value = serde_json::from_str::<Value>(input)
-            .map_err(|error| ProvenanceError::CargoVcs(error.to_string()))?;
-        let rev = value
-            .pointer("/git/sha1")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ProvenanceError::CargoVcs("expected package metadata field git.sha1".to_owned())
-            })?;
-        return normalize_revision(ProvenanceSource::CargoVcs, rev).map(|rev| {
+        return resolve_cargo_vcs(input).map(|rev| {
             Some(ResolvedProvenance {
                 rev,
                 source: ProvenanceSource::CargoVcs,
@@ -316,6 +308,46 @@ pub fn resolve_provenance(
     }
 
     Ok(None)
+}
+
+fn resolve_cargo_vcs(input: &str) -> Result<String, ProvenanceError> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| ProvenanceError::CargoVcs(error.to_string()))?;
+    let path_in_vcs = value
+        .get("path_in_vcs")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ProvenanceError::CargoVcs(
+                "expected package metadata field path_in_vcs to be a string".to_owned(),
+            )
+        })?;
+    if path_in_vcs != EXPECTED_CRATE_PATH {
+        return Err(ProvenanceError::CargoVcs(format!(
+            "expected package metadata field path_in_vcs to equal {EXPECTED_CRATE_PATH:?}, got {path_in_vcs:?}"
+        )));
+    }
+
+    match value.pointer("/git/dirty") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => {
+            return Err(ProvenanceError::CargoVcs(
+                "package metadata field git.dirty must not be true".to_owned(),
+            ));
+        }
+        Some(_) => {
+            return Err(ProvenanceError::CargoVcs(
+                "package metadata field git.dirty must be a boolean when present".to_owned(),
+            ));
+        }
+    }
+
+    let rev = value
+        .pointer("/git/sha1")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ProvenanceError::CargoVcs("expected package metadata field git.sha1".to_owned())
+        })?;
+    normalize_revision(ProvenanceSource::CargoVcs, rev)
 }
 
 pub fn is_canonical_repository(remote: &str) -> bool {

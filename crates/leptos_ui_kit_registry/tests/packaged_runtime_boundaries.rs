@@ -21,14 +21,18 @@ mod build_provenance;
 
 use build_assets::ASSET_SPECS;
 use build_provenance::{
-    CheckoutProvenance, GIT_REPOSITORY_OVERRIDE_ENV, GitRunner, ProvenanceError, ProvenanceSource,
-    ResolvedProvenance, SystemGit, explicit_revision, is_canonical_repository, probe_checkout,
-    read_cargo_vcs, resolve_provenance,
+    CheckoutProvenance, EXPECTED_CRATE_PATH, GIT_REPOSITORY_OVERRIDE_ENV, GitRunner,
+    ProvenanceError, ProvenanceSource, ResolvedProvenance, SystemGit, explicit_revision,
+    is_canonical_repository, probe_checkout, read_cargo_vcs, resolve_provenance,
 };
 use tempfile::tempdir;
 
 const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
 const REV_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+fn cargo_vcs_metadata(rev: &str) -> String {
+    format!(r#"{{"git":{{"sha1":"{rev}"}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#)
+}
 
 const EXPECTED_PUBLIC_SCHEMA_PATHS: [&str; 4] = [
     "schema/0.9.0-alpha/kit.schema.json",
@@ -72,7 +76,7 @@ const EXPECTED_PACKAGE_TESTS: [&str; 7] = [
 
 #[test]
 fn provenance_precedence_is_explicit_then_cargo_then_checkout() {
-    let cargo = format!(r#"{{"git":{{"sha1":"{REV_B}"}}}}"#);
+    let cargo = cargo_vcs_metadata(REV_B);
     let checkout = CheckoutProvenance {
         remote: "https://github.com/triesap/leptos_ui_kit.git",
         rev: REV_B,
@@ -84,6 +88,18 @@ fn provenance_precedence_is_explicit_then_cargo_then_checkout() {
             rev: REV_A.to_owned(),
             source: ProvenanceSource::Explicit,
         }))
+    );
+    assert_eq!(
+        resolve_provenance(
+            Some(REV_A),
+            Some(r#"{"git":{"sha1":null,"dirty":true},"path_in_vcs":"wrong"}"#),
+            Some(checkout),
+        ),
+        Ok(Some(ResolvedProvenance {
+            rev: REV_A.to_owned(),
+            source: ProvenanceSource::Explicit,
+        })),
+        "valid explicit provenance must bypass malformed lower-precedence metadata"
     );
     assert_eq!(
         resolve_provenance(None, Some(&cargo), Some(checkout)),
@@ -103,7 +119,7 @@ fn provenance_precedence_is_explicit_then_cargo_then_checkout() {
 
 #[test]
 fn malformed_higher_precedence_provenance_never_falls_through() {
-    let cargo = format!(r#"{{"git":{{"sha1":"{REV_B}"}}}}"#);
+    let cargo = cargo_vcs_metadata(REV_B);
     let checkout = CheckoutProvenance {
         remote: "https://github.com/triesap/leptos_ui_kit.git",
         rev: REV_B,
@@ -129,10 +145,10 @@ fn malformed_higher_precedence_provenance_never_falls_through() {
 
     let invalid_cargo_vcs = [
         "not json".to_owned(),
-        r#"{}"#.to_owned(),
-        r#"{"git":{"sha1":42}}"#.to_owned(),
-        r#"{"git":{"sha1":"short"}}"#.to_owned(),
-        format!(r#"{{"git":{{"sha1":"{}"}}}}"#, "z".repeat(40)),
+        format!(r#"{{"git":{{"dirty":false}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#),
+        format!(r#"{{"git":{{"sha1":42,"dirty":false}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#),
+        cargo_vcs_metadata("short"),
+        cargo_vcs_metadata(&"z".repeat(40)),
     ];
     for invalid in invalid_cargo_vcs {
         assert!(resolve_provenance(None, Some(&invalid), Some(checkout)).is_err());
@@ -167,10 +183,7 @@ fn explicit_revision_is_normalized_to_lowercase() {
 
 #[test]
 fn cargo_package_metadata_is_sufficient_outside_git() {
-    let cargo = format!(
-        r#"{{"git":{{"sha1":"{}","dirty":false}},"path_in_vcs":"crates/leptos_ui_kit_registry"}}"#,
-        REV_A.to_ascii_uppercase()
-    );
+    let cargo = cargo_vcs_metadata(&REV_A.to_ascii_uppercase());
     assert_eq!(
         resolve_provenance(None, Some(&cargo), None),
         Ok(Some(ResolvedProvenance {
@@ -178,6 +191,76 @@ fn cargo_package_metadata_is_sufficient_outside_git() {
             source: ProvenanceSource::CargoVcs,
         }))
     );
+
+    let explicitly_clean = format!(
+        r#"{{"git":{{"sha1":"{REV_A}","dirty":false}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#
+    );
+    assert_eq!(
+        resolve_provenance(None, Some(&explicitly_clean), None),
+        Ok(Some(ResolvedProvenance {
+            rev: REV_A.to_owned(),
+            source: ProvenanceSource::CargoVcs,
+        }))
+    );
+}
+
+#[test]
+fn cargo_vcs_metadata_requires_exact_registry_path_and_clean_state() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(".cargo_vcs_info.json");
+    let checkout = CheckoutProvenance {
+        remote: "https://github.com/triesap/leptos_ui_kit.git",
+        rev: REV_B,
+    };
+    let invalid = [
+        (
+            "missing path_in_vcs",
+            format!(r#"{{"git":{{"sha1":"{REV_A}","dirty":false}}}}"#),
+            "path_in_vcs",
+        ),
+        (
+            "non-string path_in_vcs",
+            format!(r#"{{"git":{{"sha1":"{REV_A}","dirty":false}},"path_in_vcs":42}}"#),
+            "path_in_vcs",
+        ),
+        (
+            "wrong path_in_vcs",
+            format!(
+                r#"{{"git":{{"sha1":"{REV_A}","dirty":false}},"path_in_vcs":"crates/leptos_ui_kit_cli"}}"#
+            ),
+            "path_in_vcs",
+        ),
+        (
+            "non-boolean dirty",
+            format!(
+                r#"{{"git":{{"sha1":"{REV_A}","dirty":"false"}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#
+            ),
+            "git.dirty",
+        ),
+        (
+            "dirty archive",
+            format!(
+                r#"{{"git":{{"sha1":"{REV_A}","dirty":true}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#
+            ),
+            "git.dirty",
+        ),
+    ];
+
+    for (label, metadata, expected_field) in invalid {
+        fs::write(&path, metadata).unwrap_or_else(|error| panic!("write {label}: {error}"));
+        let input = read_cargo_vcs(&path)
+            .unwrap_or_else(|error| panic!("read {label}: {error}"))
+            .unwrap_or_else(|| panic!("{label} metadata must be present"));
+        let error = resolve_provenance(None, Some(&input), Some(checkout)).unwrap_err();
+        assert!(
+            matches!(error, ProvenanceError::CargoVcs(_)),
+            "{label}: {error:?}"
+        );
+        assert!(
+            error.to_string().contains(expected_field),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -259,6 +342,16 @@ fn compiled_tool_provenance_is_valid_or_explicitly_unavailable() {
                     Some(rev.as_str()),
                     "compiled cargo-vcs provenance must equal the package metadata"
                 );
+                assert_eq!(
+                    metadata.get("path_in_vcs").and_then(|value| value.as_str()),
+                    Some(EXPECTED_CRATE_PATH),
+                    "compiled cargo-vcs provenance must come from the registry crate archive"
+                );
+                assert_eq!(
+                    metadata.pointer("/git/dirty"),
+                    None,
+                    "compiled cargo-vcs provenance must come from an archive without Cargo's dirty marker"
+                );
             }
         }
         ("unavailable", Err(ConfigError::MissingToolProvenance { package, binary })) => {
@@ -299,7 +392,7 @@ fn cargo_vcs_reader_distinguishes_absent_valid_and_invalid_files() {
     let path = dir.path().join(".cargo_vcs_info.json");
     assert_eq!(read_cargo_vcs(&path), Ok(None));
 
-    let input = format!(r#"{{"git":{{"sha1":"{}"}}}}"#, REV_A.to_ascii_uppercase());
+    let input = cargo_vcs_metadata(&REV_A.to_ascii_uppercase());
     fs::write(&path, &input).expect("write Cargo VCS metadata");
     assert_eq!(read_cargo_vcs(&path), Ok(Some(input.clone())));
     assert_eq!(
@@ -331,7 +424,7 @@ fn cargo_vcs_reader_rejects_symlinks() {
     let dir = tempdir().expect("tempdir");
     let target = dir.path().join("target.json");
     let path = dir.path().join(".cargo_vcs_info.json");
-    fs::write(&target, format!(r#"{{"git":{{"sha1":"{REV_A}"}}}}"#)).expect("write target");
+    fs::write(&target, cargo_vcs_metadata(REV_A)).expect("write target");
     symlink(&target, &path).expect("create symlink");
     assert!(matches!(
         read_cargo_vcs(&path),
@@ -346,7 +439,7 @@ fn cargo_vcs_reader_never_walks_to_parent_metadata() {
     fs::create_dir_all(&manifest_dir).expect("create nested manifest directory");
     fs::write(
         dir.path().join(".cargo_vcs_info.json"),
-        format!(r#"{{"git":{{"sha1":"{REV_A}"}}}}"#),
+        cargo_vcs_metadata(REV_A),
     )
     .expect("write parent metadata");
 

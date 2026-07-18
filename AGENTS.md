@@ -27,6 +27,8 @@ crate family.
   source assets.
 - `schema/0.9.0-alpha` contains the public JSON schemas.
 - `tests/fixtures/homepage_trunk_csr` is the canonical Trunk CSR fixture.
+- `crates/leptos_ui_kit_cli/tests/fixtures/homepage_trunk_csr` is its
+  package-local mirror for extracted-package and installed-runtime acceptance.
 
 ## Product Contract
 
@@ -114,8 +116,30 @@ cargo test --workspace --all-targets
 ```
 
 For schema edits, validate JSON syntax and run the Rust test lane.
-For CLI integration edits, keep or extend `tests/fixtures/homepage_trunk_csr`
-and `crates/leptos_ui_kit_cli/tests/workflow.rs`.
+For CLI integration edits, keep or extend `tests/fixtures/homepage_trunk_csr`,
+its package-local mirror under
+`crates/leptos_ui_kit_cli/tests/fixtures/homepage_trunk_csr`, and
+`crates/leptos_ui_kit_cli/tests/workflow.rs`. Keep both fixture copies aligned;
+the workflow parity test must continue to guard their exact contents.
+
+For package manifests, include lists, embedded assets, provenance, or CLI
+installation changes, also run:
+
+```bash
+cargo package --workspace --allow-dirty --no-verify --locked
+
+cargo test -p leptos_ui_kit_registry --test package_source \
+  packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_git -- \
+  --ignored --exact --nocapture
+
+cargo test -p leptos_ui_kit_cli --test packaged_runtime \
+  installed_binaries_run_after_package_source_and_build_state_are_deleted -- \
+  --ignored --exact --nocapture
+```
+
+The two ignored tests are mandatory slow lanes for packaging changes; ordinary
+workspace tests compile them but do not execute them. Run the slow lanes from a
+clean Git worktree because dirty Cargo VCS metadata is rejected intentionally.
 
 ## Definition Of Done
 
