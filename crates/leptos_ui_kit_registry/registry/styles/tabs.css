@@ -19,7 +19,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-tabs-trigger-border-color, var(--kit-color-border));
+  border: var(--kit-border-width) solid
+    var(--kit-tabs-trigger-border-color, var(--kit-color-border));
   border-radius: var(--kit-tabs-trigger-radius, var(--kit-radius-md));
   min-height: var(--kit-tabs-trigger-min-height, 2.5rem);
   padding:

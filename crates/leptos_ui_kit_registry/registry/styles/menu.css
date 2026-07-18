@@ -8,7 +8,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-menu-trigger-border-color, var(--kit-color-border));
+  border: var(--kit-border-width) solid
+    var(--kit-menu-trigger-border-color, var(--kit-color-border));
   border-radius: var(--kit-menu-trigger-radius, var(--kit-radius-md));
   min-height: var(--kit-menu-trigger-min-height, 2.5rem);
   padding:
@@ -93,7 +94,7 @@
   align-items: center;
   gap: var(--kit-menu-item-gap, 0.5rem);
   border: 0;
-  border-radius: calc(var(--kit-menu-item-radius, var(--kit-radius-md)) - 2px);
+  border-radius: var(--kit-menu-item-radius, calc(var(--kit-radius-md) - 2px));
   min-height: var(--kit-menu-item-min-height, 2.25rem);
   padding:
     var(--kit-menu-item-padding-block, 0.5rem)

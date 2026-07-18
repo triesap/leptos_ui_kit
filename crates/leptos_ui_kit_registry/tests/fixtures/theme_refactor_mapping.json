@@ -1,0 +1,1283 @@
+{
+  "fixtureVersion": 1,
+  "rowCount": 211,
+  "rowsByStylesheet": {
+    "anchor.css": 8,
+    "button.css": 31,
+    "collapsible.css": 13,
+    "dialog.css": 48,
+    "field.css": 42,
+    "menu.css": 38,
+    "spinner.css": 7,
+    "status.css": 4,
+    "tabs.css": 20
+  },
+  "rows": [
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor",
+      "property": "color",
+      "value": "var(--kit-anchor-color, var(--kit-color-link))"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor",
+      "property": "text-decoration-color",
+      "value": "var(--kit-anchor-text-decoration-color, currentColor)"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor",
+      "property": "text-decoration-line",
+      "value": "var(--kit-anchor-text-decoration-line, underline)"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor",
+      "property": "text-decoration-thickness",
+      "value": "var(--kit-anchor-text-decoration-thickness, from-font)"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor",
+      "property": "text-underline-offset",
+      "value": "var(--kit-anchor-text-underline-offset, 0.12em)"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-anchor-focus-outline-width, 0.125rem) solid var(--kit-anchor-focus-outline-color, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-anchor-focus-outline-offset, 0.125rem)"
+    },
+    {
+      "stylesheet": "anchor.css",
+      "selector": ".kit-anchor:hover",
+      "property": "color",
+      "value": "var(--kit-anchor-color-hover, var(--kit-color-link-hover))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "border",
+      "value": "var(--kit-button-border-width, var(--kit-border-width)) solid transparent"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "border-radius",
+      "value": "var(--kit-radius-md)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "font-weight",
+      "value": "var(--kit-button-font-weight, 600)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "gap",
+      "value": "var(--kit-button-gap, 0.375rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "line-height",
+      "value": "var(--kit-button-line-height, 1)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button",
+      "property": "transition",
+      "value": "background-color var(--kit-button-transition-duration, var(--kit-duration-fast)) var(--kit-button-transition-timing, var(--kit-easing-standard)), border-color var(--kit-button-transition-duration, var(--kit-duration-fast)) var(--kit-button-transition-timing, var(--kit-easing-standard)), color var(--kit-button-transition-duration, var(--kit-duration-fast)) var(--kit-button-transition-timing, var(--kit-easing-standard)), box-shadow var(--kit-button-transition-duration, var(--kit-duration-fast)) var(--kit-button-transition-timing, var(--kit-easing-standard))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--ghost",
+      "property": "background",
+      "value": "var(--kit-color-ghost, transparent)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--ghost",
+      "property": "color",
+      "value": "var(--kit-color-ghost-foreground, var(--kit-color-text-secondary))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--ghost:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-color-ghost-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--ghost:hover:not(:disabled)",
+      "property": "color",
+      "value": "var(--kit-color-ghost-hover-foreground, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--lg",
+      "property": "font-size",
+      "value": "var(--kit-button-lg-font-size, 1rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--lg",
+      "property": "min-height",
+      "value": "var(--kit-button-lg-min-height, 3rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--lg",
+      "property": "padding",
+      "value": "0 var(--kit-button-lg-padding-inline, 1.25rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--md",
+      "property": "font-size",
+      "value": "var(--kit-button-md-font-size, 0.9375rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--md",
+      "property": "min-height",
+      "value": "var(--kit-button-md-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--md",
+      "property": "padding",
+      "value": "0 var(--kit-button-md-padding-inline, 1rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--primary",
+      "property": "background",
+      "value": "var(--kit-color-primary)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--primary",
+      "property": "color",
+      "value": "var(--kit-color-primary-foreground)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--primary:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-color-primary-hover)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--secondary",
+      "property": "background",
+      "value": "var(--kit-color-secondary)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--secondary",
+      "property": "border-color",
+      "value": "var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--secondary",
+      "property": "color",
+      "value": "var(--kit-color-secondary-foreground)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--secondary:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-color-secondary-hover)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--sm",
+      "property": "font-size",
+      "value": "var(--kit-button-sm-font-size, 0.875rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--sm",
+      "property": "min-height",
+      "value": "var(--kit-button-sm-min-height, 2rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button--sm",
+      "property": "padding",
+      "value": "0 var(--kit-button-sm-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button-spinner",
+      "property": "block-size",
+      "value": "var(--kit-button-spinner-size, 1em)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button-spinner",
+      "property": "inline-size",
+      "value": "var(--kit-button-spinner-size, 1em)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button:disabled",
+      "property": "opacity",
+      "value": "var(--kit-button-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-button-focus-outline-width, 2px) solid var(--kit-focus-ring)"
+    },
+    {
+      "stylesheet": "button.css",
+      "selector": ".kit-button:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-button-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible",
+      "property": "gap",
+      "value": "var(--kit-collapsible-gap, 0.5rem)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-content",
+      "property": "padding",
+      "value": "var(--kit-collapsible-content-padding-block, 0.5rem) var(--kit-collapsible-content-padding-inline, 0)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "background",
+      "value": "var(--kit-collapsible-trigger-background, transparent)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-collapsible-trigger-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "border-radius",
+      "value": "var(--kit-collapsible-trigger-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "color",
+      "value": "var(--kit-collapsible-trigger-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "font-weight",
+      "value": "var(--kit-collapsible-trigger-font-weight, 600)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "min-height",
+      "value": "var(--kit-collapsible-trigger-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger",
+      "property": "padding",
+      "value": "var(--kit-collapsible-trigger-padding-block, 0.5rem) var(--kit-collapsible-trigger-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger:disabled",
+      "property": "opacity",
+      "value": "var(--kit-collapsible-trigger-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-collapsible-trigger-focus-outline-width, 2px) solid var(--kit-collapsible-trigger-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-collapsible-trigger-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "collapsible.css",
+      "selector": ".kit-collapsible-trigger:hover:not(:disabled)",
+      "property": "background",
+      "value": "var( --kit-collapsible-trigger-background-hover, var(--kit-color-surface-hover) )"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "background",
+      "value": "var(--kit-dialog-close-background, transparent)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "background",
+      "value": "var(--kit-dialog-trigger-background, transparent)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-dialog-trigger-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "border-color",
+      "value": "var(--kit-dialog-close-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "border-radius",
+      "value": "var(--kit-dialog-close-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "border-radius",
+      "value": "var(--kit-dialog-trigger-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "color",
+      "value": "var(--kit-dialog-close-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "color",
+      "value": "var(--kit-dialog-trigger-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "font-weight",
+      "value": "var(--kit-dialog-close-font-weight, 600)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "font-weight",
+      "value": "var(--kit-dialog-trigger-font-weight, 600)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "min-height",
+      "value": "var(--kit-dialog-close-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "min-height",
+      "value": "var(--kit-dialog-trigger-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "padding",
+      "value": "var(--kit-dialog-close-padding-block, 0.5rem) var(--kit-dialog-close-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close",
+      "property": "padding",
+      "value": "var(--kit-dialog-trigger-padding-block, 0.5rem) var(--kit-dialog-trigger-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close:disabled",
+      "property": "opacity",
+      "value": "var(--kit-dialog-close-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-dialog-focus-outline-width, 2px) solid var( --kit-dialog-close-focus-ring, var(--kit-dialog-focus-ring, var(--kit-focus-ring)) )"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-dialog-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-close:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-dialog-close-background-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "background",
+      "value": "var(--kit-dialog-background, var(--kit-color-surface-raised))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "border",
+      "value": "var(--kit-dialog-border-width, var(--kit-border-width)) solid var(--kit-dialog-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "border-radius",
+      "value": "var(--kit-dialog-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "box-shadow",
+      "value": "var(--kit-dialog-elevation, var(--kit-shadow-lg))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "color",
+      "value": "var(--kit-dialog-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "gap",
+      "value": "var(--kit-dialog-gap, 1rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "inline-size",
+      "value": "var(--kit-dialog-max-inline-size, min(32rem, calc(100vw - 2rem)))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "max-block-size",
+      "value": "var(--kit-dialog-max-block-size, min(42rem, calc(100vh - 2rem)))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "padding",
+      "value": "var(--kit-dialog-padding-block, 1.25rem) var(--kit-dialog-padding-inline, 1.25rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "transition",
+      "value": "opacity var(--kit-dialog-transition-duration, var(--kit-duration-normal)) var(--kit-dialog-transition-timing, var(--kit-easing-standard)), transform var(--kit-dialog-transition-duration, var(--kit-duration-normal)) var(--kit-dialog-transition-timing, var(--kit-easing-standard))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content",
+      "property": "z-index",
+      "value": "var(--kit-dialog-z-index, 50)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-dialog-focus-outline-width, 2px) solid var(--kit-dialog-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-content:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-dialog-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-description",
+      "property": "color",
+      "value": "var(--kit-dialog-description-color, var(--kit-color-text-muted))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-description",
+      "property": "font-size",
+      "value": "var(--kit-dialog-description-font-size, 0.9375rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-description",
+      "property": "line-height",
+      "value": "var(--kit-dialog-description-line-height, 1.5)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-title",
+      "property": "font-size",
+      "value": "var(--kit-dialog-title-font-size, 1.125rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-title",
+      "property": "font-weight",
+      "value": "var(--kit-dialog-title-font-weight, 700)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-title",
+      "property": "line-height",
+      "value": "var(--kit-dialog-title-line-height, 1.25)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "background",
+      "value": "var(--kit-dialog-trigger-background, transparent)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-dialog-trigger-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "border-radius",
+      "value": "var(--kit-dialog-trigger-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "color",
+      "value": "var(--kit-dialog-trigger-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "font-weight",
+      "value": "var(--kit-dialog-trigger-font-weight, 600)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "min-height",
+      "value": "var(--kit-dialog-trigger-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger",
+      "property": "padding",
+      "value": "var(--kit-dialog-trigger-padding-block, 0.5rem) var(--kit-dialog-trigger-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger:disabled",
+      "property": "opacity",
+      "value": "var(--kit-dialog-trigger-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-dialog-focus-outline-width, 2px) solid var( --kit-dialog-trigger-focus-ring, var(--kit-dialog-focus-ring, var(--kit-focus-ring)) )"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-dialog-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "dialog.css",
+      "selector": ".kit-dialog-trigger:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-dialog-trigger-background-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field",
+      "property": "gap",
+      "value": "var(--kit-field-gap, 0.5rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "background",
+      "value": "var(--kit-field-control-background, var(--kit-color-surface))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "border",
+      "value": "var(--kit-field-control-border-width, var(--kit-border-width)) solid var(--kit-field-control-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "border-radius",
+      "value": "var(--kit-field-control-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "color",
+      "value": "var(--kit-field-control-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "font-size",
+      "value": "var(--kit-field-control-font-size, 1rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "font-weight",
+      "value": "var(--kit-field-control-font-weight, 400)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "line-height",
+      "value": "var(--kit-field-control-line-height, 1.35)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "min-block-size",
+      "value": "var(--kit-field-control-min-height, 2.75rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "padding",
+      "value": "var(--kit-field-control-padding-block, 0.625rem) var(--kit-field-control-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control",
+      "property": "transition",
+      "value": "border-color var(--kit-field-control-transition-duration, var(--kit-duration-fast)) var(--kit-field-control-transition-timing, var(--kit-easing-standard)), box-shadow var(--kit-field-control-transition-duration, var(--kit-duration-fast)) var(--kit-field-control-transition-timing, var(--kit-easing-standard))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control:focus-visible",
+      "property": "outline",
+      "value": "2px solid var(--kit-field-control-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-control[data-invalid]",
+      "property": "border-color",
+      "value": "var(--kit-field-control-invalid-border-color, var(--kit-color-danger))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-label",
+      "property": "color",
+      "value": "var(--kit-field-label-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-label",
+      "property": "font-size",
+      "value": "var(--kit-field-label-font-size, 0.9375rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-label",
+      "property": "font-weight",
+      "value": "var(--kit-field-label-font-weight, 500)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-label",
+      "property": "gap",
+      "value": "var(--kit-field-label-gap, 0.25rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-label-row",
+      "property": "gap",
+      "value": "var(--kit-field-label-gap, 0.25rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-message",
+      "property": "color",
+      "value": "var(--kit-field-message-color, var(--kit-color-text-muted))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-message",
+      "property": "font-size",
+      "value": "var(--kit-field-message-font-size, 0.875rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-message",
+      "property": "font-weight",
+      "value": "var(--kit-field-message-font-weight, 400)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-message",
+      "property": "line-height",
+      "value": "var(--kit-field-message-line-height, 1.35)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-message[data-invalid]",
+      "property": "color",
+      "value": "var(--kit-field-message-invalid-color, var(--kit-color-danger))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-required",
+      "property": "color",
+      "value": "var(--kit-field-required-color, var(--kit-color-danger))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-surface",
+      "property": "background",
+      "value": "var( --kit-field-surface-background, var(--kit-field-control-background, var(--kit-color-surface)) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-surface",
+      "property": "border",
+      "value": "var(--kit-field-surface-border-width, 0) solid var(--kit-field-surface-border-color, transparent)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-surface",
+      "property": "border-radius",
+      "value": "var( --kit-field-surface-radius, var(--kit-field-control-radius, var(--kit-radius-md)) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-surface",
+      "property": "gap",
+      "value": "var(--kit-field-gap, 0.5rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field-surface",
+      "property": "padding",
+      "value": "var(--kit-field-surface-padding-block, var(--kit-field-control-padding-block, 0.625rem)) var(--kit-field-surface-padding-inline, var(--kit-field-control-padding-inline, 0.75rem))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field[data-disabled]",
+      "property": "opacity",
+      "value": "var(--kit-field-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-field[data-invalid] .kit-field-message",
+      "property": "color",
+      "value": "var(--kit-field-message-invalid-color, var(--kit-color-danger))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-native-select",
+      "property": "padding-inline-end",
+      "value": "calc( var(--kit-select-icon-inline-end, var(--kit-field-control-padding-inline, 0.75rem)) * 2 + var(--kit-select-icon-size, 1rem) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-field-value",
+      "property": "color",
+      "value": "var(--kit-field-control-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-field-value",
+      "property": "font-size",
+      "value": "var(--kit-field-control-font-size, 1rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-field-value",
+      "property": "font-weight",
+      "value": "var(--kit-field-control-font-weight, 400)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-field-value",
+      "property": "line-height",
+      "value": "var(--kit-field-control-line-height, 1.35)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-field-value-row",
+      "property": "padding-inline-end",
+      "value": "calc( var(--kit-select-icon-inline-end, var(--kit-field-control-padding-inline, 0.75rem)) + var(--kit-select-icon-size, 1rem) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-icon",
+      "property": "block-size",
+      "value": "var(--kit-select-icon-size, 1rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-icon",
+      "property": "color",
+      "value": "var(--kit-select-icon-color, currentColor)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-icon",
+      "property": "inline-size",
+      "value": "var(--kit-select-icon-size, 1rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-select-icon",
+      "property": "inset-inline-end",
+      "value": "var( --kit-select-icon-inline-end, var(--kit-field-control-padding-inline, 0.75rem) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-text-area",
+      "property": "min-block-size",
+      "value": "var(--kit-text-area-min-block-size, 7rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "--kit-menu-content-translate-x",
+      "value": "0"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "--kit-menu-content-translate-y",
+      "value": "0"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "background",
+      "value": "var(--kit-menu-content-background, var(--kit-color-surface-raised))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "border",
+      "value": "var(--kit-menu-content-border-width, var(--kit-border-width)) solid var(--kit-menu-content-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "border-radius",
+      "value": "var(--kit-menu-content-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "box-shadow",
+      "value": "var(--kit-menu-content-elevation, var(--kit-shadow-md))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "color",
+      "value": "var(--kit-menu-content-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "gap",
+      "value": "var(--kit-menu-content-gap, 0.125rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "max-inline-size",
+      "value": "var(--kit-menu-content-max-inline-size, calc(100vw - 1rem))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "min-inline-size",
+      "value": "var(--kit-menu-content-min-inline-size, 12rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "padding",
+      "value": "var(--kit-menu-content-padding-block, 0.25rem) var(--kit-menu-content-padding-inline, 0.25rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "transform",
+      "value": "translate( var(--kit-menu-content-translate-x), var(--kit-menu-content-translate-y) )"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "transition",
+      "value": "opacity var(--kit-menu-content-transition-duration, var(--kit-duration-fast)) var(--kit-menu-content-transition-timing, var(--kit-easing-standard)), transform var(--kit-menu-content-transition-duration, var(--kit-duration-fast)) var(--kit-menu-content-transition-timing, var(--kit-easing-standard))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content",
+      "property": "z-index",
+      "value": "var(--kit-menu-content-z-index, 50)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content[data-state=\"closed\"][data-side=\"bottom\"]",
+      "property": "--kit-menu-content-translate-y",
+      "value": "0.25rem"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content[data-state=\"closed\"][data-side=\"left\"]",
+      "property": "--kit-menu-content-translate-x",
+      "value": "-0.25rem"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content[data-state=\"closed\"][data-side=\"right\"]",
+      "property": "--kit-menu-content-translate-x",
+      "value": "0.25rem"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-content[data-state=\"closed\"][data-side=\"top\"]",
+      "property": "--kit-menu-content-translate-y",
+      "value": "-0.25rem"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "background",
+      "value": "var(--kit-menu-item-background, transparent)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "border-radius",
+      "value": "var(--kit-menu-item-radius, calc(var(--kit-radius-md) - 2px))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "color",
+      "value": "var(--kit-menu-item-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "gap",
+      "value": "var(--kit-menu-item-gap, 0.5rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "grid-template-columns",
+      "value": "minmax(0, 1fr) var(--kit-menu-item-indicator-inline-size, 1rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "min-height",
+      "value": "var(--kit-menu-item-min-height, 2.25rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item",
+      "property": "padding",
+      "value": "var(--kit-menu-item-padding-block, 0.5rem) var(--kit-menu-item-padding-inline, 0.625rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item-indicator",
+      "property": "inline-size",
+      "value": "var(--kit-menu-item-indicator-inline-size, 1rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item:disabled",
+      "property": "opacity",
+      "value": "var(--kit-menu-item-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-item[data-highlighted]",
+      "property": "background",
+      "value": "var(--kit-menu-item-background-highlighted, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "background",
+      "value": "var(--kit-menu-trigger-background, transparent)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-menu-trigger-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "border-radius",
+      "value": "var(--kit-menu-trigger-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "color",
+      "value": "var(--kit-menu-trigger-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "font-weight",
+      "value": "var(--kit-menu-trigger-font-weight, 600)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "min-height",
+      "value": "var(--kit-menu-trigger-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger",
+      "property": "padding",
+      "value": "var(--kit-menu-trigger-padding-block, 0.5rem) var(--kit-menu-trigger-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger:disabled",
+      "property": "opacity",
+      "value": "var(--kit-menu-trigger-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger:focus-visible",
+      "property": "outline",
+      "value": "2px solid var(--kit-menu-trigger-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "menu.css",
+      "selector": ".kit-menu-trigger:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-menu-trigger-background-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner",
+      "property": "block-size",
+      "value": "var(--kit-spinner-block-size, 1em)"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner",
+      "property": "color",
+      "value": "currentColor"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner",
+      "property": "inline-size",
+      "value": "var(--kit-spinner-inline-size, 1em)"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner-mark",
+      "property": "animation",
+      "value": "kit-spinner-rotate var(--kit-spinner-animation-duration, 900ms) linear infinite"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner-mark",
+      "property": "border",
+      "value": "var(--kit-spinner-border-width, 0.125em) solid var(--kit-spinner-track-color, color-mix(in srgb, currentColor 20%, transparent))"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner-mark",
+      "property": "border-block-start-color",
+      "value": "var(--kit-spinner-color, currentColor)"
+    },
+    {
+      "stylesheet": "spinner.css",
+      "selector": ".kit-spinner-mark",
+      "property": "border-radius",
+      "value": "var(--kit-radius-full)"
+    },
+    {
+      "stylesheet": "status.css",
+      "selector": ".kit-status",
+      "property": "color",
+      "value": "var(--kit-status-color, var(--kit-color-text))"
+    },
+    {
+      "stylesheet": "status.css",
+      "selector": ".kit-status",
+      "property": "font-size",
+      "value": "var(--kit-status-font-size, 1rem)"
+    },
+    {
+      "stylesheet": "status.css",
+      "selector": ".kit-status",
+      "property": "font-weight",
+      "value": "var(--kit-status-font-weight, 400)"
+    },
+    {
+      "stylesheet": "status.css",
+      "selector": ".kit-status",
+      "property": "line-height",
+      "value": "var(--kit-status-line-height, 1.4)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs",
+      "property": "gap",
+      "value": "var(--kit-tabs-gap, 1rem)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-list",
+      "property": "gap",
+      "value": "var(--kit-tabs-list-gap, 0.25rem)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-panel",
+      "property": "background",
+      "value": "var(--kit-tabs-panel-background, transparent)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-panel",
+      "property": "color",
+      "value": "var(--kit-tabs-panel-color, inherit)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-panel",
+      "property": "padding",
+      "value": "var(--kit-tabs-panel-padding-block, 0.75rem) var(--kit-tabs-panel-padding-inline, 0)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-panel:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-tabs-panel-focus-outline-width, 2px) solid var(--kit-tabs-panel-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-panel:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-tabs-panel-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "background",
+      "value": "var(--kit-tabs-trigger-background, transparent)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-tabs-trigger-border-color, var(--kit-color-border))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "border-radius",
+      "value": "var(--kit-tabs-trigger-radius, var(--kit-radius-md))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "color",
+      "value": "var(--kit-tabs-trigger-color-inactive, var(--kit-color-text-secondary))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "font-weight",
+      "value": "var(--kit-tabs-trigger-font-weight, 600)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "min-height",
+      "value": "var(--kit-tabs-trigger-min-height, 2.5rem)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger",
+      "property": "padding",
+      "value": "var(--kit-tabs-trigger-padding-block, 0.5rem) var(--kit-tabs-trigger-padding-inline, 0.75rem)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger:disabled",
+      "property": "opacity",
+      "value": "var(--kit-tabs-trigger-disabled-opacity, var(--kit-disabled-opacity))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger:focus-visible",
+      "property": "outline",
+      "value": "var(--kit-tabs-trigger-focus-outline-width, 2px) solid var(--kit-tabs-trigger-focus-ring, var(--kit-focus-ring))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger:focus-visible",
+      "property": "outline-offset",
+      "value": "var(--kit-tabs-trigger-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger:hover:not(:disabled)",
+      "property": "background",
+      "value": "var(--kit-tabs-trigger-background-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger[data-state=\"active\"]",
+      "property": "background",
+      "value": "var(--kit-tabs-trigger-background-active, var(--kit-color-surface))"
+    },
+    {
+      "stylesheet": "tabs.css",
+      "selector": ".kit-tabs-trigger[data-state=\"active\"]",
+      "property": "color",
+      "value": "var(--kit-tabs-trigger-color, var(--kit-color-text))"
+    }
+  ]
+}

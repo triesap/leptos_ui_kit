@@ -8,7 +8,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--kit-collapsible-trigger-border-color, var(--kit-color-border));
+  border: var(--kit-border-width) solid
+    var(--kit-collapsible-trigger-border-color, var(--kit-color-border));
   border-radius: var(--kit-collapsible-trigger-radius, var(--kit-radius-md));
   min-height: var(--kit-collapsible-trigger-min-height, 2.5rem);
   padding:
