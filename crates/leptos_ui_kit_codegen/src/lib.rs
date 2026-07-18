@@ -1451,7 +1451,35 @@ pub fn reconcile_managed_css_blocks_at_path(
         }
     }
 
-    validate_non_foundation_css_order(logical_path, &prepared, &ranges, &unique_dependencies)?;
+    validate_css_operation_order(logical_path, &prepared, &unique_dependencies)?;
+
+    if requires_managed_css_reorder(&prepared, &ranges, &unique_dependencies) {
+        let Some(anchor) = ranges
+            .iter()
+            .filter(|(block_id, _)| prepared.contains_key(*block_id))
+            .map(|(_, range)| range.start)
+            .min()
+        else {
+            return unsafe_patch(
+                logical_path,
+                "managed CSS dependency reorder has no existing anchor",
+            );
+        };
+        let mut ordered = String::new();
+        for operation in operations {
+            ordered.push_str(&prepared[&operation.block_id].2);
+        }
+
+        let mut edits = ranges
+            .iter()
+            .filter(|(block_id, _)| prepared.contains_key(*block_id))
+            .map(|(_, range)| CssEdit::replacement(range.start, range.end, String::new()))
+            .collect::<Vec<_>>();
+        edits.push(CssEdit::insertion(anchor, ordered));
+        let output = apply_css_edits(existing, logical_path, edits)?;
+        validate_reconciled_css_order(&output, logical_path, &unique_dependencies)?;
+        return Ok(output);
+    }
 
     let mut edits = Vec::new();
     let mut missing_components = Vec::new();
@@ -1517,18 +1545,7 @@ pub fn reconcile_managed_css_blocks_at_path(
         edits.push(CssEdit::insertion(at, replacement));
     }
 
-    edits.sort_by_key(|edit| (edit.start, usize::from(edit.start != edit.end)));
-    let mut output = String::with_capacity(existing.len());
-    let mut cursor = 0;
-    for edit in edits {
-        if edit.start < cursor || edit.end < edit.start || edit.end > existing.len() {
-            return unsafe_patch(logical_path, "managed CSS edit ranges overlap");
-        }
-        output.push_str(&existing[cursor..edit.start]);
-        output.push_str(&edit.replacement);
-        cursor = edit.end;
-    }
-    output.push_str(&existing[cursor..]);
+    let mut output = apply_css_edits(existing, logical_path, edits)?;
 
     for replacement in missing_components {
         output = append_managed_css_block(output, &replacement);
@@ -1630,57 +1647,68 @@ fn validate_managed_css_ownership_at_path(
     Ok(tracked)
 }
 
-fn validate_non_foundation_css_order(
+fn validate_css_operation_order(
     logical_path: &str,
     prepared: &BTreeMap<String, (usize, &ManagedCssOperation, String)>,
-    ranges: &BTreeMap<String, ManagedCssBlockRange>,
     dependencies: &BTreeSet<ManagedCssDependency>,
 ) -> Result<(), CodegenError> {
     for dependency in dependencies {
-        let (dependency_order, dependency_operation, _) =
-            &prepared[&dependency.dependency_block_id];
+        let (dependency_order, _, _) = &prepared[&dependency.dependency_block_id];
         let (dependent_order, _, _) = &prepared[&dependency.dependent_block_id];
-        if dependency_operation.role == ManagedCssBlockRole::Foundation {
-            continue;
+        if dependency_order > dependent_order {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS operations are not dependency ordered: {} must precede {}",
+                    dependency.dependency_block_id, dependency.dependent_block_id
+                ),
+            );
         }
+    }
+    Ok(())
+}
 
+fn requires_managed_css_reorder(
+    prepared: &BTreeMap<String, (usize, &ManagedCssOperation, String)>,
+    ranges: &BTreeMap<String, ManagedCssBlockRange>,
+    dependencies: &BTreeSet<ManagedCssDependency>,
+) -> bool {
+    dependencies.iter().any(|dependency| {
+        let (_, dependency_operation, _) = &prepared[&dependency.dependency_block_id];
+        if dependency_operation.role == ManagedCssBlockRole::Foundation {
+            return false;
+        }
         match (
             ranges.get(&dependency.dependency_block_id),
             ranges.get(&dependency.dependent_block_id),
         ) {
-            (Some(dependency_range), Some(dependent_range))
-                if dependency_range.start > dependent_range.start =>
-            {
-                return unsafe_patch(
-                    logical_path,
-                    format!(
-                        "managed CSS dependency {} must precede {}",
-                        dependency.dependency_block_id, dependency.dependent_block_id
-                    ),
-                );
+            (Some(dependency_range), Some(dependent_range)) => {
+                dependency_range.start > dependent_range.start
             }
-            (None, Some(_)) => {
-                return unsafe_patch(
-                    logical_path,
-                    format!(
-                        "missing managed CSS dependency {} cannot be appended after existing {}",
-                        dependency.dependency_block_id, dependency.dependent_block_id
-                    ),
-                );
-            }
-            (None, None) if dependency_order > dependent_order => {
-                return unsafe_patch(
-                    logical_path,
-                    format!(
-                        "managed CSS operations are not dependency ordered: {} must precede {}",
-                        dependency.dependency_block_id, dependency.dependent_block_id
-                    ),
-                );
-            }
-            _ => {}
+            (None, Some(_)) => true,
+            _ => false,
         }
+    })
+}
+
+fn apply_css_edits(
+    existing: &str,
+    logical_path: &str,
+    mut edits: Vec<CssEdit>,
+) -> Result<String, CodegenError> {
+    edits.sort_by_key(|edit| (edit.start, usize::from(edit.start != edit.end)));
+    let mut output = String::with_capacity(existing.len());
+    let mut cursor = 0;
+    for edit in edits {
+        if edit.start < cursor || edit.end < edit.start || edit.end > existing.len() {
+            return unsafe_patch(logical_path, "managed CSS edit ranges overlap");
+        }
+        output.push_str(&existing[cursor..edit.start]);
+        output.push_str(&edit.replacement);
+        cursor = edit.end;
     }
-    Ok(())
+    output.push_str(&existing[cursor..]);
+    Ok(output)
 }
 
 fn validate_reconciled_css_order(
@@ -3732,6 +3760,33 @@ mod tests {
         remove_tokens_from_install(root);
         replace_css_block_and_track_baseline(root, "button", PINNED_BUTTON_CSS);
         replace_css_block_and_track_baseline(root, "spinner", PINNED_SPINNER_CSS);
+        restore_pinned_button_before_spinner_order(root);
+    }
+
+    fn restore_pinned_button_before_spinner_order(root: &Path) {
+        let config = parse_kit_json_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+        )
+        .expect("parse config");
+        let css_path = root.join(&config.styles.css);
+        let css = fs::read_to_string(&css_path).expect("read CSS");
+        let button = extract_managed_css_block_at_path(&css, &config.styles.css, "button")
+            .expect("extract button")
+            .expect("button block");
+        let spinner = extract_managed_css_block_at_path(&css, &config.styles.css, "spinner")
+            .expect("extract spinner")
+            .expect("spinner block");
+        let earliest = css
+            .find(&button)
+            .expect("button range")
+            .min(css.find(&spinner).expect("spinner range"));
+        let without_blocks = css.replacen(&button, "", 1).replacen(&spinner, "", 1);
+        let mut legacy = String::with_capacity(css.len());
+        legacy.push_str(&without_blocks[..earliest]);
+        legacy.push_str(&button);
+        legacy.push_str(&spinner);
+        legacy.push_str(&without_blocks[earliest..]);
+        fs::write(css_path, legacy).expect("restore legacy dependency order");
     }
 
     fn remove_tokens_from_install(root: &Path) {
@@ -4417,7 +4472,7 @@ mod tests {
     }
 
     #[test]
-    fn css_batch_rejects_non_foundation_dependency_inversions() {
+    fn css_batch_reorders_verified_non_foundation_dependency_inversions() {
         let spinner = managed_css_operation(
             "spinner",
             ManagedCssBlockRole::Component,
@@ -4432,18 +4487,33 @@ mod tests {
             "styles/kit.css",
             &[(&spinner, &spinner.generated), (&button, &button.generated)],
         );
-        let existing = format!("{}{}", button.generated, spinner.generated);
+        let existing = format!(
+            "{}/* application-owned gap */\n{}:root {{ --kit-button-gap: 0.75rem; }}\n",
+            button.generated, spinner.generated
+        );
 
-        let error = reconcile_managed_css_blocks_at_path(
+        let reconciled = reconcile_managed_css_blocks_at_path(
             &existing,
             "styles/kit.css",
             &lock,
             &[spinner, button],
             &[managed_css_dependency("spinner", "button")],
         )
-        .expect_err("inverted dependency should fail");
+        .expect("inverted verified dependency should be reordered");
+        let ranges = inspect_managed_css_blocks_at_path(&reconciled, "styles/kit.css")
+            .expect("inspect reordered CSS");
 
-        assert_unsafe_patch_path(error, "styles/kit.css");
+        assert!(ranges["spinner"].start < ranges["button"].start);
+        assert_eq!(
+            unmanaged_css(&reconciled, "styles/kit.css"),
+            unmanaged_css(&existing, "styles/kit.css")
+        );
+        assert!(
+            ranges["button"].end
+                < reconciled
+                    .find("--kit-button-gap: 0.75rem")
+                    .expect("application override")
+        );
     }
 
     #[test]
@@ -4488,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn css_batch_rejects_appending_missing_dependency_after_existing_dependent() {
+    fn css_batch_inserts_missing_dependency_before_existing_dependent() {
         let spinner = managed_css_operation(
             "spinner",
             ManagedCssBlockRole::Component,
@@ -4502,16 +4572,18 @@ mod tests {
         let lock = tracked_css_lock("styles/kit.css", &[(&button, &button.generated)]);
         let existing = button.generated.clone();
 
-        let error = reconcile_managed_css_blocks_at_path(
+        let reconciled = reconcile_managed_css_blocks_at_path(
             &existing,
             "styles/kit.css",
             &lock,
             &[spinner, button],
             &[managed_css_dependency("spinner", "button")],
         )
-        .expect_err("missing dependency cannot be appended late");
+        .expect("missing dependency should be inserted before dependent");
+        let ranges = inspect_managed_css_blocks_at_path(&reconciled, "styles/kit.css")
+            .expect("inspect migrated CSS");
 
-        assert_unsafe_patch_path(error, "styles/kit.css");
+        assert!(ranges["spinner"].start < ranges["button"].start);
     }
 
     #[test]

@@ -18,6 +18,8 @@ Semantic Versioning.
 - Reconcile each configured stylesheet atomically so the `tokens` foundation
   precedes its generated dependents while later application CSS keeps cascade
   precedence.
+- Reorder untouched lock-owned component blocks when a registry upgrade adds a
+  dependency edge, while continuing to reject locally edited managed blocks.
 - Preserve explicit `--kit-menu-item-radius` values verbatim and apply derived
   radius arithmetic only to the semantic fallback.
 - Route collapsible, dialog, menu, and tabs trigger border widths through the
