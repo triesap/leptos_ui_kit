@@ -3,7 +3,7 @@
 //! Code generation and install-planning layer.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     fs::OpenOptions,
     io::Write,
@@ -430,6 +430,32 @@ pub struct InstalledStyleBlock {
     pub generated_hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedCssBlockRole {
+    Foundation,
+    Component,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedCssOperation {
+    pub item_id: String,
+    pub block_id: String,
+    pub role: ManagedCssBlockRole,
+    pub generated: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManagedCssDependency {
+    pub dependency_block_id: String,
+    pub dependent_block_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedCssBlockRange {
+    pub start: usize,
+    pub end: usize,
+}
+
 pub fn install_lock_path(_config: &KitConfig) -> String {
     DEFAULT_KIT_LOCK_PATH.to_owned()
 }
@@ -641,9 +667,12 @@ fn plan_sync_from_config(
     let config_hash = hash_bytes(config_content.as_bytes());
     let lock_path = install_lock_path(&config);
     let mut lock = load_or_empty_lock(project_root, &lock_path, config_hash.clone())?;
+    let prior_lock = lock.clone();
     lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
     let mut cargo_plan = Vec::new();
+    let mut css_operations = Vec::new();
+    let css_dependencies = managed_css_dependencies(&resolved_items);
 
     for item in &resolved_items {
         let item_id = plan_built_in_item(
@@ -653,10 +682,21 @@ fn plan_sync_from_config(
             &mut lock,
             &config,
             &item,
+            &mut css_operations,
         )?;
         item_ids.push(item_id);
         merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
     }
+
+    plan_managed_stylesheet_batch(
+        project_root,
+        &mut files,
+        &mut changes,
+        &prior_lock,
+        &config,
+        &css_operations,
+        &css_dependencies,
+    )?;
 
     lock.validate_at_path(Path::new(&lock_path))?;
     let lock_json = lock_to_json_at_path(&lock, Path::new(&lock_path))?;
@@ -699,6 +739,44 @@ fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) 
     plan.sort();
 }
 
+fn managed_css_dependencies(
+    items: &[leptos_ui_kit_registry::ResolvedRegistryItem],
+) -> Vec<ManagedCssDependency> {
+    let style_ids_by_item = items
+        .iter()
+        .map(|item| {
+            (
+                item.item.name.as_str(),
+                item.targets
+                    .style_blocks
+                    .iter()
+                    .map(|style| style.id.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = BTreeSet::new();
+
+    for item in items {
+        let dependent_ids = &style_ids_by_item[item.item.name.as_str()];
+        for dependency_name in &item.item.registry_dependencies {
+            let Some(dependency_ids) = style_ids_by_item.get(dependency_name.as_str()) else {
+                continue;
+            };
+            for dependency_block_id in dependency_ids {
+                for dependent_block_id in dependent_ids {
+                    dependencies.insert(ManagedCssDependency {
+                        dependency_block_id: (*dependency_block_id).to_owned(),
+                        dependent_block_id: (*dependent_block_id).to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    dependencies.into_iter().collect()
+}
+
 fn plan_built_in_item(
     project_root: &Path,
     files: &mut Vec<PlannedFile>,
@@ -706,6 +784,7 @@ fn plan_built_in_item(
     lock: &mut InstallLock,
     config: &KitConfig,
     item: &leptos_ui_kit_registry::ResolvedRegistryItem,
+    css_operations: &mut Vec<ManagedCssOperation>,
 ) -> Result<String, CodegenError> {
     let item_id = built_in_item_id(&item.item.name);
     let mut installed_files = Vec::new();
@@ -766,25 +845,17 @@ fn plan_built_in_item(
         let generated = read_built_in_registry_source(&style.source)?;
         let css_path = config.styles.css.as_str();
         let generated_hash = hash_bytes(generated.as_bytes());
-        let tracked_hash = tracked_style_generated_hash(lock, &item_id, &style.id)?;
-        let existing_css =
-            planned_or_existing_content(files, project_root, css_path)?.unwrap_or_default();
-        let patched_css = patch_css_block(
-            &existing_css,
-            &style.id,
-            &generated,
-            tracked_hash.as_deref(),
-        )?;
-
-        upsert_planned_file(
-            project_root,
-            files,
-            changes,
-            css_path,
-            patched_css,
-            ChangeKind::UpdateCssBlock,
-            Some(&item_id),
-        )?;
+        css_operations.push(ManagedCssOperation {
+            item_id: item_id.clone(),
+            block_id: style.id.clone(),
+            role: match item.item.kind {
+                leptos_ui_kit_registry::RegistryItemKind::Foundation => {
+                    ManagedCssBlockRole::Foundation
+                }
+                leptos_ui_kit_registry::RegistryItemKind::Ui => ManagedCssBlockRole::Component,
+            },
+            generated,
+        });
 
         installed_style_blocks.push(InstalledStyleBlock {
             css_path: css_path.to_owned(),
@@ -808,6 +879,40 @@ fn plan_built_in_item(
         },
     );
     Ok(item_id)
+}
+
+fn plan_managed_stylesheet_batch(
+    project_root: &Path,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    prior_lock: &InstallLock,
+    config: &KitConfig,
+    operations: &[ManagedCssOperation],
+    dependencies: &[ManagedCssDependency],
+) -> Result<(), CodegenError> {
+    if operations.is_empty() {
+        return Ok(());
+    }
+
+    let css_path = config.styles.css.as_str();
+    let existing = planned_or_existing_content(files, project_root, css_path)?.unwrap_or_default();
+    let reconciled = reconcile_managed_css_blocks_at_path(
+        &existing,
+        css_path,
+        prior_lock,
+        operations,
+        dependencies,
+    )?;
+
+    upsert_preloaded_planned_file(
+        files,
+        changes,
+        css_path,
+        &existing,
+        reconciled,
+        ChangeKind::UpdateCssBlock,
+        None,
+    )
 }
 
 fn apply_planned_files(
@@ -1038,9 +1143,25 @@ pub fn patch_css_block(
     block: &str,
     tracked_generated_hash: Option<&str>,
 ) -> Result<String, CodegenError> {
-    validate_css_block_id(block_id)?;
-    let replacement = normalize_managed_css_block(block_id, block)?;
-    let existing_block = find_managed_css_block(existing, block_id)?;
+    patch_css_block_at_path(
+        existing,
+        "styles/kit.css",
+        block_id,
+        block,
+        tracked_generated_hash,
+    )
+}
+
+pub fn patch_css_block_at_path(
+    existing: &str,
+    logical_path: &str,
+    block_id: &str,
+    block: &str,
+    tracked_generated_hash: Option<&str>,
+) -> Result<String, CodegenError> {
+    validate_css_block_id_at_path(block_id, logical_path)?;
+    let replacement = normalize_managed_css_block_at_path(block_id, block, logical_path)?;
+    let existing_block = find_managed_css_block_at_path(existing, block_id, logical_path)?;
 
     match existing_block {
         Some(range) => {
@@ -1060,26 +1181,16 @@ pub fn patch_css_block(
                     Ok(output)
                 }
                 Some(_) => unsafe_patch(
-                    "styles/kit.css",
+                    logical_path,
                     format!("managed CSS block {block_id} has local edits"),
                 ),
                 None => unsafe_patch(
-                    "styles/kit.css",
+                    logical_path,
                     format!("managed CSS block {block_id} already exists but is not tracked"),
                 ),
             }
         }
-        None => {
-            let mut output = existing.to_owned();
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
-            }
-            if !output.trim().is_empty() {
-                output.push('\n');
-            }
-            output.push_str(&replacement);
-            Ok(output)
-        }
+        None => Ok(append_managed_css_block(existing.to_owned(), &replacement)),
     }
 }
 
@@ -1087,8 +1198,717 @@ pub fn extract_managed_css_block(
     existing: &str,
     block_id: &str,
 ) -> Result<Option<String>, CodegenError> {
-    validate_css_block_id(block_id)?;
-    Ok(find_managed_css_block(existing, block_id)?.map(|range| existing[range].to_owned()))
+    extract_managed_css_block_at_path(existing, "styles/kit.css", block_id)
+}
+
+pub fn extract_managed_css_block_at_path(
+    existing: &str,
+    logical_path: &str,
+    block_id: &str,
+) -> Result<Option<String>, CodegenError> {
+    validate_css_block_id_at_path(block_id, logical_path)?;
+    Ok(
+        find_managed_css_block_at_path(existing, block_id, logical_path)?
+            .map(|range| existing[range].to_owned()),
+    )
+}
+
+pub fn inspect_managed_css_blocks_at_path(
+    existing: &str,
+    logical_path: &str,
+) -> Result<BTreeMap<String, ManagedCssBlockRange>, CodegenError> {
+    let marker_prefix = "/* leptos-ui-kit:";
+    let mut blocks = BTreeMap::new();
+    let mut open: Option<(String, usize)> = None;
+    let mut offset = 0;
+
+    while let Some(relative_start) = existing[offset..].find(marker_prefix) {
+        let start = offset + relative_start;
+        let Some(relative_end) = existing[start..].find("*/") else {
+            return unsafe_patch(logical_path, "unterminated managed CSS marker");
+        };
+        let marker_end = start + relative_end + 2;
+        let marker = &existing[start..marker_end];
+        let Some(body) = marker
+            .strip_prefix(marker_prefix)
+            .and_then(|marker| marker.strip_suffix(" */"))
+        else {
+            return unsafe_patch(
+                logical_path,
+                format!("malformed managed CSS marker `{marker}`"),
+            );
+        };
+        let Some((kind, block_id)) = body.split_once(' ') else {
+            return unsafe_patch(
+                logical_path,
+                format!("malformed managed CSS marker `{marker}`"),
+            );
+        };
+        if block_id.contains(' ') {
+            return unsafe_patch(
+                logical_path,
+                format!("malformed managed CSS marker `{marker}`"),
+            );
+        }
+        validate_css_block_id_at_path(block_id, logical_path)?;
+
+        match kind {
+            "start" => {
+                if let Some((open_id, _)) = &open {
+                    return unsafe_patch(
+                        logical_path,
+                        format!(
+                            "managed CSS blocks {open_id} and {block_id} overlap or are nested"
+                        ),
+                    );
+                }
+                if blocks.contains_key(block_id) {
+                    return unsafe_patch(
+                        logical_path,
+                        format!("managed CSS block {block_id} markers are ambiguous"),
+                    );
+                }
+                open = Some((block_id.to_owned(), start));
+            }
+            "end" => {
+                let Some((open_id, block_start)) = open.take() else {
+                    return unsafe_patch(
+                        logical_path,
+                        format!("managed CSS block {block_id} markers are reversed"),
+                    );
+                };
+                if open_id != block_id {
+                    return unsafe_patch(
+                        logical_path,
+                        format!(
+                            "managed CSS blocks {open_id} and {block_id} overlap or are crossed"
+                        ),
+                    );
+                }
+                let mut block_end = marker_end;
+                if existing[block_end..].starts_with('\n') {
+                    block_end += 1;
+                }
+                blocks.insert(
+                    block_id.to_owned(),
+                    ManagedCssBlockRange {
+                        start: block_start,
+                        end: block_end,
+                    },
+                );
+            }
+            _ => {
+                return unsafe_patch(
+                    logical_path,
+                    format!("malformed managed CSS marker `{marker}`"),
+                );
+            }
+        }
+
+        offset = marker_end;
+    }
+
+    if let Some((block_id, _)) = open {
+        return unsafe_patch(
+            logical_path,
+            format!("managed CSS block {block_id} is missing its end marker"),
+        );
+    }
+
+    Ok(blocks)
+}
+
+pub fn reconcile_managed_css_blocks_at_path(
+    existing: &str,
+    logical_path: &str,
+    prior_lock: &InstallLock,
+    operations: &[ManagedCssOperation],
+    dependencies: &[ManagedCssDependency],
+) -> Result<String, CodegenError> {
+    if operations.is_empty() {
+        return Ok(existing.to_owned());
+    }
+
+    let mut prepared = BTreeMap::new();
+    let mut foundation_id = None;
+    for (order, operation) in operations.iter().enumerate() {
+        validate_css_block_id_at_path(&operation.block_id, logical_path)?;
+        if operation.item_id.trim().is_empty() {
+            return unsafe_patch(
+                logical_path,
+                "managed CSS operation has an empty item owner",
+            );
+        }
+        let replacement = normalize_managed_css_block_at_path(
+            &operation.block_id,
+            &operation.generated,
+            logical_path,
+        )?;
+        let replacement_ranges = inspect_managed_css_blocks_at_path(&replacement, logical_path)?;
+        if replacement_ranges.len() != 1
+            || replacement_ranges.get(&operation.block_id)
+                != Some(&ManagedCssBlockRange {
+                    start: 0,
+                    end: replacement.len(),
+                })
+        {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "generated managed CSS block {} must contain only its managed range",
+                    operation.block_id
+                ),
+            );
+        }
+        if prepared
+            .insert(operation.block_id.clone(), (order, operation, replacement))
+            .is_some()
+        {
+            return unsafe_patch(
+                logical_path,
+                format!("duplicate managed CSS operation for {}", operation.block_id),
+            );
+        }
+        if operation.role == ManagedCssBlockRole::Foundation
+            && foundation_id.replace(operation.block_id.clone()).is_some()
+        {
+            return unsafe_patch(
+                logical_path,
+                "multiple foundation CSS operations are unsupported",
+            );
+        }
+    }
+
+    let mut unique_dependencies = BTreeSet::new();
+    for dependency in dependencies {
+        if dependency.dependency_block_id == dependency.dependent_block_id {
+            return unsafe_patch(
+                logical_path,
+                "managed CSS dependency cannot reference itself",
+            );
+        }
+        if !prepared.contains_key(&dependency.dependency_block_id)
+            || !prepared.contains_key(&dependency.dependent_block_id)
+        {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS dependency {} -> {} references an unknown operation",
+                    dependency.dependency_block_id, dependency.dependent_block_id
+                ),
+            );
+        }
+        if !unique_dependencies.insert(dependency.clone()) {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "duplicate managed CSS dependency {} -> {}",
+                    dependency.dependency_block_id, dependency.dependent_block_id
+                ),
+            );
+        }
+    }
+
+    let ranges = inspect_managed_css_blocks_at_path(existing, logical_path)?;
+    let tracked = validate_managed_css_ownership_at_path(prior_lock, logical_path)?;
+
+    for (block_id, range) in &ranges {
+        let Some(tracked_block) = tracked.get(block_id) else {
+            return unsafe_patch(
+                logical_path,
+                format!("managed CSS block {block_id} exists but is not tracked"),
+            );
+        };
+        let current = &existing[range.start..range.end];
+        let generated_matches = prepared
+            .get(block_id)
+            .is_some_and(|(_, _, replacement)| current == replacement);
+        if !generated_matches && hash_bytes(current.as_bytes()) != tracked_block.generated_hash {
+            return unsafe_patch(
+                logical_path,
+                format!("managed CSS block {block_id} has local edits"),
+            );
+        }
+        if let Some((_, operation, _)) = prepared.get(block_id)
+            && operation.item_id != tracked_block.item_id
+        {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS block {block_id} is tracked by {} instead of {}",
+                    tracked_block.item_id, operation.item_id
+                ),
+            );
+        }
+    }
+
+    for block_id in tracked.keys() {
+        if !ranges.contains_key(block_id) {
+            return unsafe_patch(
+                logical_path,
+                format!("tracked managed CSS block {block_id} is missing"),
+            );
+        }
+    }
+
+    validate_non_foundation_css_order(logical_path, &prepared, &ranges, &unique_dependencies)?;
+
+    let mut edits = Vec::new();
+    let mut missing_components = Vec::new();
+    let mut foundation_insertion = None;
+    let mut relocating_foundation = None;
+
+    if let Some(block_id) = foundation_id.as_deref() {
+        let (_, _, replacement) = &prepared[block_id];
+        let earliest_dependent = unique_dependencies
+            .iter()
+            .filter(|dependency| dependency.dependency_block_id == block_id)
+            .filter_map(|dependency| ranges.get(&dependency.dependent_block_id))
+            .map(|range| range.start)
+            .min();
+
+        match ranges.get(block_id) {
+            Some(range) => {
+                let canonical_anchor = match earliest_dependent {
+                    Some(anchor) if range.start > anchor => Some(anchor),
+                    Some(_) => None,
+                    None => Some(legal_css_preamble_end_without_range(
+                        existing,
+                        range,
+                        logical_path,
+                    )?),
+                };
+                if canonical_anchor.is_some_and(|anchor| anchor != range.start) {
+                    foundation_insertion = Some((
+                        canonical_anchor.expect("checked anchor"),
+                        replacement.clone(),
+                    ));
+                    relocating_foundation = Some(block_id);
+                }
+            }
+            None => {
+                let anchor = match earliest_dependent {
+                    Some(anchor) => anchor,
+                    None => legal_css_preamble_end(existing, logical_path)?,
+                };
+                foundation_insertion = Some((anchor, replacement.clone()));
+            }
+        }
+    }
+
+    for operation in operations {
+        let (_, _, replacement) = &prepared[&operation.block_id];
+        match ranges.get(&operation.block_id) {
+            Some(range) if relocating_foundation == Some(operation.block_id.as_str()) => {
+                edits.push(CssEdit::replacement(range.start, range.end, String::new()));
+            }
+            Some(range) => edits.push(CssEdit::replacement(
+                range.start,
+                range.end,
+                replacement.clone(),
+            )),
+            None if operation.role == ManagedCssBlockRole::Component => {
+                missing_components.push(replacement.clone());
+            }
+            None => {}
+        }
+    }
+    if let Some((at, replacement)) = foundation_insertion {
+        edits.push(CssEdit::insertion(at, replacement));
+    }
+
+    edits.sort_by_key(|edit| (edit.start, usize::from(edit.start != edit.end)));
+    let mut output = String::with_capacity(existing.len());
+    let mut cursor = 0;
+    for edit in edits {
+        if edit.start < cursor || edit.end < edit.start || edit.end > existing.len() {
+            return unsafe_patch(logical_path, "managed CSS edit ranges overlap");
+        }
+        output.push_str(&existing[cursor..edit.start]);
+        output.push_str(&edit.replacement);
+        cursor = edit.end;
+    }
+    output.push_str(&existing[cursor..]);
+
+    for replacement in missing_components {
+        output = append_managed_css_block(output, &replacement);
+    }
+
+    validate_reconciled_css_order(&output, logical_path, &unique_dependencies)?;
+    Ok(output)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedManagedCssBlock {
+    item_id: String,
+    generated_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CssEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+impl CssEdit {
+    fn replacement(start: usize, end: usize, replacement: String) -> Self {
+        Self {
+            start,
+            end,
+            replacement,
+        }
+    }
+
+    fn insertion(at: usize, replacement: String) -> Self {
+        Self::replacement(at, at, replacement)
+    }
+}
+
+fn validate_managed_css_ownership_at_path(
+    lock: &InstallLock,
+    logical_path: &str,
+) -> Result<BTreeMap<String, TrackedManagedCssBlock>, CodegenError> {
+    let mut tracked = BTreeMap::new();
+
+    for (item_key, item) in &lock.items {
+        for block in &item.style_blocks {
+            if block.css_path != logical_path {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "lock tracks managed CSS block {} at {} instead of {logical_path}",
+                        block.block_id, block.css_path
+                    ),
+                );
+            }
+            if lock.style_blocks_by_id.get(&block.block_id) != Some(item_key) {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS block {} ownership does not match its lock item",
+                        block.block_id
+                    ),
+                );
+            }
+            if tracked
+                .insert(
+                    block.block_id.clone(),
+                    TrackedManagedCssBlock {
+                        item_id: item_key.clone(),
+                        generated_hash: block.generated_hash.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS block {} has duplicate lock records",
+                        block.block_id
+                    ),
+                );
+            }
+        }
+    }
+
+    for (block_id, item_id) in &lock.style_blocks_by_id {
+        let Some(record) = tracked.get(block_id) else {
+            return unsafe_patch(
+                logical_path,
+                format!("managed CSS block {block_id} has no owning lock record"),
+            );
+        };
+        if &record.item_id != item_id {
+            return unsafe_patch(
+                logical_path,
+                format!("managed CSS block {block_id} has conflicting lock owners"),
+            );
+        }
+    }
+
+    Ok(tracked)
+}
+
+fn validate_non_foundation_css_order(
+    logical_path: &str,
+    prepared: &BTreeMap<String, (usize, &ManagedCssOperation, String)>,
+    ranges: &BTreeMap<String, ManagedCssBlockRange>,
+    dependencies: &BTreeSet<ManagedCssDependency>,
+) -> Result<(), CodegenError> {
+    for dependency in dependencies {
+        let (dependency_order, dependency_operation, _) =
+            &prepared[&dependency.dependency_block_id];
+        let (dependent_order, _, _) = &prepared[&dependency.dependent_block_id];
+        if dependency_operation.role == ManagedCssBlockRole::Foundation {
+            continue;
+        }
+
+        match (
+            ranges.get(&dependency.dependency_block_id),
+            ranges.get(&dependency.dependent_block_id),
+        ) {
+            (Some(dependency_range), Some(dependent_range))
+                if dependency_range.start > dependent_range.start =>
+            {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS dependency {} must precede {}",
+                        dependency.dependency_block_id, dependency.dependent_block_id
+                    ),
+                );
+            }
+            (None, Some(_)) => {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "missing managed CSS dependency {} cannot be appended after existing {}",
+                        dependency.dependency_block_id, dependency.dependent_block_id
+                    ),
+                );
+            }
+            (None, None) if dependency_order > dependent_order => {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS operations are not dependency ordered: {} must precede {}",
+                        dependency.dependency_block_id, dependency.dependent_block_id
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_reconciled_css_order(
+    reconciled: &str,
+    logical_path: &str,
+    dependencies: &BTreeSet<ManagedCssDependency>,
+) -> Result<(), CodegenError> {
+    let ranges = inspect_managed_css_blocks_at_path(reconciled, logical_path)?;
+    for dependency in dependencies {
+        let Some(dependency_range) = ranges.get(&dependency.dependency_block_id) else {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS block {} is missing",
+                    dependency.dependency_block_id
+                ),
+            );
+        };
+        let Some(dependent_range) = ranges.get(&dependency.dependent_block_id) else {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS block {} is missing",
+                    dependency.dependent_block_id
+                ),
+            );
+        };
+        if dependency_range.start > dependent_range.start {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS dependency {} must precede {}",
+                    dependency.dependency_block_id, dependency.dependent_block_id
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn append_managed_css_block(mut existing: String, replacement: &str) -> String {
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    if !existing.trim().is_empty() {
+        existing.push('\n');
+    }
+    existing.push_str(replacement);
+    existing
+}
+
+fn legal_css_preamble_end(existing: &str, logical_path: &str) -> Result<usize, CodegenError> {
+    let mut cursor = usize::from(existing.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
+
+    loop {
+        cursor = consume_css_preamble_trivia(existing, cursor, logical_path)?;
+        let Some(keyword) = ["@charset", "@import", "@namespace"]
+            .into_iter()
+            .find(|keyword| css_keyword_at(existing, cursor, keyword))
+        else {
+            return Ok(cursor);
+        };
+        cursor =
+            scan_css_preamble_statement(existing, cursor + keyword.len(), keyword, logical_path)?;
+    }
+}
+
+fn legal_css_preamble_end_without_range(
+    existing: &str,
+    range: &ManagedCssBlockRange,
+    logical_path: &str,
+) -> Result<usize, CodegenError> {
+    let mut without_foundation = String::with_capacity(existing.len() - (range.end - range.start));
+    without_foundation.push_str(&existing[..range.start]);
+    without_foundation.push_str(&existing[range.end..]);
+    let anchor = legal_css_preamble_end(&without_foundation, logical_path)?;
+
+    Ok(if anchor <= range.start {
+        anchor
+    } else {
+        anchor + (range.end - range.start)
+    })
+}
+
+fn consume_css_preamble_trivia(
+    existing: &str,
+    mut cursor: usize,
+    logical_path: &str,
+) -> Result<usize, CodegenError> {
+    while cursor < existing.len() {
+        if existing[cursor..].starts_with("/* leptos-ui-kit:") {
+            break;
+        }
+        if existing[cursor..].starts_with("/*") {
+            let Some(relative_end) = existing[cursor + 2..].find("*/") else {
+                return unsafe_patch(logical_path, "unterminated comment in CSS preamble");
+            };
+            cursor += 2 + relative_end + 2;
+            continue;
+        }
+        if existing.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        break;
+    }
+    Ok(cursor)
+}
+
+fn css_keyword_at(existing: &str, cursor: usize, keyword: &str) -> bool {
+    let Some(candidate) = existing.get(cursor..cursor.saturating_add(keyword.len())) else {
+        return false;
+    };
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    existing
+        .as_bytes()
+        .get(cursor + keyword.len())
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_'))
+}
+
+fn scan_css_preamble_statement(
+    existing: &str,
+    mut cursor: usize,
+    keyword: &str,
+    logical_path: &str,
+) -> Result<usize, CodegenError> {
+    let mut quote = None;
+    let mut parentheses = 0usize;
+
+    while cursor < existing.len() {
+        let byte = existing.as_bytes()[cursor];
+        if let Some(delimiter) = quote {
+            match byte {
+                b'\\' => {
+                    cursor += 1;
+                    if cursor == existing.len() {
+                        return unsafe_patch(
+                            logical_path,
+                            format!("unterminated escape in {keyword} CSS preamble statement"),
+                        );
+                    }
+                    cursor = next_char_boundary(existing, cursor);
+                }
+                byte if byte == delimiter => {
+                    quote = None;
+                    cursor += 1;
+                }
+                b'\n' | b'\r' => {
+                    return unsafe_patch(
+                        logical_path,
+                        format!("unterminated string in {keyword} CSS preamble statement"),
+                    );
+                }
+                _ => cursor = next_char_boundary(existing, cursor),
+            }
+            continue;
+        }
+
+        if existing[cursor..].starts_with("/*") {
+            let Some(relative_end) = existing[cursor + 2..].find("*/") else {
+                return unsafe_patch(
+                    logical_path,
+                    format!("unterminated comment in {keyword} CSS preamble statement"),
+                );
+            };
+            cursor += 2 + relative_end + 2;
+            continue;
+        }
+
+        match byte {
+            b'\'' | b'"' => {
+                quote = Some(byte);
+                cursor += 1;
+            }
+            b'\\' => {
+                cursor += 1;
+                if cursor == existing.len() {
+                    return unsafe_patch(
+                        logical_path,
+                        format!("unterminated escape in {keyword} CSS preamble statement"),
+                    );
+                }
+                cursor = next_char_boundary(existing, cursor);
+            }
+            b'(' => {
+                parentheses += 1;
+                cursor += 1;
+            }
+            b')' => {
+                let Some(next) = parentheses.checked_sub(1) else {
+                    return unsafe_patch(
+                        logical_path,
+                        format!("unbalanced parentheses in {keyword} CSS preamble statement"),
+                    );
+                };
+                parentheses = next;
+                cursor += 1;
+            }
+            b';' if parentheses == 0 => return Ok(cursor + 1),
+            b'{' | b'}' if parentheses == 0 => {
+                return unsafe_patch(
+                    logical_path,
+                    format!("unterminated {keyword} CSS preamble statement"),
+                );
+            }
+            _ => cursor = next_char_boundary(existing, cursor),
+        }
+    }
+
+    let reason = if quote.is_some() {
+        format!("unterminated string in {keyword} CSS preamble statement")
+    } else if parentheses != 0 {
+        format!("unbalanced parentheses in {keyword} CSS preamble statement")
+    } else {
+        format!("unterminated {keyword} CSS preamble statement")
+    };
+    unsafe_patch(logical_path, reason)
+}
+
+fn next_char_boundary(value: &str, cursor: usize) -> usize {
+    cursor
+        + value[cursor..]
+            .chars()
+            .next()
+            .expect("cursor is before the end of a UTF-8 string")
+            .len_utf8()
 }
 
 pub fn patch_components_mod(existing: Option<&str>) -> Result<String, CodegenError> {
@@ -1266,6 +2086,36 @@ fn upsert_planned_file(
     Ok(())
 }
 
+fn upsert_preloaded_planned_file(
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    logical_path: &str,
+    existing: &str,
+    content: String,
+    change_kind: ChangeKind,
+    item_id: Option<&str>,
+) -> Result<(), CodegenError> {
+    if let Some(file) = files.iter_mut().find(|file| file.path == logical_path) {
+        file.content = content;
+        return Ok(());
+    }
+    if existing == content {
+        return Ok(());
+    }
+
+    files.push(PlannedFile {
+        path: logical_path.to_owned(),
+        action: PlannedFileAction::Update,
+        content,
+    });
+    let mut change = ChangeRecord::new(change_kind, logical_path, true);
+    if let Some(item_id) = item_id {
+        change = change.with_item(item_id);
+    }
+    changes.push(change);
+    Ok(())
+}
+
 fn planned_or_existing_content(
     files: &[PlannedFile],
     project_root: &Path,
@@ -1329,41 +2179,6 @@ fn tracked_file_lock<'a>(
             path: path.clone(),
             reason: format!("missing file lock entry for {logical_path}"),
         })
-}
-
-fn tracked_style_generated_hash(
-    lock: &InstallLock,
-    item_id: &str,
-    block_id: &str,
-) -> Result<Option<String>, CodegenError> {
-    let Some(owner) = lock.style_blocks_by_id.get(block_id) else {
-        return Ok(None);
-    };
-    if owner != item_id {
-        return unsafe_patch(
-            "styles/kit.css",
-            format!("CSS block is already tracked by {owner}"),
-        );
-    }
-
-    let path = PathBuf::from(DEFAULT_KIT_LOCK_PATH);
-    let item = lock
-        .items
-        .get(item_id)
-        .ok_or_else(|| CodegenError::InvalidLock {
-            path: path.clone(),
-            reason: format!("missing item {item_id}"),
-        })?;
-    let block = item
-        .style_blocks
-        .iter()
-        .find(|block| block.block_id == block_id)
-        .ok_or_else(|| CodegenError::InvalidLock {
-            path: path.clone(),
-            reason: format!("missing style block lock entry for {block_id}"),
-        })?;
-
-    Ok(Some(block.generated_hash.clone()))
 }
 
 fn ui_exports_for_item(item: &RegistryItem) -> Result<Vec<UiModuleExport>, CodegenError> {
@@ -1649,32 +2464,36 @@ fn plan_component_modules(
     Ok(())
 }
 
-fn normalize_managed_css_block(block_id: &str, block: &str) -> Result<String, CodegenError> {
+fn normalize_managed_css_block_at_path(
+    block_id: &str,
+    block: &str,
+    logical_path: &str,
+) -> Result<String, CodegenError> {
     let start_marker = css_start_marker(block_id);
     let end_marker = css_end_marker(block_id);
 
     if block.matches(&start_marker).count() != 1 || block.matches(&end_marker).count() != 1 {
         return unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             format!("managed CSS block {block_id} must contain exactly one start and end marker"),
         );
     }
 
     let Some(start) = block.find(&start_marker) else {
         return unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             format!("managed CSS block {block_id} is missing its start marker"),
         );
     };
     let Some(end) = block.find(&end_marker) else {
         return unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             format!("managed CSS block {block_id} is missing its end marker"),
         );
     };
     if start > end {
         return unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             format!("managed CSS block {block_id} markers are reversed"),
         );
     }
@@ -1684,9 +2503,10 @@ fn normalize_managed_css_block(block_id: &str, block: &str) -> Result<String, Co
     Ok(normalized)
 }
 
-fn find_managed_css_block(
+fn find_managed_css_block_at_path(
     existing: &str,
     block_id: &str,
+    logical_path: &str,
 ) -> Result<Option<std::ops::Range<usize>>, CodegenError> {
     let start_marker = css_start_marker(block_id);
     let end_marker = css_end_marker(block_id);
@@ -1700,7 +2520,7 @@ fn find_managed_css_block(
             let end_start = existing.find(&end_marker).expect("count confirmed end");
             if start > end_start {
                 return unsafe_patch(
-                    "styles/kit.css",
+                    logical_path,
                     format!("managed CSS block {block_id} markers are reversed"),
                 );
             }
@@ -1711,7 +2531,7 @@ fn find_managed_css_block(
             Ok(Some(start..end))
         }
         _ => unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             format!("managed CSS block {block_id} markers are ambiguous"),
         ),
     }
@@ -2022,14 +2842,14 @@ fn validate_module_path(value: &str, label: &str, path: &Path) -> Result<(), Cod
     Ok(())
 }
 
-fn validate_css_block_id(block_id: &str) -> Result<(), CodegenError> {
+fn validate_css_block_id_at_path(block_id: &str, logical_path: &str) -> Result<(), CodegenError> {
     if block_id.is_empty()
         || !block_id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         return unsafe_patch(
-            "styles/kit.css",
+            logical_path,
             "CSS block id must be lowercase ASCII, digits, or hyphens",
         );
     }
@@ -2363,6 +3183,20 @@ mod tests {
         assert!(paths.contains(&"src/components/ui/mod.rs"));
         assert!(paths.contains(&"styles/kit.css"));
         assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
+        assert_eq!(
+            plan.files
+                .iter()
+                .filter(|file| file.path == "styles/kit.css")
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.changes
+                .iter()
+                .filter(|change| change.path == "styles/kit.css")
+                .count(),
+            1
+        );
         assert_eq!(plan.cargo_plan.len(), 1);
         assert!(!root.join("src/components/ui/button.rs").exists());
         assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
@@ -2413,14 +3247,23 @@ mod tests {
         let mut files = Vec::new();
         let mut changes = Vec::new();
         let mut lock = InstallLock::empty(hash_bytes(b"components"));
+        let mut css_operations = Vec::new();
         let config = parse_kit_json_str(
             &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
         )
         .expect("parse config");
         let item = nested_registry_item();
 
-        let item_id = plan_built_in_item(root, &mut files, &mut changes, &mut lock, &config, &item)
-            .expect("plan item");
+        let item_id = plan_built_in_item(
+            root,
+            &mut files,
+            &mut changes,
+            &mut lock,
+            &config,
+            &item,
+            &mut css_operations,
+        )
+        .expect("plan item");
         let paths = files
             .iter()
             .map(|file| file.path.as_str())
@@ -2441,6 +3284,7 @@ mod tests {
             lock.files_by_path.get("src/components/ui/nested/root.rs"),
             Some(&"builtin:nested".to_owned())
         );
+        assert!(css_operations.is_empty());
     }
 
     #[test]
@@ -2955,6 +3799,585 @@ mod tests {
 }
 /* leptos-ui-kit:end spinner */
 "#;
+
+    fn managed_css_block(block_id: &str, declaration: &str) -> String {
+        format!(
+            "/* leptos-ui-kit:start {block_id} */\n.{block_id} {{ {declaration} }}\n/* leptos-ui-kit:end {block_id} */\n"
+        )
+    }
+
+    fn managed_css_operation(
+        block_id: &str,
+        role: ManagedCssBlockRole,
+        declaration: &str,
+    ) -> ManagedCssOperation {
+        ManagedCssOperation {
+            item_id: format!("builtin:{block_id}"),
+            block_id: block_id.to_owned(),
+            role,
+            generated: managed_css_block(block_id, declaration),
+        }
+    }
+
+    fn managed_css_dependency(dependency: &str, dependent: &str) -> ManagedCssDependency {
+        ManagedCssDependency {
+            dependency_block_id: dependency.to_owned(),
+            dependent_block_id: dependent.to_owned(),
+        }
+    }
+
+    fn tracked_css_lock(css_path: &str, blocks: &[(&ManagedCssOperation, &str)]) -> InstallLock {
+        let mut lock = InstallLock::empty(hash_bytes(b"config"));
+        for (operation, baseline) in blocks {
+            lock.items.insert(
+                operation.item_id.clone(),
+                InstalledItem {
+                    id: operation.item_id.clone(),
+                    name: operation.block_id.clone(),
+                    source: "builtin".to_owned(),
+                    version: SCHEMA_VERSION.to_owned(),
+                    content_hash: hash_bytes(operation.item_id.as_bytes()),
+                    files: Vec::new(),
+                    style_blocks: vec![InstalledStyleBlock {
+                        css_path: css_path.to_owned(),
+                        block_id: operation.block_id.clone(),
+                        generated_hash: hash_bytes(baseline.as_bytes()),
+                    }],
+                },
+            );
+            lock.style_blocks_by_id
+                .insert(operation.block_id.clone(), operation.item_id.clone());
+        }
+        lock
+    }
+
+    fn unmanaged_css(existing: &str, logical_path: &str) -> String {
+        let mut ranges = inspect_managed_css_blocks_at_path(existing, logical_path)
+            .expect("inspect managed CSS")
+            .into_values()
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|range| range.start);
+
+        let mut output = String::new();
+        let mut cursor = 0;
+        for range in ranges {
+            output.push_str(&existing[cursor..range.start]);
+            cursor = range.end;
+        }
+        output.push_str(&existing[cursor..]);
+        output
+    }
+
+    fn assert_unsafe_patch_path(error: CodegenError, expected_path: &str) {
+        assert!(
+            matches!(error, CodegenError::UnsafePatch { ref path, .. } if path == &PathBuf::from(expected_path)),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn css_batch_inserts_missing_foundation_before_earliest_dependent() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let spinner = managed_css_operation(
+            "spinner",
+            ManagedCssBlockRole::Component,
+            "color: currentColor;",
+        );
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let existing = format!(
+            "/* application header */\n{}\n/* between generated blocks */\n{}\n:root {{ --kit-color-primary: rebeccapurple; }}\n",
+            spinner.generated, button.generated
+        );
+        let lock = tracked_css_lock(
+            "styles/custom.css",
+            &[(&spinner, &spinner.generated), (&button, &button.generated)],
+        );
+        let dependencies = [
+            managed_css_dependency("tokens", "spinner"),
+            managed_css_dependency("tokens", "button"),
+            managed_css_dependency("spinner", "button"),
+        ];
+
+        let reconciled = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/custom.css",
+            &lock,
+            &[tokens, spinner, button],
+            &dependencies,
+        )
+        .expect("reconcile CSS");
+
+        let ranges = inspect_managed_css_blocks_at_path(&reconciled, "styles/custom.css")
+            .expect("inspect reconciled CSS");
+        assert!(ranges["tokens"].start < ranges["spinner"].start);
+        assert!(ranges["spinner"].start < ranges["button"].start);
+        assert_eq!(reconciled.matches("leptos-ui-kit:start tokens").count(), 1);
+        assert_eq!(
+            unmanaged_css(&reconciled, "styles/custom.css"),
+            unmanaged_css(&existing, "styles/custom.css")
+        );
+        assert!(
+            reconciled
+                .find("leptos-ui-kit:start tokens")
+                .expect("tokens")
+                < reconciled
+                    .find("--kit-color-primary: rebeccapurple")
+                    .expect("application override")
+        );
+    }
+
+    #[test]
+    fn css_batch_relocates_safe_late_foundation_and_is_idempotent() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let spinner = managed_css_operation(
+            "spinner",
+            ManagedCssBlockRole::Component,
+            "color: currentColor;",
+        );
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let existing = format!(
+            "{}/* first gap */\n{}/* application override */\n:root {{ --kit-button-gap: 0.75rem; }}\n{}",
+            spinner.generated, button.generated, tokens.generated
+        );
+        let lock = tracked_css_lock(
+            "styles/kit.css",
+            &[
+                (&tokens, &tokens.generated),
+                (&spinner, &spinner.generated),
+                (&button, &button.generated),
+            ],
+        );
+        let operations = [tokens, spinner, button];
+        let dependencies = [
+            managed_css_dependency("tokens", "spinner"),
+            managed_css_dependency("tokens", "button"),
+            managed_css_dependency("spinner", "button"),
+        ];
+
+        let first = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/kit.css",
+            &lock,
+            &operations,
+            &dependencies,
+        )
+        .expect("relocate foundation");
+        let second = reconcile_managed_css_blocks_at_path(
+            &first,
+            "styles/kit.css",
+            &lock,
+            &operations,
+            &dependencies,
+        )
+        .expect("idempotent reconciliation");
+        let ranges = inspect_managed_css_blocks_at_path(&first, "styles/kit.css")
+            .expect("inspect reconciled CSS");
+
+        assert!(ranges["tokens"].start < ranges["spinner"].start);
+        assert!(ranges["spinner"].start < ranges["button"].start);
+        assert_eq!(first, second);
+        assert_eq!(
+            unmanaged_css(&first, "styles/kit.css"),
+            unmanaged_css(&existing, "styles/kit.css")
+        );
+        assert!(
+            first.find("leptos-ui-kit:start tokens").expect("tokens")
+                < first.find("--kit-button-gap: 0.75rem").expect("override")
+        );
+    }
+
+    #[test]
+    fn css_batch_relocates_foundation_that_matches_verified_old_baseline() {
+        let old_tokens = managed_css_block("tokens", "color: gray;");
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let existing = format!("{}/* app */\n{}", button.generated, old_tokens);
+        let lock = tracked_css_lock(
+            "styles/kit.css",
+            &[(&tokens, &old_tokens), (&button, &button.generated)],
+        );
+
+        let reconciled = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/kit.css",
+            &lock,
+            &[tokens.clone(), button],
+            &[managed_css_dependency("tokens", "button")],
+        )
+        .expect("replace and relocate tracked baseline");
+
+        assert!(reconciled.starts_with(&tokens.generated));
+        assert!(!reconciled.contains("color: gray"));
+        assert_eq!(
+            unmanaged_css(&reconciled, "styles/kit.css"),
+            unmanaged_css(&existing, "styles/kit.css")
+        );
+    }
+
+    #[test]
+    fn css_batch_places_foundation_after_bounded_legal_preamble() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let preamble = "\u{feff} \n/* legal header */\n@CHARSET \"UTF-8\";\n@ImPoRt url(\"theme;a.css\") screen and (feature: \"a;b\");\n@import \"theme.css\" screen\\;print;\n@NaMeSpAcE svg url(data:image/svg+xml;utf8,<svg/>);\n\n";
+        let application = "body { color: rebeccapurple; }\n";
+        let existing = format!("{preamble}{application}");
+
+        let reconciled = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/custom.css",
+            &InstallLock::empty(hash_bytes(b"config")),
+            std::slice::from_ref(&tokens),
+            &[],
+        )
+        .expect("insert after preamble");
+
+        assert!(reconciled.starts_with(preamble));
+        assert_eq!(
+            &reconciled[preamble.len()..preamble.len() + tokens.generated.len()],
+            tokens.generated
+        );
+        assert!(reconciled.ends_with(application));
+        assert_eq!(unmanaged_css(&reconciled, "styles/custom.css"), existing);
+    }
+
+    #[test]
+    fn css_batch_relocates_tracked_foundation_without_dependent_to_preamble_boundary() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let preamble = "\u{feff}/* license */\n@import url(\"base.css\");\n";
+        let application = "body { color: rebeccapurple; }\n";
+        let existing = format!("{preamble}{application}{}", tokens.generated);
+        let lock = tracked_css_lock("styles/custom.css", &[(&tokens, &tokens.generated)]);
+
+        let first = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/custom.css",
+            &lock,
+            std::slice::from_ref(&tokens),
+            &[],
+        )
+        .expect("relocate foundation before ordinary CSS");
+        let second = reconcile_managed_css_blocks_at_path(
+            &first,
+            "styles/custom.css",
+            &lock,
+            std::slice::from_ref(&tokens),
+            &[],
+        )
+        .expect("idempotent no-dependent reconciliation");
+
+        assert!(first.starts_with(&format!("{preamble}{}", tokens.generated)));
+        assert!(first.ends_with(application));
+        assert_eq!(first, second);
+        assert_eq!(
+            unmanaged_css(&first, "styles/custom.css"),
+            unmanaged_css(&existing, "styles/custom.css")
+        );
+    }
+
+    #[test]
+    fn css_batch_stops_preamble_before_ordinary_rules_and_other_at_rules() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        for existing in [
+            "body { color: red; }\n",
+            "@media (prefers-color-scheme: dark) { body {} }\n",
+        ] {
+            let reconciled = reconcile_managed_css_blocks_at_path(
+                existing,
+                "styles/kit.css",
+                &InstallLock::empty(hash_bytes(b"config")),
+                std::slice::from_ref(&tokens),
+                &[],
+            )
+            .expect("insert before ordinary CSS");
+
+            assert!(reconciled.starts_with(&tokens.generated));
+            assert!(reconciled.ends_with(existing));
+        }
+    }
+
+    #[test]
+    fn css_batch_rejects_malformed_legal_preambles_at_configured_path() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        for existing in [
+            "/* unterminated",
+            "@import \"unterminated;",
+            "@namespace url(theme.css",
+            "@charset \"UTF-8\"",
+            "@import url(theme.css) \\",
+            "@import url(theme.css));",
+        ] {
+            let error = reconcile_managed_css_blocks_at_path(
+                existing,
+                "styles/custom.css",
+                &InstallLock::empty(hash_bytes(b"config")),
+                std::slice::from_ref(&tokens),
+                &[],
+            )
+            .expect_err("malformed preamble should fail");
+
+            assert_unsafe_patch_path(error, "styles/custom.css");
+        }
+    }
+
+    #[test]
+    fn css_batch_rejects_non_foundation_dependency_inversions() {
+        let spinner = managed_css_operation(
+            "spinner",
+            ManagedCssBlockRole::Component,
+            "color: currentColor;",
+        );
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let lock = tracked_css_lock(
+            "styles/kit.css",
+            &[(&spinner, &spinner.generated), (&button, &button.generated)],
+        );
+        let existing = format!("{}{}", button.generated, spinner.generated);
+
+        let error = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/kit.css",
+            &lock,
+            &[spinner, button],
+            &[managed_css_dependency("spinner", "button")],
+        )
+        .expect_err("inverted dependency should fail");
+
+        assert_unsafe_patch_path(error, "styles/kit.css");
+    }
+
+    #[test]
+    fn css_batch_prevalidates_duplicate_and_unknown_operations_and_dependencies() {
+        let tokens =
+            managed_css_operation("tokens", ManagedCssBlockRole::Foundation, "color: black;");
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let empty_lock = InstallLock::empty(hash_bytes(b"config"));
+
+        for (operations, dependencies) in [
+            (vec![tokens.clone(), tokens.clone()], Vec::new()),
+            (
+                vec![tokens.clone()],
+                vec![managed_css_dependency("tokens", "missing")],
+            ),
+            (
+                vec![tokens.clone()],
+                vec![managed_css_dependency("tokens", "tokens")],
+            ),
+            (
+                vec![tokens.clone(), button],
+                vec![
+                    managed_css_dependency("tokens", "button"),
+                    managed_css_dependency("tokens", "button"),
+                ],
+            ),
+        ] {
+            let error = reconcile_managed_css_blocks_at_path(
+                "",
+                "styles/custom.css",
+                &empty_lock,
+                &operations,
+                &dependencies,
+            )
+            .expect_err("invalid batch metadata should fail before output");
+            assert_unsafe_patch_path(error, "styles/custom.css");
+        }
+    }
+
+    #[test]
+    fn css_batch_rejects_appending_missing_dependency_after_existing_dependent() {
+        let spinner = managed_css_operation(
+            "spinner",
+            ManagedCssBlockRole::Component,
+            "color: currentColor;",
+        );
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let lock = tracked_css_lock("styles/kit.css", &[(&button, &button.generated)]);
+        let existing = button.generated.clone();
+
+        let error = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/kit.css",
+            &lock,
+            &[spinner, button],
+            &[managed_css_dependency("spinner", "button")],
+        )
+        .expect_err("missing dependency cannot be appended late");
+
+        assert_unsafe_patch_path(error, "styles/kit.css");
+    }
+
+    #[test]
+    fn css_batch_allows_independent_existing_block_order() {
+        let alpha = managed_css_operation("alpha", ManagedCssBlockRole::Component, "color: red;");
+        let beta = managed_css_operation("beta", ManagedCssBlockRole::Component, "color: blue;");
+        let existing = format!("{}{}", beta.generated, alpha.generated);
+        let lock = tracked_css_lock(
+            "styles/kit.css",
+            &[(&alpha, &alpha.generated), (&beta, &beta.generated)],
+        );
+
+        let reconciled = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/kit.css",
+            &lock,
+            &[alpha, beta],
+            &[],
+        )
+        .expect("independent order should remain valid");
+
+        assert_eq!(reconciled, existing);
+    }
+
+    #[test]
+    fn css_batch_rejects_malformed_or_overlapping_marker_ranges() {
+        let cases = [
+            "/* leptos-ui-kit:start alpha */\n/* leptos-ui-kit:start beta */\n/* leptos-ui-kit:end beta */\n/* leptos-ui-kit:end alpha */\n",
+            "/* leptos-ui-kit:start alpha */\n/* leptos-ui-kit:end beta */\n/* leptos-ui-kit:end alpha */\n",
+            "/* leptos-ui-kit:start alpha */\n",
+            "/* leptos-ui-kit:end alpha */\n",
+            "/* leptos-ui-kit:start alpha*/\n/* leptos-ui-kit:end alpha */\n",
+            "/* leptos-ui-kit:unknown alpha */\n",
+            "/* leptos-ui-kit:start alpha */\n/* leptos-ui-kit:end alpha */\n/* leptos-ui-kit:start alpha */\n/* leptos-ui-kit:end alpha */\n",
+        ];
+
+        for existing in cases {
+            let error = inspect_managed_css_blocks_at_path(existing, "styles/custom.css")
+                .expect_err("malformed markers should fail");
+            assert_unsafe_patch_path(error, "styles/custom.css");
+        }
+    }
+
+    #[test]
+    fn css_batch_rejects_untracked_misowned_missing_and_edited_blocks() {
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+
+        let error = reconcile_managed_css_blocks_at_path(
+            &button.generated,
+            "styles/custom.css",
+            &InstallLock::empty(hash_bytes(b"config")),
+            std::slice::from_ref(&button),
+            &[],
+        )
+        .expect_err("untracked exact block should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+
+        let mut misowned = tracked_css_lock("styles/custom.css", &[(&button, &button.generated)]);
+        misowned
+            .style_blocks_by_id
+            .insert("button".to_owned(), "builtin:someone-else".to_owned());
+        let error = reconcile_managed_css_blocks_at_path(
+            &button.generated,
+            "styles/custom.css",
+            &misowned,
+            std::slice::from_ref(&button),
+            &[],
+        )
+        .expect_err("misowned block should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+
+        let missing = tracked_css_lock("styles/custom.css", &[(&button, &button.generated)]);
+        let error = reconcile_managed_css_blocks_at_path(
+            "",
+            "styles/custom.css",
+            &missing,
+            std::slice::from_ref(&button),
+            &[],
+        )
+        .expect_err("missing tracked block should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+
+        let old_button = managed_css_block("button", "display: block;");
+        let edited_button = managed_css_block("button", "display: grid;");
+        let edited_lock = tracked_css_lock("styles/custom.css", &[(&button, &old_button)]);
+        let error = reconcile_managed_css_blocks_at_path(
+            &edited_button,
+            "styles/custom.css",
+            &edited_lock,
+            &[button],
+            &[],
+        )
+        .expect_err("edited tracked block should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+    }
+
+    #[test]
+    fn css_batch_rejects_config_and_lock_stylesheet_path_mismatch() {
+        let button = managed_css_operation(
+            "button",
+            ManagedCssBlockRole::Component,
+            "display: inline-flex;",
+        );
+        let lock = tracked_css_lock("styles/kit.css", &[(&button, &button.generated)]);
+        let existing = button.generated.clone();
+
+        let error = reconcile_managed_css_blocks_at_path(
+            &existing,
+            "styles/custom.css",
+            &lock,
+            &[button],
+            &[],
+        )
+        .expect_err("cross-path reconciliation should fail");
+
+        assert_unsafe_patch_path(error, "styles/custom.css");
+    }
+
+    #[test]
+    fn path_aware_css_helpers_report_configured_logical_path() {
+        let previous = managed_css_block("button", "color: red;");
+        let edited = managed_css_block("button", "color: green;");
+        let next = managed_css_block("button", "color: blue;");
+        let error = patch_css_block_at_path(
+            &edited,
+            "styles/custom.css",
+            "button",
+            &next,
+            Some(&hash_bytes(previous.as_bytes())),
+        )
+        .expect_err("edited block should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+
+        let error = extract_managed_css_block_at_path(
+            "/* leptos-ui-kit:start button */\n",
+            "styles/custom.css",
+            "button",
+        )
+        .expect_err("missing end marker should fail");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+    }
 
     #[test]
     fn css_patcher_appends_managed_block() {
