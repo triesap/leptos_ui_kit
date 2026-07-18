@@ -16,7 +16,7 @@ use leptos_ui_kit_codegen::{
     install_lock_path, parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
+    CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
     DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
     SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, build_info_output,
     canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json, load_registry_item,
@@ -665,7 +665,7 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
 }
 
 fn render_version_output(json: bool) -> Result<String, String> {
-    let output = version_output();
+    let output = version_output()?;
 
     if json {
         return serde_json::to_string_pretty(&CommandEnvelope::success("version", output))
@@ -675,12 +675,16 @@ fn render_version_output(json: bool) -> Result<String, String> {
     Ok(format!("{} {}", output.binary, output.version))
 }
 
-fn version_output() -> VersionCommandOutput {
-    let rev = canonical_tool_config().ok().map(|tool| match tool.source {
-        ToolSourceConfig::Git { rev, .. } => rev,
-    });
+fn version_output() -> Result<VersionCommandOutput, String> {
+    let rev = match canonical_tool_config() {
+        Ok(tool) => Some(match tool.source {
+            ToolSourceConfig::Git { rev, .. } => rev,
+        }),
+        Err(ConfigError::MissingToolProvenance { .. }) => None,
+        Err(error) => return Err(format!("invalid compiled tool provenance: {error}")),
+    };
 
-    VersionCommandOutput {
+    Ok(VersionCommandOutput {
         package: TOOL_PACKAGE,
         binary: TOOL_BINARY,
         version: env!("CARGO_PKG_VERSION"),
@@ -690,7 +694,7 @@ fn version_output() -> VersionCommandOutput {
             url: TOOL_GIT_URL,
             rev,
         },
-    }
+    })
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
@@ -3265,14 +3269,32 @@ leptos_router = "0.9.0-alpha"
     #[test]
     fn version_json_outputs_tool_provenance() {
         let output = render_version_output(true).expect("render version");
+        let value = serde_json::from_str::<serde_json::Value>(&output).expect("parse version JSON");
 
-        assert!(output.contains("\"command\": \"version\""));
-        assert!(output.contains("\"package\": \"leptos_ui_kit_cli\""));
-        assert!(output.contains("\"binary\": \"leptos_ui_kit\""));
-        assert!(output.contains("\"version\": \"0.1.0\""));
-        assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
-        assert!(output.contains("\"kind\": \"git\""));
-        assert!(output.contains("\"url\": \"https://github.com/triesap/leptos_ui_kit\""));
+        assert_eq!(value["command"], "version");
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["schemaVersion"], "0.9.0-alpha");
+        assert_eq!(value["data"]["package"], "leptos_ui_kit_cli");
+        assert_eq!(value["data"]["binary"], "leptos_ui_kit");
+        assert_eq!(value["data"]["version"], "0.1.0");
+        assert_eq!(value["data"]["schemaVersion"], "0.9.0-alpha");
+        assert_eq!(value["data"]["source"]["kind"], "git");
+        assert_eq!(
+            value["data"]["source"]["url"],
+            "https://github.com/triesap/leptos_ui_kit"
+        );
+        assert_eq!(value["data"]["source"].get("resolution"), None);
+
+        match canonical_tool_config() {
+            Ok(tool) => {
+                let ToolSourceConfig::Git { rev, .. } = tool.source;
+                assert_eq!(value["data"]["source"]["rev"], rev);
+            }
+            Err(ConfigError::MissingToolProvenance { .. }) => {
+                assert_eq!(value["data"]["source"].get("rev"), None);
+            }
+            Err(error) => panic!("unexpected compiled provenance error: {error}"),
+        }
     }
 
     #[test]

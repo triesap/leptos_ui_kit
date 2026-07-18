@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, fs, path::Path, process::Command};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use leptos_ui_kit_registry::{
     ConfigError, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolSourceConfig, canonical_tool_config,
@@ -11,9 +17,11 @@ use leptos_ui_kit_registry::{
 mod build_provenance;
 
 use build_provenance::{
-    CheckoutProvenance, ProvenanceError, ProvenanceSource, ResolvedProvenance,
-    is_canonical_repository, resolve_provenance,
+    CheckoutProvenance, GIT_REPOSITORY_OVERRIDE_ENV, GitRunner, ProvenanceError, ProvenanceSource,
+    ResolvedProvenance, SystemGit, explicit_revision, is_canonical_repository, probe_checkout,
+    read_cargo_vcs, resolve_provenance,
 };
+use tempfile::tempdir;
 
 const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
 const REV_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
@@ -161,7 +169,7 @@ fn malformed_higher_precedence_provenance_never_falls_through() {
     };
     assert!(matches!(
         resolve_provenance(Some("short"), Some(&cargo), Some(checkout)),
-        Err(ProvenanceError::InvalidRevision {
+        Err(ProvenanceError::Revision {
             source: ProvenanceSource::Explicit,
             ..
         })
@@ -172,7 +180,7 @@ fn malformed_higher_precedence_provenance_never_falls_through() {
             Some(&cargo),
             Some(checkout)
         ),
-        Err(ProvenanceError::InvalidRevision {
+        Err(ProvenanceError::Revision {
             source: ProvenanceSource::Explicit,
             ..
         })
@@ -198,7 +206,7 @@ fn malformed_higher_precedence_provenance_never_falls_through() {
                 rev: "short",
             })
         ),
-        Err(ProvenanceError::InvalidRevision {
+        Err(ProvenanceError::Revision {
             source: ProvenanceSource::Checkout,
             ..
         })
@@ -276,20 +284,293 @@ fn hostile_parent_checkout_is_not_a_provenance_source() {
 
 #[test]
 fn compiled_tool_provenance_is_valid_or_explicitly_unavailable() {
-    match canonical_tool_config() {
-        Ok(tool) => {
+    let source = env!("LEPTOS_UI_KIT_GIT_REV_SOURCE");
+    match (source, canonical_tool_config()) {
+        ("explicit" | "cargo-vcs" | "checkout", Ok(tool)) => {
             assert_eq!(tool.package, TOOL_PACKAGE);
             assert_eq!(tool.binary, TOOL_BINARY);
             let ToolSourceConfig::Git { url, rev } = tool.source;
             assert_eq!(url, TOOL_GIT_URL);
             assert_eq!(rev.len(), 40);
             assert!(rev.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(rev, rev.to_ascii_lowercase());
         }
-        Err(ConfigError::MissingToolProvenance { package, binary }) => {
+        ("unavailable", Err(ConfigError::MissingToolProvenance { package, binary })) => {
             assert_eq!(package, TOOL_PACKAGE);
             assert_eq!(binary, TOOL_BINARY);
         }
-        Err(error) => panic!("unexpected compiled provenance error: {error}"),
+        (source, result) => panic!("inconsistent compiled provenance {source}: {result:?}"),
+    }
+}
+
+#[test]
+fn explicit_provenance_rejects_empty_and_non_unicode_values() {
+    assert!(matches!(
+        resolve_provenance(Some(""), None, None),
+        Err(ProvenanceError::Revision {
+            source: ProvenanceSource::Explicit,
+            ..
+        })
+    ));
+    assert_eq!(explicit_revision(None), Ok(None));
+    assert_eq!(explicit_revision(Some(OsStr::new(REV_A))), Ok(Some(REV_A)));
+
+    #[cfg(unix)]
+    {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let value = OsString::from_vec(vec![0xff]);
+        assert_eq!(
+            explicit_revision(Some(&value)),
+            Err(ProvenanceError::ExplicitEncoding)
+        );
+    }
+}
+
+#[test]
+fn cargo_vcs_reader_distinguishes_absent_valid_and_invalid_files() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(".cargo_vcs_info.json");
+    assert_eq!(read_cargo_vcs(&path), Ok(None));
+
+    let input = format!(r#"{{"git":{{"sha1":"{}"}}}}"#, REV_A.to_ascii_uppercase());
+    fs::write(&path, &input).expect("write Cargo VCS metadata");
+    assert_eq!(read_cargo_vcs(&path), Ok(Some(input.clone())));
+    assert_eq!(
+        resolve_provenance(None, read_cargo_vcs(&path).unwrap().as_deref(), None),
+        Ok(Some(ResolvedProvenance {
+            rev: REV_A.to_owned(),
+            source: ProvenanceSource::CargoVcs,
+        }))
+    );
+
+    fs::write(&path, [0xff]).expect("write non-UTF-8 Cargo VCS metadata");
+    assert!(matches!(
+        read_cargo_vcs(&path),
+        Err(ProvenanceError::CargoVcs(_))
+    ));
+    fs::remove_file(&path).expect("remove Cargo VCS metadata");
+    fs::create_dir(&path).expect("create invalid Cargo VCS directory");
+    assert!(matches!(
+        read_cargo_vcs(&path),
+        Err(ProvenanceError::CargoVcs(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_vcs_reader_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().expect("tempdir");
+    let target = dir.path().join("target.json");
+    let path = dir.path().join(".cargo_vcs_info.json");
+    fs::write(&target, format!(r#"{{"git":{{"sha1":"{REV_A}"}}}}"#)).expect("write target");
+    symlink(&target, &path).expect("create symlink");
+    assert!(matches!(
+        read_cargo_vcs(&path),
+        Err(ProvenanceError::CargoVcs(_))
+    ));
+}
+
+#[test]
+fn cargo_vcs_reader_never_walks_to_parent_metadata() {
+    let dir = tempdir().expect("tempdir");
+    let manifest_dir = dir.path().join("nested/crate");
+    fs::create_dir_all(&manifest_dir).expect("create nested manifest directory");
+    fs::write(
+        dir.path().join(".cargo_vcs_info.json"),
+        format!(r#"{{"git":{{"sha1":"{REV_A}"}}}}"#),
+    )
+    .expect("write parent metadata");
+
+    assert_eq!(
+        read_cargo_vcs(&manifest_dir.join(".cargo_vcs_info.json")),
+        Ok(None)
+    );
+}
+
+#[test]
+fn checkout_probe_anchors_commands_and_reads_origin_before_head() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let manifest_dir = root.join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    let git_dir = root.join(".git");
+    fs::create_dir(&git_dir).expect("create standalone Git directory marker");
+    let mut git = FakeGit::canonical(root, REV_A);
+
+    let probe = probe_checkout(&manifest_dir, &mut git);
+    let checkout = probe.checkout.expect("canonical checkout");
+    assert_eq!(
+        checkout.remote,
+        "https://github.com/triesap/leptos_ui_kit.git"
+    );
+    assert_eq!(checkout.rev, REV_A);
+    assert_eq!(
+        resolve_provenance(None, None, Some(checkout.as_borrowed())),
+        Ok(Some(ResolvedProvenance {
+            rev: REV_A.to_owned(),
+            source: ProvenanceSource::Checkout,
+        }))
+    );
+    assert_eq!(git.calls[0].0, manifest_dir);
+    assert!(git.calls[1..].iter().all(|(anchor, _)| anchor == root));
+
+    let origin_index = git
+        .calls
+        .iter()
+        .position(|(_, args)| args.first().is_some_and(|arg| arg == "config"))
+        .expect("origin query");
+    let first_head_index = git
+        .calls
+        .iter()
+        .position(|(_, args)| {
+            args.iter()
+                .any(|arg| arg == "HEAD" || arg.starts_with("HEAD^"))
+        })
+        .expect("HEAD query");
+    assert!(origin_index < first_head_index);
+    assert!(!probe.rerun_paths.contains(&git_dir));
+    for expected in [
+        git_dir.join("config"),
+        git_dir.join("config.worktree"),
+        git_dir.join("HEAD"),
+        git_dir.join("packed-refs"),
+        git_dir.join("refs/heads/main"),
+    ] {
+        assert!(
+            probe.rerun_paths.contains(&expected),
+            "{}",
+            expected.display()
+        );
+    }
+}
+
+#[test]
+fn system_git_sanitizes_every_repository_override() {
+    let actual = GIT_REPOSITORY_OVERRIDE_ENV
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ] {
+        assert!(actual.contains(required), "missing override: {required}");
+    }
+    assert_eq!(actual.len(), GIT_REPOSITORY_OVERRIDE_ENV.len());
+}
+
+#[test]
+fn checkout_probe_rejects_noncanonical_origin_without_reading_head() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let manifest_dir = root.join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    let mut git = FakeGit::canonical(root, REV_A);
+    git.outputs.insert(
+        vec![
+            "config".to_owned(),
+            "--local".to_owned(),
+            "--get-all".to_owned(),
+            "remote.origin.url".to_owned(),
+        ],
+        "https://github.com/triesap/dev.git".to_owned(),
+    );
+
+    let probe = probe_checkout(&manifest_dir, &mut git);
+    assert_eq!(probe.checkout, None);
+    assert!(!git.calls.iter().any(|(_, args)| {
+        args.iter()
+            .any(|arg| arg == "HEAD" || arg.starts_with("HEAD^") || arg.starts_with("refs/"))
+    }));
+}
+
+#[test]
+fn checkout_probe_treats_missing_git_or_wrong_layout_as_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let manifest_dir = dir.path().join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    let mut missing = FakeGit::default();
+    assert_eq!(probe_checkout(&manifest_dir, &mut missing).checkout, None);
+
+    let hostile_manifest = dir
+        .path()
+        .join("domains/project/crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&hostile_manifest).expect("create hostile manifest directory");
+    let mut wrong_layout = FakeGit::default();
+    wrong_layout.outputs.insert(
+        vec!["rev-parse".to_owned(), "--show-toplevel".to_owned()],
+        dir.path().display().to_string(),
+    );
+    assert_eq!(
+        probe_checkout(&hostile_manifest, &mut wrong_layout).checkout,
+        None
+    );
+    assert_eq!(wrong_layout.calls.len(), 1);
+}
+
+#[test]
+fn system_git_rejects_a_real_hostile_parent_checkout() {
+    let dir = tempdir().expect("tempdir");
+    init_git_repository(dir.path(), "https://github.com/triesap/dev.git", true);
+    let manifest_dir = dir
+        .path()
+        .join("domains/triesap/leptos_ui_kit/crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create hostile nested manifest directory");
+
+    let probe = probe_checkout(&manifest_dir, &mut SystemGit);
+    assert_eq!(probe.checkout, None);
+}
+
+#[test]
+fn system_git_accepts_canonical_spellings_and_handles_unavailable_checkouts() {
+    let dir = tempdir().expect("tempdir");
+    let manifest_dir = dir.path().join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+
+    assert_eq!(probe_checkout(&manifest_dir, &mut SystemGit).checkout, None);
+    init_git_repository(dir.path(), "", false);
+    assert_eq!(probe_checkout(&manifest_dir, &mut SystemGit).checkout, None);
+    run_git(
+        dir.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:triesap/leptos_ui_kit.git",
+        ],
+    );
+    assert_eq!(
+        probe_checkout(&manifest_dir, &mut SystemGit).checkout,
+        None,
+        "an unborn canonical checkout has unavailable provenance"
+    );
+
+    commit_git_fixture(dir.path());
+    let expected_rev = run_git_output(dir.path(), &["rev-parse", "HEAD"]);
+    for remote in [
+        "https://github.com/triesap/leptos_ui_kit",
+        "https://github.com/triesap/leptos_ui_kit.git",
+        "git@github.com:triesap/leptos_ui_kit.git",
+        "ssh://git@github.com/triesap/leptos_ui_kit.git",
+    ] {
+        run_git(dir.path(), &["remote", "set-url", "origin", remote]);
+        let probe = probe_checkout(&manifest_dir, &mut SystemGit);
+        let checkout = probe.checkout.expect("canonical checkout provenance");
+        assert_eq!(checkout.remote, remote);
+        assert_eq!(checkout.rev, expected_rev);
     }
 }
 
@@ -417,4 +698,127 @@ fn logical_path(root: &Path, path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[derive(Debug, Default)]
+struct FakeGit {
+    outputs: BTreeMap<Vec<String>, String>,
+    calls: Vec<(PathBuf, Vec<String>)>,
+}
+
+impl FakeGit {
+    fn canonical(root: &Path, rev: &str) -> Self {
+        let git_dir = root.join(".git");
+        let mut outputs = BTreeMap::new();
+        outputs.insert(
+            vec!["rev-parse".to_owned(), "--show-toplevel".to_owned()],
+            root.display().to_string(),
+        );
+        for name in [
+            "config",
+            "config.worktree",
+            "HEAD",
+            "packed-refs",
+            "refs/heads/main",
+        ] {
+            outputs.insert(
+                vec![
+                    "rev-parse".to_owned(),
+                    "--git-path".to_owned(),
+                    name.to_owned(),
+                ],
+                git_dir.join(name).display().to_string(),
+            );
+        }
+        outputs.insert(
+            vec![
+                "config".to_owned(),
+                "--local".to_owned(),
+                "--get-all".to_owned(),
+                "remote.origin.url".to_owned(),
+            ],
+            "https://github.com/triesap/leptos_ui_kit.git".to_owned(),
+        );
+        outputs.insert(
+            vec![
+                "symbolic-ref".to_owned(),
+                "-q".to_owned(),
+                "HEAD".to_owned(),
+            ],
+            "refs/heads/main".to_owned(),
+        );
+        outputs.insert(
+            vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "HEAD^{commit}".to_owned(),
+            ],
+            rev.to_owned(),
+        );
+        Self {
+            outputs,
+            calls: Vec::new(),
+        }
+    }
+}
+
+impl GitRunner for FakeGit {
+    fn output(&mut self, anchor: &Path, args: &[&str]) -> Option<String> {
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        self.calls.push((anchor.to_path_buf(), args.clone()));
+        self.outputs.get(&args).cloned()
+    }
+}
+
+fn init_git_repository(root: &Path, remote: &str, commit: bool) {
+    run_git(root, &["init"]);
+    run_git(root, &["config", "user.name", "Leptos UI Kit Tests"]);
+    run_git(root, &["config", "user.email", "tests@example.invalid"]);
+    run_git(root, &["config", "commit.gpgsign", "false"]);
+    if !remote.is_empty() {
+        run_git(root, &["remote", "add", "origin", remote]);
+    }
+    if commit {
+        commit_git_fixture(root);
+    }
+}
+
+fn commit_git_fixture(root: &Path) {
+    fs::write(root.join("fixture.txt"), "fixture\n").expect("write Git fixture");
+    run_git(root, &["add", "fixture.txt"]);
+    run_git(root, &["commit", "-m", "test fixture"]);
+}
+
+fn run_git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_git_output(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 Git fixture output")
+        .trim()
+        .to_owned()
 }

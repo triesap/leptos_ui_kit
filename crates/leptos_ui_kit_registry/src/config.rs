@@ -87,7 +87,7 @@ impl fmt::Display for ConfigError {
             Self::MissingToolProvenance { package, binary } => {
                 write!(
                     f,
-                    "missing tool provenance for {package}/{binary}; pass an explicit git rev"
+                    "missing compiled tool provenance for {package}/{binary}; rebuild from canonical package metadata or set LEPTOS_UI_KIT_GIT_REV while building"
                 )
             }
         }
