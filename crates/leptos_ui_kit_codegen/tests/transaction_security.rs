@@ -723,24 +723,84 @@ fn unix_coordination_file_symlinks_and_special_files_do_not_touch_referents() {
 
 #[cfg(unix)]
 #[test]
-fn predictable_temporary_symlink_cannot_capture_a_write() {
+fn predictable_legacy_temporary_symlink_cannot_capture_a_write() {
     let directory = tempdir().expect("tempdir");
     let outside = tempdir().expect("outside tempdir");
     fs::create_dir_all(directory.path().join("styles")).expect("create styles");
+    fs::write(directory.path().join("styles/kit.css"), b"before\n").expect("seed target");
     let referent = outside.path().join("referent");
+    let backup_referent = outside.path().join("backup-referent");
     fs::write(&referent, b"outside\n").expect("write referent");
+    fs::write(&backup_referent, b"outside backup\n").expect("write backup referent");
     std::os::unix::fs::symlink(
         &referent,
         directory.path().join("styles/kit.leptos-ui-kit.tmp"),
     )
     .expect("create temp symlink");
+    std::os::unix::fs::symlink(
+        &backup_referent,
+        directory.path().join("styles/kit.leptos-ui-kit.bak"),
+    )
+    .expect("create backup symlink");
 
-    let error = write_file_atomic(directory.path(), "styles/kit.css", b"replacement\n")
-        .expect_err("temporary symlink must fail");
+    write_file_atomic(directory.path(), "styles/kit.css", b"replacement\n")
+        .expect("random exclusive stage bypasses predictable symlink");
 
-    assert!(matches!(error, CodegenError::UnsafePath { .. }));
     assert_eq!(fs::read(referent).expect("read referent"), b"outside\n");
-    assert!(!directory.path().join("styles/kit.css").exists());
+    assert_eq!(
+        fs::read(backup_referent).expect("read backup referent"),
+        b"outside backup\n"
+    );
+    assert_eq!(
+        fs::read(directory.path().join("styles/kit.css")).expect("read target"),
+        b"replacement\n"
+    );
+    assert!(
+        fs::symlink_metadata(directory.path().join("styles/kit.leptos-ui-kit.tmp"))
+            .expect("legacy symlink remains")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(directory.path().join("styles/kit.leptos-ui-kit.bak"))
+            .expect("legacy backup symlink remains")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn readonly_targets_conflict_without_stages_backups_or_target_changes() {
+    let directory = tempdir().expect("tempdir");
+    fs::create_dir_all(directory.path().join("styles")).expect("create styles");
+    let target = directory.path().join("styles/kit.css");
+    fs::write(&target, b"before\n").expect("seed target");
+    let mut permissions = fs::metadata(&target)
+        .expect("target metadata")
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&target, permissions).expect("make target readonly");
+
+    let error = write_file_atomic(directory.path(), "styles/kit.css", b"after\n")
+        .expect_err("readonly target must conflict");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert_eq!(fs::read(&target).expect("read target"), b"before\n");
+    assert!(
+        !fs::read_dir(directory.path().join("styles"))
+            .expect("styles entries")
+            .any(|entry| {
+                entry
+                    .expect("style entry")
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| {
+                        name.starts_with(".leptos-ui-kit-stage-")
+                            || name.starts_with(".leptos-ui-kit-backup-")
+                    })
+            })
+    );
 }
 
 #[cfg(windows)]
@@ -888,22 +948,36 @@ fn windows_coordination_lock_and_temporary_reparse_points_cannot_capture_writes(
 
     let stage_project = tempdir().expect("stage project");
     fs::create_dir_all(stage_project.path().join("styles")).expect("create styles");
+    fs::write(stage_project.path().join("styles/kit.css"), b"before\n").expect("seed target");
     let stage_referent = outside.path().join("stage-referent");
+    let backup_referent = outside.path().join("backup-referent");
     fs::write(&stage_referent, b"outside stage\n").expect("write stage referent");
+    fs::write(&backup_referent, b"outside backup\n").expect("write backup referent");
     std::os::windows::fs::symlink_file(
         &stage_referent,
         stage_project.path().join("styles/kit.leptos-ui-kit.tmp"),
     )
     .expect("create stage reparse point");
+    std::os::windows::fs::symlink_file(
+        &backup_referent,
+        stage_project.path().join("styles/kit.leptos-ui-kit.bak"),
+    )
+    .expect("create backup reparse point");
 
-    let error = write_file_atomic(stage_project.path(), "styles/kit.css", b"replacement\n")
-        .expect_err("stage reparse point must fail");
-    assert!(matches!(error, CodegenError::UnsafePath { .. }));
+    write_file_atomic(stage_project.path(), "styles/kit.css", b"replacement\n")
+        .expect("random exclusive stage bypasses predictable reparse point");
     assert_eq!(
         fs::read(stage_referent).expect("read stage referent"),
         b"outside stage\n"
     );
-    assert!(!stage_project.path().join("styles/kit.css").exists());
+    assert_eq!(
+        fs::read(backup_referent).expect("read backup referent"),
+        b"outside backup\n"
+    );
+    assert_eq!(
+        fs::read(stage_project.path().join("styles/kit.css")).expect("read target"),
+        b"replacement\n"
+    );
 }
 
 #[cfg(unix)]

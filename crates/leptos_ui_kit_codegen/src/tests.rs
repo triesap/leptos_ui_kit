@@ -3682,12 +3682,12 @@ fn whole_cohort_preimage_conflict_aborts_before_target_writes() {
     assert!(
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "index.html")
     );
-    assert!(!fault_fs.events().iter().any(|event| {
-        matches!(
-            event.operation,
-            FsOperation::WriteFile | FsOperation::Rename
-        )
-    }));
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| { event.operation == FsOperation::Rename })
+    );
     assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
 }
 
@@ -3723,12 +3723,12 @@ fn malformed_cohort_missing_a_later_preimage_aborts_before_target_transaction_io
     assert!(
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/second.css")
     );
-    assert!(!fault_fs.events().iter().any(|event| {
-        matches!(
-            event.operation,
-            FsOperation::WriteFile | FsOperation::Rename
-        )
-    }));
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| { event.operation == FsOperation::Rename })
+    );
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("first target"),
         b"first-before\n"
@@ -3785,12 +3785,10 @@ fn exact_preimages_conflict_on_same_length_change_deletion_and_appearance() {
             "{case}: {error}"
         );
         assert!(
-            !fault_fs.events().iter().any(|event| {
-                matches!(
-                    event.operation,
-                    FsOperation::WriteFile | FsOperation::Rename
-                )
-            }),
+            !fault_fs
+                .events()
+                .iter()
+                .any(|event| { event.operation == FsOperation::Rename }),
             "{case}"
         );
     }
@@ -4027,8 +4025,18 @@ fn newly_created_parent_identity_is_bound_through_commit() {
 
     assert!(matches!(error, CodegenError::PreimageConflict { .. }));
     assert!(!parent.join("kit.css").exists());
+    let staged_paths = fs::read_dir(&moved_parent)
+        .expect("read detached stage parent")
+        .map(|entry| entry.expect("stage entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(staged_paths.len(), 1);
     assert_eq!(
-        fs::read(moved_parent.join("kit.leptos-ui-kit.tmp")).expect("staged file remains"),
+        fs::read(&staged_paths[0]).expect("staged file remains"),
         b"planned\n"
     );
     assert!(
@@ -4069,12 +4077,12 @@ fn mode_only_preimage_change_conflicts_before_target_writes() {
             .expect_err("mode-only change must conflict");
 
     assert!(matches!(error, CodegenError::PreimageConflict { .. }));
-    assert!(!fault_fs.events().iter().any(|event| {
-        matches!(
-            event.operation,
-            FsOperation::WriteFile | FsOperation::Rename
-        )
-    }));
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| { event.operation == FsOperation::Rename })
+    );
 }
 
 #[cfg(unix)]
@@ -4111,12 +4119,12 @@ fn retargeted_project_alias_conflicts_after_coordination_but_before_target_io() 
             .expect_err("retargeted root must conflict");
 
     assert!(matches!(error, CodegenError::ProjectRootChanged { .. }));
-    assert!(!fault_fs.events().iter().any(|event| {
-        matches!(
-            event.operation,
-            FsOperation::WriteFile | FsOperation::Rename
-        )
-    }));
+    assert!(
+        !fault_fs
+            .events()
+            .iter()
+            .any(|event| { event.operation == FsOperation::Rename })
+    );
     assert_eq!(
         fs::read(second.join("styles/kit.css")).expect("second target"),
         b"second\n"
@@ -4125,7 +4133,7 @@ fn retargeted_project_alias_conflicts_after_coordination_but_before_target_io() 
 }
 
 #[test]
-fn legacy_transaction_reorders_install_lock_to_the_final_rename() {
+fn transaction_stages_the_complete_sorted_cohort_and_commits_the_install_lock_last() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
@@ -4155,8 +4163,24 @@ fn legacy_transaction_reorders_install_lock_to_the_final_rename() {
 
     apply_planned_files_with(root, &files, &changes, fault_fs.clone()).expect("apply cohort");
 
-    let renames = fault_fs
-        .events()
+    let events = fault_fs.events();
+    let last_stage = events
+        .iter()
+        .rposition(|event| {
+            event.operation == FsOperation::CreateNewFile
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+        })
+        .expect("complete cohort staging");
+    let first_rename = events
+        .iter()
+        .position(|event| event.operation == FsOperation::Rename)
+        .expect("first commit rename");
+    assert!(last_stage < first_rename);
+    let renames = events
         .into_iter()
         .filter(|event| event.operation == FsOperation::Rename)
         .collect::<Vec<FsEvent>>();
@@ -4176,24 +4200,107 @@ fn legacy_transaction_reorders_install_lock_to_the_final_rename() {
 }
 
 #[test]
-fn legacy_atomic_write_reuses_the_predictable_temporary_path() {
+fn atomic_write_ignores_a_predictable_legacy_temporary_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
     let predictable = root.join("styles/kit.leptos-ui-kit.tmp");
     fs::write(&predictable, b"preexisting\n").expect("seed predictable path");
 
-    write_file_atomic(root, "styles/kit.css", b"replacement\n").expect("legacy write");
+    write_file_atomic(root, "styles/kit.css", b"replacement\n").expect("atomic write");
 
     assert_eq!(
         fs::read(root.join("styles/kit.css")).expect("read target"),
         b"replacement\n"
     );
-    assert!(!predictable.exists());
+    assert_eq!(
+        fs::read(predictable).expect("legacy temporary remains application-owned"),
+        b"preexisting\n"
+    );
 }
 
 #[test]
-fn legacy_rename_failure_leaves_a_partial_cohort_and_temporary_file() {
+fn atomic_write_preserves_arbitrary_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let bytes = [0, 0xff, b'\n'];
+
+    write_file_atomic(root, "styles/data.css", &bytes).expect("atomic byte write");
+
+    assert_eq!(
+        fs::read(root.join("styles/data.css")).expect("read bytes"),
+        bytes
+    );
+}
+
+#[test]
+fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_success() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
+    fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    let files = vec![
+        PlannedFile {
+            path: "styles/second.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "second-after\n".to_owned(),
+        },
+        PlannedFile {
+            path: "styles/first.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "first-after\n".to_owned(),
+        },
+    ];
+    let changes = vec![
+        ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
+        ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
+    ];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    apply_planned_files_with(root, &files, &changes, fault_fs.clone()).expect("apply updates");
+
+    let events = fault_fs.events();
+    let last_backup = events
+        .iter()
+        .rposition(|event| event.operation == FsOperation::HardLink)
+        .expect("backup hard links");
+    let first_rename = events
+        .iter()
+        .position(|event| event.operation == FsOperation::Rename)
+        .expect("first rename");
+    assert!(last_backup < first_rename);
+    assert_eq!(
+        events[first_rename].destination.as_deref(),
+        Some(root.join("styles/first.css").as_path())
+    );
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("first result"),
+        b"first-after\n"
+    );
+    assert_eq!(
+        fs::read(root.join("styles/second.css")).expect("second result"),
+        b"second-after\n"
+    );
+    assert!(
+        !fs::read_dir(root.join("styles"))
+            .expect("styles entries")
+            .any(|entry| {
+                entry
+                    .expect("style entry")
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| {
+                        name.starts_with(".leptos-ui-kit-stage-")
+                            || name.starts_with(".leptos-ui-kit-backup-")
+                    })
+            })
+    );
+}
+
+#[test]
+fn rename_failure_leaves_an_uncommitted_random_stage_for_later_recovery() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
@@ -4224,8 +4331,18 @@ fn legacy_rename_failure_leaves_a_partial_cohort_and_temporary_file() {
         b"first\n"
     );
     assert!(!root.join("styles/second.css").exists());
+    let stages = fs::read_dir(root.join("styles"))
+        .expect("read stage parent")
+        .map(|entry| entry.expect("stage entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages.len(), 1);
     assert_eq!(
-        fs::read(root.join("styles/second.leptos-ui-kit.tmp")).expect("second temporary remains"),
+        fs::read(&stages[0]).expect("second stage remains"),
         b"second\n"
     );
     assert_exact_persistent_coordination(root);

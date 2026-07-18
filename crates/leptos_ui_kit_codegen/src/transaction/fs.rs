@@ -83,13 +83,6 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     #[cfg(windows)]
     fn remove_file_by_handle(&self, file: File, path: &Path) -> Result<(), HandleDeleteError>;
     fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
-    fn write_file(
-        &self,
-        parent: &Dir,
-        name: &Path,
-        path: &Path,
-        content: &[u8],
-    ) -> io::Result<File>;
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn after_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn rename(
@@ -314,23 +307,6 @@ impl FsOps for SystemFs {
         parent.remove_dir(name)
     }
 
-    fn write_file(
-        &self,
-        parent: &Dir,
-        name: &Path,
-        _path: &Path,
-        content: &[u8],
-    ) -> io::Result<File> {
-        let mut options = OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        options.follow(FollowSymlinks::No);
-        options.nonblock(true);
-        let mut file = parent.open_with(name, &options)?;
-        opened_regular_file_identity(&file)?;
-        file.write_all(content)?;
-        Ok(file)
-    }
-
     fn before_final_revalidation(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
@@ -370,6 +346,24 @@ fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
     Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
 }
 
+pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Result<(u64, u64)> {
+    let metadata = parent.symlink_metadata(name)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "controlled path is not a regular file",
+        ));
+    }
+    #[cfg(windows)]
+    if cap_fs_ext::OsMetadataExt::file_attributes(&metadata) & 0x0000_0400 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "controlled path is a Windows reparse point",
+        ));
+    }
+    Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FsOperation {
@@ -393,7 +387,6 @@ pub(crate) enum FsOperation {
     #[cfg(windows)]
     RemoveFileByHandle,
     RemoveDirectory,
-    WriteFile,
     BeforeFinalRevalidation,
     AfterFinalRevalidation,
     Rename,
@@ -835,17 +828,6 @@ impl FsOps for FaultFs {
     fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
         self.before(FsOperation::RemoveDirectory, path, None)?;
         SystemFs.remove_dir(parent, name, path)
-    }
-
-    fn write_file(
-        &self,
-        parent: &Dir,
-        name: &Path,
-        path: &Path,
-        content: &[u8],
-    ) -> io::Result<File> {
-        self.before(FsOperation::WriteFile, path, None)?;
-        SystemFs.write_file(parent, name, path, content)
     }
 
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()> {

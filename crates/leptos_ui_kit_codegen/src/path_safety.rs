@@ -342,20 +342,6 @@ impl PlanningContext {
             })
     }
 
-    pub(crate) fn validate_auxiliary_path(&self, logical_path: &str) -> Result<(), CodegenError> {
-        let Some((parent, file_name)) = self.walk_parent(logical_path, false)? else {
-            return Ok(());
-        };
-        match parent.symlink_metadata(&file_name) {
-            Ok(metadata) => ensure_regular_file_metadata(logical_path, &metadata),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(CodegenError::Io {
-                path: self.project_root().join(logical_path),
-                source,
-            }),
-        }
-    }
-
     pub(crate) fn open_auxiliary_file(
         &self,
         logical_path: &str,
