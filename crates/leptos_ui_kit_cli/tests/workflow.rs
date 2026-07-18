@@ -489,29 +489,39 @@ fn assert_logical_path(path: &str) {
 
 fn assert_cargo_check(project: &Path, target: Option<&str>) {
     let rustc = rustup_tool("1.92.0", "rustc");
-    let mut command = Command::new("rustup");
-    command
-        .current_dir(project)
-        .env("CARGO_TARGET_DIR", project.join(".target"))
-        .env_remove("CARGO_BUILD_TARGET")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTFLAGS")
-        .env("RUSTC", rustc)
-        .env_remove("RUSTDOC")
-        .args(["run", "1.92.0", "cargo", "check"]);
-    if let Some(target) = target {
-        command.args(["--target", target]);
-    }
-    let output = command.output().expect("run cargo check");
+    let locked_passes: &[bool] = if target.is_none() {
+        &[false, true]
+    } else {
+        &[true]
+    };
+    for &locked in locked_passes {
+        let mut command = Command::new("rustup");
+        command
+            .current_dir(project)
+            .env("CARGO_TARGET_DIR", project.join(".target"))
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTFLAGS")
+            .env("RUSTC", &rustc)
+            .env_remove("RUSTDOC")
+            .args(["run", "1.92.0", "cargo", "check"]);
+        if locked {
+            command.arg("--locked");
+        }
+        if let Some(target) = target {
+            command.args(["--target", target]);
+        }
+        let output = command.output().expect("run cargo check");
 
-    assert!(
-        output.status.success(),
-        "cargo check {target:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "cargo check {target:?} locked={locked} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 fn rustup_tool(toolchain: &str, tool: &str) -> PathBuf {
@@ -618,6 +628,15 @@ fn copy_homepage_fixture(to: &Path) {
     copy_dir(&fixture_root(), to);
     fs::rename(to.join("Cargo.toml.fixture"), to.join("Cargo.toml"))
         .expect("activate fixture Cargo manifest");
+    let workspace_lock = workspace_root().join("Cargo.lock");
+    let package_lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+    let lock = if workspace_lock.is_file() {
+        workspace_lock
+    } else {
+        package_lock
+    };
+    fs::copy(lock, to.join("Cargo.lock"))
+        .expect("seed fixture with the validated workspace dependency lock");
 }
 
 fn copy_dir(from: &Path, to: &Path) {
