@@ -32,6 +32,7 @@ const TRANSACTIONS_DIRECTORY_NAME: &str = ".transactions";
 const TRANSACTION_JOURNAL_VERSION: u32 = 2;
 const TRANSACTION_JOURNAL_PREFIX: &str = "transaction-";
 const TRANSACTION_JOURNAL_SUFFIX: &str = ".json";
+const JOURNAL_INTENT_PREFIX: &str = "journal-intent-";
 const JOURNAL_UPDATE_PREFIX: &str = "journal-update-";
 
 struct AuxiliaryFile {
@@ -1223,15 +1224,34 @@ struct RecoveryInventory {
     transactions_path: PathBuf,
     journal_name: String,
     journal_path: PathBuf,
+    intent_names: Vec<String>,
     update_names: Vec<String>,
     data: TransactionJournalData,
 }
 
+struct OrphanIntentInventory {
+    kit_directory: Dir,
+    transactions_directory: Dir,
+    transactions_path: PathBuf,
+    name: String,
+    path: PathBuf,
+    observed: ObservedArtifact,
+}
+
 pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
     let context = PlanningContext::open(project_root)?;
-    let Some(inventory) = load_recovery_inventory(&context)? else {
+    let (inventory, orphan_intent) = load_recovery_inventory(&context)?;
+    if let Some(orphan_intent) = orphan_intent {
+        return Err(CodegenError::RecoveryRequired {
+            journal_path: orphan_intent.path,
+            reason: "an unpublished durable transaction intent must be cleaned by the next mutating command"
+                .to_owned(),
+        });
+    }
+    let Some(inventory) = inventory else {
         return Ok(());
     };
+    validate_recovery_application_state(&context, &inventory)?;
     Err(CodegenError::RecoveryRequired {
         journal_path: inventory.journal_path,
         reason: "a durable transaction journal must be recovered by the next mutating command"
@@ -1243,7 +1263,12 @@ pub(super) fn recover_pending_transaction(
     context: &PlanningContext,
     fs: &dyn FsOps,
 ) -> Result<(), CodegenError> {
-    let Some(inventory) = load_recovery_inventory(context)? else {
+    let (inventory, orphan_intent) = load_recovery_inventory(context)?;
+    if let Some(orphan_intent) = orphan_intent {
+        cleanup_orphan_intent(fs, orphan_intent)?;
+        return Ok(());
+    }
+    let Some(inventory) = inventory else {
         return Ok(());
     };
     validate_recovery_application_state(context, &inventory)?;
@@ -1276,6 +1301,21 @@ pub(super) fn recover_pending_transaction(
         }
         let (parent, target_name) = context.open_parent(&entry.logical_path)?;
         let target_path = context.project_root().join(&entry.logical_path);
+        let observed_target = read_auxiliary(&parent, &target_name, &target_path)?;
+        if entry.stage_identity.is_none()
+            || !artifact_matches_record(
+                &observed_target,
+                entry.stage_identity,
+                Some(&entry.planned_hash),
+                Some(entry.planned_length),
+                entry.planned_posix_mode,
+            )
+        {
+            return Err(third_state_error(
+                &inventory.journal_path,
+                &entry.logical_path,
+            ));
+        }
         match &entry.preimage {
             JournalPreimage::Absent => fs
                 .remove_file(&parent, Path::new(&target_name), &target_path)
@@ -1296,6 +1336,19 @@ pub(super) fn recover_pending_transaction(
                     .parent()
                     .expect("target has a parent")
                     .join(backup_name);
+                let observed_backup = read_auxiliary(&parent, backup_name, &backup_path)?;
+                if !artifact_matches_record(
+                    &observed_backup,
+                    entry.backup_identity,
+                    entry.backup_hash.as_deref(),
+                    entry.backup_length,
+                    entry.backup_posix_mode,
+                ) {
+                    return Err(third_state_error(
+                        &inventory.journal_path,
+                        &entry.logical_path,
+                    ));
+                }
                 fs.rename(
                     &parent,
                     Path::new(backup_name),
@@ -1334,10 +1387,27 @@ fn cleanup_recovery_updates(
     fs: &dyn FsOps,
     inventory: &RecoveryInventory,
 ) -> Result<(), CodegenError> {
-    for name in &inventory.update_names {
+    for name in inventory
+        .intent_names
+        .iter()
+        .chain(inventory.update_names.iter())
+    {
         let path = inventory.transactions_path.join(name);
+        validate_recovery_private_file(&inventory.transactions_directory, name, &path)?;
         match fs.remove_file(&inventory.transactions_directory, Path::new(name), &path) {
-            Ok(()) => {}
+            Ok(()) => fs
+                .sync_directory(
+                    &inventory.transactions_directory,
+                    &inventory.transactions_path,
+                )
+                .map_err(|source| {
+                    filesystem_operation_error(
+                        "sync recovery journal auxiliary cleanup",
+                        "src/components/ui/_kit/.transactions",
+                        inventory.transactions_path.clone(),
+                        source,
+                    )
+                })?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
                 return Err(filesystem_operation_error(
@@ -1350,6 +1420,76 @@ fn cleanup_recovery_updates(
         }
     }
     Ok(())
+}
+
+fn cleanup_orphan_intent(
+    fs: &dyn FsOps,
+    inventory: OrphanIntentInventory,
+) -> Result<(), CodegenError> {
+    validate_recovery_private_file(
+        &inventory.transactions_directory,
+        &inventory.name,
+        &inventory.path,
+    )?;
+    let current = read_auxiliary(
+        &inventory.transactions_directory,
+        &inventory.name,
+        &inventory.path,
+    )?;
+    if current != inventory.observed {
+        return Err(CodegenError::RecoveryRequired {
+            journal_path: inventory.path,
+            reason: "unpublished transaction intent changed before cleanup".to_owned(),
+        });
+    }
+    fs.remove_file(
+        &inventory.transactions_directory,
+        Path::new(&inventory.name),
+        &inventory.path,
+    )
+    .map_err(|source| {
+        filesystem_operation_error(
+            "remove unpublished transaction intent",
+            "src/components/ui/_kit/.transactions",
+            inventory.path.clone(),
+            source,
+        )
+    })?;
+    fs.sync_directory(
+        &inventory.transactions_directory,
+        &inventory.transactions_path,
+    )
+    .map_err(|source| {
+        filesystem_operation_error(
+            "sync unpublished transaction intent cleanup",
+            "src/components/ui/_kit/.transactions",
+            inventory.transactions_path.clone(),
+            source,
+        )
+    })?;
+    drop(inventory.transactions_directory);
+    fs.remove_dir(
+        &inventory.kit_directory,
+        Path::new(TRANSACTIONS_DIRECTORY_NAME),
+        &inventory.transactions_path,
+    )
+    .map_err(|source| {
+        filesystem_operation_error(
+            "remove unpublished transaction directory",
+            KIT_DIRECTORY_PATH,
+            inventory.transactions_path.clone(),
+            source,
+        )
+    })?;
+    fs.sync_directory(&inventory.kit_directory, &inventory.transactions_path)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "sync unpublished transaction directory cleanup",
+                KIT_DIRECTORY_PATH,
+                inventory.transactions_path,
+                source,
+            )
+        })
 }
 
 fn recovery_journal(inventory: RecoveryInventory) -> DurableJournal {
@@ -1365,11 +1505,11 @@ fn recovery_journal(inventory: RecoveryInventory) -> DurableJournal {
 
 fn load_recovery_inventory(
     context: &PlanningContext,
-) -> Result<Option<RecoveryInventory>, CodegenError> {
+) -> Result<(Option<RecoveryInventory>, Option<OrphanIntentInventory>), CodegenError> {
     let kit_directory = match context.open_directory(KIT_DIRECTORY_PATH) {
         Ok(directory) => directory,
         Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(None);
+            return Ok((None, None));
         }
         Err(error) => return Err(error),
     };
@@ -1379,7 +1519,7 @@ fn load_recovery_inventory(
         .join(TRANSACTIONS_DIRECTORY_NAME);
     let metadata = match kit_directory.symlink_metadata(TRANSACTIONS_DIRECTORY_NAME) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((None, None)),
         Err(source) => {
             return Err(CodegenError::Io {
                 path: transactions_path,
@@ -1405,6 +1545,7 @@ fn load_recovery_inventory(
     )?;
 
     let mut journal_names = Vec::new();
+    let mut intent_names = Vec::new();
     let mut update_names = Vec::new();
     for entry in transactions_directory
         .entries()
@@ -1426,6 +1567,8 @@ fn load_recovery_inventory(
             })?;
         if transaction_journal_name(&name) {
             journal_names.push(name);
+        } else if journal_intent_name(&name) {
+            intent_names.push(name);
         } else if journal_update_name(&name) {
             update_names.push(name);
         } else {
@@ -1436,14 +1579,32 @@ fn load_recovery_inventory(
         }
     }
     journal_names.sort();
+    intent_names.sort();
     update_names.sort();
-    if journal_names.is_empty() && update_names.is_empty() {
-        return Ok(None);
+    if journal_names.is_empty() && intent_names.is_empty() && update_names.is_empty() {
+        return Ok((None, None));
     }
     if journal_names.is_empty() {
+        if intent_names.len() == 1 && update_names.is_empty() {
+            let name = intent_names.pop().expect("one intent name");
+            let path = transactions_path.join(&name);
+            validate_recovery_private_file(&transactions_directory, &name, &path)?;
+            let observed = read_auxiliary(&transactions_directory, &name, &path)?;
+            return Ok((
+                None,
+                Some(OrphanIntentInventory {
+                    kit_directory,
+                    transactions_directory,
+                    transactions_path,
+                    name,
+                    path,
+                    observed,
+                }),
+            ));
+        }
         return Err(CodegenError::InvalidCoordinationState {
             path: transactions_path.display().to_string(),
-            reason: "transaction directory has no durable primary journal".to_owned(),
+            reason: "transaction directory has no unambiguous durable primary journal".to_owned(),
         });
     }
     if journal_names.len() != 1 {
@@ -1460,6 +1621,19 @@ fn load_recovery_inventory(
         &journal_name,
         &journal_path,
     )?;
+    for name in &intent_names {
+        if !journal_intent_name_for_transaction(name, &data.transaction_id) {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: transactions_path.join(name).display().to_string(),
+                reason: "journal intent is not bound to the active transaction".to_owned(),
+            });
+        }
+        validate_recovery_private_file(
+            &transactions_directory,
+            name,
+            &transactions_path.join(name),
+        )?;
+    }
     for name in &update_names {
         if !journal_update_name_for_transaction(name, &data.transaction_id) {
             return Err(CodegenError::InvalidCoordinationState {
@@ -1473,15 +1647,19 @@ fn load_recovery_inventory(
             &transactions_path.join(name),
         )?;
     }
-    Ok(Some(RecoveryInventory {
-        kit_directory,
-        transactions_directory,
-        transactions_path,
-        journal_name,
-        journal_path,
-        update_names,
-        data,
-    }))
+    Ok((
+        Some(RecoveryInventory {
+            kit_directory,
+            transactions_directory,
+            transactions_path,
+            journal_name,
+            journal_path,
+            intent_names,
+            update_names,
+            data,
+        }),
+        None,
+    ))
 }
 
 fn read_and_validate_journal(
@@ -1655,6 +1833,51 @@ fn validate_journal_data(
             });
         }
     }
+    let stage_ready = data
+        .entries
+        .iter()
+        .map(|entry| entry.stage_identity.is_some())
+        .collect::<Vec<_>>();
+    let backup_ready = data
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.preimage, JournalPreimage::RegularFile { .. }))
+        .map(|entry| entry.backup_identity.is_some())
+        .collect::<Vec<_>>();
+    let readiness_is_prefix =
+        |readiness: &[bool]| readiness.windows(2).all(|pair| !pair[1] || pair[0]);
+    let readiness_valid = match data.state {
+        JournalState::Intent => {
+            stage_ready.iter().all(|ready| !ready)
+                && data.entries.iter().all(|entry| {
+                    entry.backup_identity.is_none()
+                        && entry.backup_hash.is_none()
+                        && entry.backup_length.is_none()
+                })
+        }
+        JournalState::Preparing { .. } => {
+            readiness_is_prefix(&stage_ready)
+                && readiness_is_prefix(&backup_ready)
+                && (data
+                    .entries
+                    .iter()
+                    .all(|entry| entry.backup_identity.is_none())
+                    || stage_ready.iter().all(|ready| *ready))
+        }
+        JournalState::Prepared
+        | JournalState::Replacing { .. }
+        | JournalState::Committed { .. }
+        | JournalState::RollingBack { .. }
+        | JournalState::Applied => {
+            stage_ready.iter().all(|ready| *ready) && backup_ready.iter().all(|ready| *ready)
+        }
+    };
+    if !readiness_valid {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "journal artifact readiness is inconsistent with durable state".to_owned(),
+        });
+    }
     let count = match data.state {
         JournalState::Intent | JournalState::Prepared | JournalState::Applied => None,
         JournalState::Preparing { index } => Some(index),
@@ -1665,6 +1888,15 @@ fn validate_journal_data(
         return Err(CodegenError::InvalidCoordinationState {
             path: path.display().to_string(),
             reason: "journal progress exceeds its cohort".to_owned(),
+        });
+    }
+    if matches!(data.state, JournalState::Preparing { index } if index >= data.entries.len())
+        || matches!(data.state, JournalState::Replacing { index } if index >= data.entries.len())
+        || matches!(data.state, JournalState::Committed { count } if count == 0)
+    {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: path.display().to_string(),
+            reason: "journal progress is not reachable for its durable state".to_owned(),
         });
     }
     for directory in &data.created_directories {
@@ -1701,7 +1933,7 @@ fn validate_recovery_application_state(
                 &entry.logical_path,
             ));
         }
-        let (parent, _) = match context.open_parent(&entry.logical_path) {
+        let (parent, target_name) = match context.open_parent(&entry.logical_path) {
             Ok(parent) => parent,
             Err(CodegenError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound
@@ -1714,11 +1946,29 @@ fn validate_recovery_application_state(
             Err(error) => return Err(error),
         };
         let target_path = context.project_root().join(&entry.logical_path);
+        if target_matches_planned(&current, entry) {
+            let observed_target = read_auxiliary(&parent, &target_name, &target_path)?;
+            if entry.stage_identity.is_none()
+                || !artifact_matches_record(
+                    &observed_target,
+                    entry.stage_identity,
+                    Some(&entry.planned_hash),
+                    Some(entry.planned_length),
+                    entry.planned_posix_mode,
+                )
+            {
+                return Err(third_state_error(
+                    &inventory.journal_path,
+                    &entry.logical_path,
+                ));
+            }
+        }
         let stage_path = target_path
             .parent()
             .expect("target has a parent")
             .join(&entry.stage_name);
         if let Some(observed) = read_optional_auxiliary(&parent, &entry.stage_name, &stage_path)?
+            && entry.stage_identity.is_some()
             && (observed.content_hash != entry.planned_hash
                 || observed.length != entry.planned_length
                 || entry
@@ -1747,18 +1997,20 @@ fn validate_recovery_application_state(
                 .expect("target has a parent")
                 .join(backup_name);
             let backup = read_optional_auxiliary(&parent, backup_name, &backup_path)?;
-            if backup.as_ref().is_some_and(|observed| {
-                observed.content_hash != *content_hash
-                    || !artifact_matches_record(
-                        observed,
-                        entry.backup_identity,
-                        entry.backup_hash.as_deref(),
-                        entry.backup_length,
-                        entry.backup_posix_mode,
-                    )
-            }) || (!matches!(inventory.data.state, JournalState::Applied)
-                && target_matches_planned(&current, entry)
-                && backup.is_none())
+            if (entry.backup_identity.is_some()
+                && backup.as_ref().is_some_and(|observed| {
+                    observed.content_hash != *content_hash
+                        || !artifact_matches_record(
+                            observed,
+                            entry.backup_identity,
+                            entry.backup_hash.as_deref(),
+                            entry.backup_length,
+                            entry.backup_posix_mode,
+                        )
+                }))
+                || (!matches!(inventory.data.state, JournalState::Applied)
+                    && target_matches_planned(&current, entry)
+                    && backup.is_none())
             {
                 return Err(third_state_error(
                     &inventory.journal_path,
@@ -1958,8 +2210,16 @@ fn transaction_journal_name(name: &str) -> bool {
         .is_some_and(random_suffix)
 }
 
+fn journal_intent_name(name: &str) -> bool {
+    journal_auxiliary_name(name, JOURNAL_INTENT_PREFIX)
+}
+
 fn journal_update_name(name: &str) -> bool {
-    let Some(suffix) = name.strip_prefix(JOURNAL_UPDATE_PREFIX) else {
+    journal_auxiliary_name(name, JOURNAL_UPDATE_PREFIX)
+}
+
+fn journal_auxiliary_name(name: &str, prefix: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(prefix) else {
         return false;
     };
     let Some((transaction_id, update_id)) = suffix.split_once('-') else {
@@ -1968,8 +2228,16 @@ fn journal_update_name(name: &str) -> bool {
     random_suffix(transaction_id) && random_suffix(update_id)
 }
 
+fn journal_intent_name_for_transaction(name: &str, transaction_id: &str) -> bool {
+    journal_auxiliary_name_for_transaction(name, JOURNAL_INTENT_PREFIX, transaction_id)
+}
+
 fn journal_update_name_for_transaction(name: &str, transaction_id: &str) -> bool {
-    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
+    journal_auxiliary_name_for_transaction(name, JOURNAL_UPDATE_PREFIX, transaction_id)
+}
+
+fn journal_auxiliary_name_for_transaction(name: &str, prefix: &str, transaction_id: &str) -> bool {
+    name.strip_prefix(prefix)
         .and_then(|suffix| suffix.split_once('-'))
         .is_some_and(|(candidate, update_id)| {
             candidate == transaction_id && random_suffix(update_id)
@@ -2251,59 +2519,108 @@ impl DurableJournal {
 
     fn create_initial(&self, fs: &dyn FsOps) -> Result<(), CodegenError> {
         let content = serialize_journal(&self.data, &self.path)?;
+        let intent_name = format!(
+            "{JOURNAL_INTENT_PREFIX}{}-{}",
+            self.data.transaction_id,
+            random_hex(&self.path)?
+        );
+        let intent_path = self.transactions_path.join(&intent_name);
         let mut created = fs
             .create_new_file(
                 &self.transactions_directory,
-                Path::new(&self.name),
-                &self.path,
+                Path::new(&intent_name),
+                &intent_path,
                 0o600,
             )
             .map_err(|source| {
                 filesystem_operation_error(
-                    "create durable transaction intent",
+                    "create unpublished transaction intent",
                     KIT_DIRECTORY_PATH,
-                    self.path.clone(),
+                    intent_path.clone(),
                     source,
                 )
             })?;
-        let result = (|| {
-            fs.write_handle(&mut created.file, &self.path, &content)
+        let prepare = (|| {
+            fs.write_handle(&mut created.file, &intent_path, &content)
                 .map_err(|source| {
                     filesystem_operation_error(
-                        "write durable transaction journal",
+                        "write unpublished transaction intent",
                         KIT_DIRECTORY_PATH,
-                        self.path.clone(),
+                        intent_path.clone(),
                         source,
                     )
                 })?;
-            fs.sync_handle(&created.file, &self.path)
+            fs.sync_handle(&created.file, &intent_path)
                 .map_err(|source| {
                     filesystem_operation_error(
-                        "sync durable transaction journal",
+                        "sync unpublished transaction intent",
                         KIT_DIRECTORY_PATH,
-                        self.path.clone(),
-                        source,
-                    )
-                })?;
-            fs.sync_directory(&self.transactions_directory, &self.transactions_path)
-                .map_err(|source| {
-                    filesystem_operation_error(
-                        "sync transaction journal directory",
-                        KIT_DIRECTORY_PATH,
-                        self.transactions_path.clone(),
+                        intent_path.clone(),
                         source,
                     )
                 })
         })();
         drop(created.file);
-        if result.is_err() {
+        if let Err(error) = prepare {
             let _ = fs.remove_file(
+                &self.transactions_directory,
+                Path::new(&intent_name),
+                &intent_path,
+            );
+            return Err(error);
+        }
+        fs.hard_link(
+            &[],
+            HardLinkEndpoint::new(
+                &self.transactions_directory,
+                Path::new(&intent_name),
+                &intent_path,
+            ),
+            HardLinkEndpoint::new(
                 &self.transactions_directory,
                 Path::new(&self.name),
                 &self.path,
-            );
-        }
-        result
+            ),
+        )
+        .map_err(|source| {
+            filesystem_operation_error(
+                "publish durable transaction intent",
+                KIT_DIRECTORY_PATH,
+                self.path.clone(),
+                source,
+            )
+        })?;
+        fs.sync_directory(&self.transactions_directory, &self.transactions_path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync durable transaction intent publication",
+                    KIT_DIRECTORY_PATH,
+                    self.transactions_path.clone(),
+                    source,
+                )
+            })?;
+        fs.remove_file(
+            &self.transactions_directory,
+            Path::new(&intent_name),
+            &intent_path,
+        )
+        .map_err(|source| {
+            filesystem_operation_error(
+                "remove unpublished transaction intent link",
+                KIT_DIRECTORY_PATH,
+                intent_path,
+                source,
+            )
+        })?;
+        fs.sync_directory(&self.transactions_directory, &self.transactions_path)
+            .map_err(|source| {
+                filesystem_operation_error(
+                    "sync unpublished transaction intent cleanup",
+                    KIT_DIRECTORY_PATH,
+                    self.transactions_path.clone(),
+                    source,
+                )
+            })
     }
 
     fn persist(&self, fs: &dyn FsOps) -> Result<(), CodegenError> {
@@ -2778,10 +3095,18 @@ fn cleanup_created_directories_strict(
             path: path.clone(),
             source,
         })?;
-        if directory.identity.is_some_and(|identity| {
-            (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata))
-                != (identity.device, identity.inode)
-        }) {
+        let Some(identity) = directory.identity else {
+            return Err(CodegenError::RecoveryRequired {
+                journal_path: path,
+                reason: format!(
+                    "transaction-created directory {} has no durably recorded identity",
+                    directory.logical_path
+                ),
+            });
+        };
+        if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata))
+            != (identity.device, identity.inode)
+        {
             return Err(CodegenError::RecoveryRequired {
                 journal_path: path,
                 reason: format!(

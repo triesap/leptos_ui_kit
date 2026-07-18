@@ -804,22 +804,26 @@ impl FsOps for FaultFs {
 
     fn set_file_mode(&self, file: &File, path: &Path, mode: u32) -> io::Result<()> {
         self.before(FsOperation::SetFileMode, path, None)?;
-        SystemFs.set_file_mode(file, path, mode)
+        SystemFs.set_file_mode(file, path, mode)?;
+        self.after_success(FsOperation::SetFileMode, path)
     }
 
     fn set_path_mode(&self, parent: &Dir, name: &Path, path: &Path, mode: u32) -> io::Result<()> {
         self.before(FsOperation::SetFileMode, path, None)?;
-        SystemFs.set_path_mode(parent, name, path, mode)
+        SystemFs.set_path_mode(parent, name, path, mode)?;
+        self.after_success(FsOperation::SetFileMode, path)
     }
 
     fn set_directory_mode(&self, directory: &Dir, path: &Path, mode: u32) -> io::Result<()> {
         self.before(FsOperation::SetDirectoryMode, path, None)?;
-        SystemFs.set_directory_mode(directory, path, mode)
+        SystemFs.set_directory_mode(directory, path, mode)?;
+        self.after_success(FsOperation::SetDirectoryMode, path)
     }
 
     fn write_handle(&self, file: &mut File, path: &Path, content: &[u8]) -> io::Result<()> {
         self.before(FsOperation::WriteHandle, path, None)?;
-        SystemFs.write_handle(file, path, content)
+        SystemFs.write_handle(file, path, content)?;
+        self.after_success(FsOperation::WriteHandle, path)
     }
 
     fn sync_handle(&self, file: &File, path: &Path) -> io::Result<()> {
@@ -830,7 +834,8 @@ impl FsOps for FaultFs {
 
     fn sync_directory(&self, directory: &Dir, path: &Path) -> io::Result<()> {
         self.before(FsOperation::SyncDirectory, path, None)?;
-        SystemFs.sync_directory(directory, path)
+        SystemFs.sync_directory(directory, path)?;
+        self.after_success(FsOperation::SyncDirectory, path)
     }
 
     fn try_lock(&self, file: &File, path: &Path) -> Result<(), std::fs::TryLockError> {
@@ -854,7 +859,8 @@ impl FsOps for FaultFs {
 
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
         self.before(FsOperation::RemoveFile, path, None)?;
-        SystemFs.remove_file(parent, name, path)
+        SystemFs.remove_file(parent, name, path)?;
+        self.after_success(FsOperation::RemoveFile, path)
     }
 
     #[cfg(windows)]
@@ -867,7 +873,8 @@ impl FsOps for FaultFs {
 
     fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
         self.before(FsOperation::RemoveDirectory, path, None)?;
-        SystemFs.remove_dir(parent, name, path)
+        SystemFs.remove_dir(parent, name, path)?;
+        self.after_success(FsOperation::RemoveDirectory, path)
     }
 
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()> {
@@ -943,7 +950,8 @@ impl FsOps for FaultFs {
         to: &Path,
     ) -> io::Result<()> {
         self.before(FsOperation::Rename, from, Some(to))?;
-        SystemFs.rename(from_parent, from_name, from, to_parent, to_name, to)
+        SystemFs.rename(from_parent, from_name, from, to_parent, to_name, to)?;
+        self.after_success(FsOperation::Rename, to)
     }
 
     fn rename_journal(
@@ -956,6 +964,7 @@ impl FsOps for FaultFs {
         to: &Path,
     ) -> io::Result<()> {
         self.before(FsOperation::RenameJournal, from, Some(to))?;
-        SystemFs.rename_journal(from_parent, from_name, from, to_parent, to_name, to)
+        SystemFs.rename_journal(from_parent, from_name, from, to_parent, to_name, to)?;
+        self.after_success(FsOperation::RenameJournal, to)
     }
 }

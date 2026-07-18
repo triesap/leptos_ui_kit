@@ -18,6 +18,9 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets
 ```
 
+Transaction changes must also keep the codegen all-target suite green on
+Linux, macOS, and Windows. The repository workflow runs that portable matrix.
+
 ## Packaging validation
 
 Changes to package manifests, include lists, embedded assets, provenance, or

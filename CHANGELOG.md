@@ -7,6 +7,8 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
+  recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,
   and package-local public schemas in one deterministic runtime catalog.
 - Resolve package provenance from Cargo VCS metadata as a complete Git

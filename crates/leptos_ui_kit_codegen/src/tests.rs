@@ -2375,6 +2375,8 @@ fn first_use_publishes_only_an_initialized_and_locked_inode() {
 const LOCK_STAGE_ROLE_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_ROLE";
 const LOCK_STAGE_PROJECT_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_PROJECT";
 const LOCK_STAGE_CONTROL_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_CONTROL";
+const TRANSACTION_CRASH_OPERATION_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_CRASH_OPERATION";
+const TRANSACTION_CRASH_ORDINAL_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_CRASH_ORDINAL";
 
 #[test]
 fn visible_unlocked_candidate_converges_on_the_published_lock() {
@@ -3103,6 +3105,24 @@ fn transaction_lock_stage_worker() {
         env::var_os(LOCK_STAGE_CONTROL_ENV).expect("stage worker control environment"),
     );
     let role = role.to_str().expect("UTF-8 stage worker role");
+    if role == "transaction-crash" {
+        let operation = parse_transaction_crash_operation(
+            &env::var(TRANSACTION_CRASH_OPERATION_ENV).expect("crash operation environment"),
+        );
+        let ordinal = env::var(TRANSACTION_CRASH_ORDINAL_ENV)
+            .expect("crash ordinal environment")
+            .parse::<usize>()
+            .expect("crash ordinal");
+        let fs = Arc::new(FaultFs::pause_after_success(
+            operation,
+            ordinal,
+            control.join("transaction-crash-ready"),
+            control.join("release-transaction-crash"),
+        ));
+        let (files, changes) = two_file_update_plan();
+        let result = apply_planned_files_with(&project, &files, &changes, fs);
+        panic!("transaction crash worker passed its barrier: {result:?}");
+    }
     if let Some(ordinal) = role.strip_prefix("paused-directory-") {
         let ordinal = ordinal.parse::<usize>().expect("directory pause ordinal");
         let fs = Arc::new(FaultFs::pause_after_success(
@@ -4619,7 +4639,7 @@ fn committed_cleanup_failure_is_finish_only_and_preserves_desired_state() {
         root,
         &files,
         &changes,
-        Arc::new(FaultFs::fail_nth(FsOperation::RemoveFile, 1)),
+        Arc::new(FaultFs::fail_nth(FsOperation::RemoveFile, 2)),
     )
     .expect_err("committed cleanup failure");
 
@@ -4853,6 +4873,80 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
 }
 
 #[test]
+fn killed_writers_recover_after_every_transaction_mutation_boundary() {
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let (files, changes) = setup_two_file_update(baseline.path());
+    let lock = WriteLock::acquire(baseline.path()).expect("bootstrap baseline coordination");
+    drop(lock);
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
+        .expect("baseline transaction");
+    let operations = [
+        FsOperation::CreateDirectory,
+        FsOperation::CreateNewFile,
+        FsOperation::SetFileMode,
+        FsOperation::SetDirectoryMode,
+        FsOperation::WriteHandle,
+        FsOperation::SyncHandle,
+        FsOperation::SyncDirectory,
+        FsOperation::HardLink,
+        FsOperation::RenameJournal,
+        FsOperation::Rename,
+        FsOperation::RemoveFile,
+        FsOperation::RemoveDirectory,
+    ];
+    let mut barriers = 0;
+
+    for operation in operations {
+        let count = baseline_fs
+            .events()
+            .iter()
+            .filter(|event| event.operation == operation)
+            .count();
+        for ordinal in 1..=count {
+            barriers += 1;
+            let directory = tempfile::tempdir().expect("crash tempdir");
+            let root = directory.path();
+            let control = root.join("crash-control");
+            fs::create_dir(&control).expect("create crash control directory");
+            setup_two_file_update(root);
+            let lock = WriteLock::acquire(root).expect("bootstrap crash coordination");
+            drop(lock);
+            let mut worker = spawn_transaction_crash_worker(operation, ordinal, root, &control);
+            let barrier_path = control.join("transaction-crash-ready");
+            wait_for_worker_path(&barrier_path, &mut worker);
+            let mutation_path = fs::read_to_string(&barrier_path).expect("read mutation path");
+            worker.kill_and_wait();
+
+            let recovered = WriteLock::acquire(root).unwrap_or_else(|error| {
+                panic!(
+                    "fresh writer failed after {operation:?} mutation {ordinal} at {mutation_path}: {error}"
+                )
+            });
+            drop(recovered);
+            let first = fs::read(root.join("styles/first.css")).expect("first target");
+            let second = fs::read(root.join("styles/second.css")).expect("second target");
+            let exact_before = first == b"first-before\n" && second == b"second-before\n";
+            let exact_after = first == b"first-after\n" && second == b"second-after\n";
+            assert!(
+                exact_before || exact_after,
+                "partial state after {operation:?} mutation {ordinal}"
+            );
+            assert!(
+                transaction_journal_paths(root).is_empty(),
+                "retained journal after recovering {operation:?} mutation {ordinal}"
+            );
+            assert_exact_persistent_coordination(root);
+        }
+    }
+
+    assert!(
+        barriers >= 20,
+        "expected a complete transaction barrier matrix"
+    );
+}
+
+#[test]
 fn transaction_io_errors_name_the_operation_and_logical_project_path() {
     for (operation, ordinal, expected_operation) in [
         (FsOperation::WriteHandle, 3, "write transaction stage"),
@@ -4898,6 +4992,10 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
     fs::create_dir_all(root.join("styles")).expect("styles");
     fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
     fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    two_file_update_plan()
+}
+
+fn two_file_update_plan() -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
     (
         vec![
             PlannedFile {
@@ -4916,6 +5014,42 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
             ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
         ],
     )
+}
+
+fn transaction_crash_operation_name(operation: FsOperation) -> &'static str {
+    match operation {
+        FsOperation::CreateDirectory => "create-directory",
+        FsOperation::CreateNewFile => "create-new-file",
+        FsOperation::SetFileMode => "set-file-mode",
+        FsOperation::SetDirectoryMode => "set-directory-mode",
+        FsOperation::WriteHandle => "write-handle",
+        FsOperation::SyncHandle => "sync-handle",
+        FsOperation::SyncDirectory => "sync-directory",
+        FsOperation::HardLink => "hard-link",
+        FsOperation::RemoveFile => "remove-file",
+        FsOperation::RemoveDirectory => "remove-directory",
+        FsOperation::Rename => "rename",
+        FsOperation::RenameJournal => "rename-journal",
+        other => panic!("unsupported transaction crash operation {other:?}"),
+    }
+}
+
+fn parse_transaction_crash_operation(value: &str) -> FsOperation {
+    match value {
+        "create-directory" => FsOperation::CreateDirectory,
+        "create-new-file" => FsOperation::CreateNewFile,
+        "set-file-mode" => FsOperation::SetFileMode,
+        "set-directory-mode" => FsOperation::SetDirectoryMode,
+        "write-handle" => FsOperation::WriteHandle,
+        "sync-handle" => FsOperation::SyncHandle,
+        "sync-directory" => FsOperation::SyncDirectory,
+        "hard-link" => FsOperation::HardLink,
+        "remove-file" => FsOperation::RemoveFile,
+        "remove-directory" => FsOperation::RemoveDirectory,
+        "rename" => FsOperation::Rename,
+        "rename-journal" => FsOperation::RenameJournal,
+        other => panic!("unknown transaction crash operation {other}"),
+    }
 }
 
 fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
@@ -4958,6 +5092,32 @@ fn spawn_lock_stage_worker(role: &str, project: &Path, control: &Path) -> LockSt
         .env(LOCK_STAGE_CONTROL_ENV, control)
         .spawn()
         .expect("spawn lock-stage worker");
+    LockStageWorker { child: Some(child) }
+}
+
+fn spawn_transaction_crash_worker(
+    operation: FsOperation,
+    ordinal: usize,
+    project: &Path,
+    control: &Path,
+) -> LockStageWorker {
+    let child = Command::new(env::current_exe().expect("current unit-test executable"))
+        .args([
+            "--exact",
+            "tests::transaction_lock_stage_worker",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LOCK_STAGE_ROLE_ENV, "transaction-crash")
+        .env(LOCK_STAGE_PROJECT_ENV, project)
+        .env(LOCK_STAGE_CONTROL_ENV, control)
+        .env(
+            TRANSACTION_CRASH_OPERATION_ENV,
+            transaction_crash_operation_name(operation),
+        )
+        .env(TRANSACTION_CRASH_ORDINAL_ENV, ordinal.to_string())
+        .spawn()
+        .expect("spawn transaction crash worker");
     LockStageWorker { child: Some(child) }
 }
 

@@ -30,6 +30,7 @@ const LOCK_CANDIDATE_PREFIX: &str = "lock-bootstrap-";
 const IGNORE_CANDIDATE_PREFIX: &str = "ignore-bootstrap-";
 const TRANSACTION_JOURNAL_PREFIX: &str = "transaction-";
 const TRANSACTION_JOURNAL_SUFFIX: &str = ".json";
+const JOURNAL_INTENT_PREFIX: &str = "journal-intent-";
 const JOURNAL_UPDATE_PREFIX: &str = "journal-update-";
 const LOCK_CANDIDATE_RANDOM_BYTES: usize = 16;
 const LOCK_CANDIDATE_CREATE_ATTEMPTS: usize = 8;
@@ -1406,7 +1407,10 @@ fn cleanup_stale_lock_candidates(
                 source,
             })?;
             let name = entry.file_name();
-            if transaction_journal_name(&name) || journal_update_name(&name) {
+            if transaction_journal_name(&name)
+                || journal_auxiliary_name(&name, JOURNAL_INTENT_PREFIX)
+                || journal_auxiliary_name(&name, JOURNAL_UPDATE_PREFIX)
+            {
                 journal_present = true;
                 continue;
             }
@@ -1845,17 +1849,29 @@ fn transaction_journal_name(name: &OsStr) -> bool {
         })
 }
 
-fn journal_update_name(name: &OsStr) -> bool {
+fn journal_auxiliary_name(name: &OsStr, prefix: &str) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    name.strip_prefix(JOURNAL_UPDATE_PREFIX)
-        .is_some_and(|suffix| {
-            suffix.len() == LOCK_CANDIDATE_RANDOM_BYTES * 2
-                && suffix
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+    let Some((transaction_id, update_id)) = name.strip_prefix(prefix).and_then(|suffix| {
+        let split = LOCK_CANDIDATE_RANDOM_BYTES * 2;
+        suffix
+            .get(..split)
+            .zip(suffix.get(split..))
+            .and_then(|(transaction_id, remainder)| {
+                remainder
+                    .strip_prefix('-')
+                    .map(|update_id| (transaction_id, update_id))
+            })
+    }) else {
+        return false;
+    };
+    [transaction_id, update_id].into_iter().all(|value| {
+        value.len() == LOCK_CANDIDATE_RANDOM_BYTES * 2
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[cfg(unix)]
