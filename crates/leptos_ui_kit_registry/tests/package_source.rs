@@ -57,7 +57,7 @@ const REGISTRY_TESTS: [&str; 7] = [
 
 const FACADE_FILES: [&str; 1] = ["src/lib.rs"];
 const PRIMITIVES_FILES: [&str; 1] = ["src/lib.rs"];
-const CODEGEN_FILES: [&str; 28] = [
+const CODEGEN_FILES: [&str; 29] = [
     "src/command.rs",
     "src/digest.rs",
     "src/error.rs",
@@ -81,6 +81,7 @@ const CODEGEN_FILES: [&str; 28] = [
     "src/transaction/mod.rs",
     "src/transaction/replace.rs",
     "src/transaction/runtime.rs",
+    "src/transaction/store.rs",
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
     "tests/public_api.rs",

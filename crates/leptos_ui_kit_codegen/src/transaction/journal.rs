@@ -36,7 +36,7 @@ pub(super) struct JournalModelError {
 }
 
 impl JournalModelError {
-    fn new(reason: impl Into<String>) -> Self {
+    pub(super) fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
@@ -432,25 +432,15 @@ impl ExactFileStateV2 {
 pub(super) struct ExactDirectoryStateV2 {
     identity: ObjectIdentityV2,
     mode: DirectoryModeV2,
-    link_count: u64,
 }
 
 impl ExactDirectoryStateV2 {
     pub(super) fn new(
         identity: ObjectIdentityV2,
         mode: DirectoryModeV2,
-        link_count: u64,
+        _link_count: u64,
     ) -> Result<Self, JournalModelError> {
-        if link_count == 0 {
-            return Err(JournalModelError::new(
-                "an exact directory state must have a positive link count",
-            ));
-        }
-        Ok(Self {
-            identity,
-            mode,
-            link_count,
-        })
+        Ok(Self { identity, mode })
     }
 
     pub(super) const fn identity(&self) -> ObjectIdentityV2 {
@@ -461,18 +451,8 @@ impl ExactDirectoryStateV2 {
         self.mode
     }
 
-    pub(super) const fn link_count(&self) -> u64 {
-        self.link_count
-    }
-
     fn validate(&self) -> Result<(), JournalModelError> {
-        validate_posix_mode(self.mode.posix_mode)?;
-        if self.link_count == 0 {
-            return Err(JournalModelError::new(
-                "an exact directory state must have a positive link count",
-            ));
-        }
-        Ok(())
+        validate_posix_mode(self.mode.posix_mode)
     }
 }
 
@@ -701,8 +681,6 @@ impl ProjectBindingV2 {
         )?;
         if self.workspace_parent_after_workspace.identity != self.workspace_parent_current.identity
             || self.workspace_parent_after_workspace.mode != self.workspace_parent_current.mode
-            || self.workspace_parent_current.link_count
-                < self.workspace_parent_after_workspace.link_count
         {
             return Err(JournalModelError::new(
                 "workspace-parent current state cannot predate or substitute the exact post-workspace parent",
@@ -1491,7 +1469,7 @@ impl<'de> Deserialize<'de> for WorkspaceBootstrapEnvelopeV2 {
 }
 
 impl WorkspaceBootstrapEnvelopeV2 {
-    fn for_project(transaction_id: &TransactionId, project: &ProjectBindingV2) -> Self {
+    pub(super) fn for_project(transaction_id: &TransactionId, project: &ProjectBindingV2) -> Self {
         Self {
             magic: BOOTSTRAP_MAGIC.to_owned(),
             version: JOURNAL_VERSION,
@@ -1593,7 +1571,6 @@ impl WorkspaceBootstrapBindingV2 {
         self.intent.validate()?;
         if self.intent.envelope.transaction_id != *transaction_id
             || self.intent.envelope.canonical_root_hash != project.canonical_root_hash
-            || self.intent.envelope.workspace_parent_preimage != project.workspace_parent_preimage
             || self.name != bootstrap_owner_name(transaction_id)
             || self.envelope != WorkspaceBootstrapEnvelopeV2::for_project(transaction_id, project)
         {
@@ -1601,6 +1578,10 @@ impl WorkspaceBootstrapBindingV2 {
                 "bootstrap binding is not the canonical exact owner envelope",
             ));
         }
+        validate_parent_stable_growth(
+            &self.intent.envelope.workspace_parent_preimage,
+            &project.workspace_parent_preimage,
+        )?;
         self.validate_exact_file()
     }
 
@@ -2419,14 +2400,12 @@ impl JournalSnapshotV2 {
             }
             (PresenceV2::Present(exact), PresenceV2::Missing)
                 if exact.identity == intent.expected_candidate.identity
-                    && exact.link_count == intent.expected_candidate.link_count
                     && exact.mode == directory.planned_mode =>
             {
                 Ok(DirectoryPublicationWorldV2::CandidateReady)
             }
             (PresenceV2::Missing, PresenceV2::Present(exact))
                 if exact.identity == intent.expected_candidate.identity
-                    && exact.link_count == intent.expected_candidate.link_count
                     && exact.mode == directory.planned_mode =>
             {
                 Ok(DirectoryPublicationWorldV2::Published)
@@ -3215,7 +3194,6 @@ impl JournalSnapshotV2 {
                         current.validate()?;
                         if !directory.created_exact.as_ref().is_some_and(|created| {
                             created.identity == current.identity
-                                && created.link_count == current.link_count
                                 && current.mode == directory.planned_mode
                         }) || !directory.candidate_current.is_missing()
                         {
@@ -4039,6 +4017,20 @@ pub(super) fn bootstrap_intent_name(transaction_id: &TransactionId) -> String {
     )
 }
 
+pub(super) fn parse_bootstrap_intent_name(name: &str) -> Result<TransactionId, JournalModelError> {
+    let value = name
+        .strip_prefix(BOOTSTRAP_INTENT_PREFIX)
+        .and_then(|value| value.strip_suffix(PARTIAL_SUFFIX))
+        .ok_or_else(|| JournalModelError::new("invalid v2 bootstrap-intent name"))?;
+    let transaction_id = TransactionId::parse(value)?;
+    if bootstrap_intent_name(&transaction_id) != name {
+        return Err(JournalModelError::new(
+            "bootstrap-intent name is not canonical",
+        ));
+    }
+    Ok(transaction_id)
+}
+
 pub(super) fn parse_bootstrap_owner_name(name: &str) -> Result<TransactionId, JournalModelError> {
     let value = name
         .strip_prefix(BOOTSTRAP_PREFIX)
@@ -4604,8 +4596,6 @@ impl FinalizationLeaseV2 {
         next.workspace_parent_current = workspace_parent_after;
         next.bootstrap_intent_current = PresenceV2::Missing;
         next.bootstrap_current = PresenceV2::Missing;
-        next.records.clear();
-        next.partial = None;
         next.state = FinalizationStateV2::WorkspaceRemoved;
         self.validate_successor(&next)?;
         Ok(next)
@@ -4629,8 +4619,8 @@ impl FinalizationLeaseV2 {
             || !next.workspace.is_missing()
             || !next.bootstrap_intent_current.is_missing()
             || !next.bootstrap_current.is_missing()
-            || !next.records.is_empty()
-            || next.partial.is_some()
+            || self.records != next.records
+            || self.partial != next.partial
         {
             return Err(JournalModelError::new(
                 "closed finalization transition only permits exact workspace-present to workspace-removed",
@@ -4705,8 +4695,6 @@ impl FinalizationLeaseV2 {
         if self.bootstrap.intent.envelope.transaction_id != self.transaction_id
             || self.bootstrap.intent.envelope.canonical_root_hash != self.canonical_root_hash
             || self.bootstrap.intent.envelope.workspace_name != self.workspace_name
-            || self.bootstrap.intent.envelope.workspace_parent_preimage
-                != self.bootstrap.envelope.workspace_parent_preimage
             || self.bootstrap.name != bootstrap_owner_name(&self.transaction_id)
             || self.bootstrap.envelope.transaction_id != self.transaction_id
             || self.bootstrap.envelope.canonical_root_hash != self.canonical_root_hash
@@ -4717,6 +4705,10 @@ impl FinalizationLeaseV2 {
                 "finalization lease bootstrap lineage does not match its parent/workspace owner",
             ));
         }
+        validate_parent_stable_growth(
+            &self.bootstrap.intent.envelope.workspace_parent_preimage,
+            &self.bootstrap.envelope.workspace_parent_preimage,
+        )?;
         match self.state {
             FinalizationStateV2::WorkspacePresent => {
                 let workspace = self.workspace.as_present().ok_or_else(|| {
@@ -4783,12 +4775,40 @@ impl FinalizationLeaseV2 {
                 if !self.workspace.is_missing()
                     || !self.bootstrap_intent_current.is_missing()
                     || !self.bootstrap_current.is_missing()
-                    || !self.records.is_empty()
-                    || self.partial.is_some()
                 {
                     return Err(JournalModelError::new(
-                        "workspace-removed lease must have an empty exact inventory",
+                        "workspace-removed lease must mark every mutable workspace/bootstrap object missing",
                     ));
+                }
+                if self.records.is_empty()
+                    || self.records.last().map(|record| record.sequence)
+                        != Some(self.terminal_sequence)
+                {
+                    return Err(JournalModelError::new(
+                        "workspace-removed tombstone must retain its complete record lineage",
+                    ));
+                }
+                for (index, record) in self.records.iter().enumerate() {
+                    if record.sequence != index as u64
+                        || record.name != journal_record_name(&self.transaction_id, index as u64)
+                        || record.exact.link_count != 1
+                    {
+                        return Err(JournalModelError::new(
+                            "workspace-removed tombstone has a non-canonical record lineage",
+                        ));
+                    }
+                    require_private_file_mode(&record.exact, 0o600, "tombstone journal record")?;
+                }
+                if let Some(partial) = &self.partial {
+                    if partial.sequence != self.terminal_sequence.saturating_add(1)
+                        || partial.name
+                            != journal_partial_name(&self.transaction_id, partial.sequence)
+                    {
+                        return Err(JournalModelError::new(
+                            "workspace-removed tombstone has a non-canonical partial lineage",
+                        ));
+                    }
+                    partial.validate_exact_file()?;
                 }
                 validate_parent_removal_transition(
                     &self.workspace_parent_before,
@@ -4867,12 +4887,23 @@ fn validate_parent_creation_transition(
 ) -> Result<(), JournalModelError> {
     before.validate()?;
     after.validate()?;
-    if before.identity != after.identity
-        || before.mode != after.mode
-        || before.link_count.checked_add(1) != Some(after.link_count)
-    {
+    if before.identity != after.identity || before.mode != after.mode {
         return Err(JournalModelError::new(
-            "directory creation must preserve the exact parent identity/mode and add one link",
+            "directory creation must preserve the exact parent identity and mode",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_parent_stable_growth(
+    before: &ExactDirectoryStateV2,
+    after: &ExactDirectoryStateV2,
+) -> Result<(), JournalModelError> {
+    before.validate()?;
+    after.validate()?;
+    if before.identity != after.identity || before.mode != after.mode {
+        return Err(JournalModelError::new(
+            "directory parent changed identity or mode while durable ownership was published",
         ));
     }
     Ok(())
@@ -4883,9 +4914,7 @@ fn validate_parent_removal_transition(
     after: &ExactDirectoryStateV2,
 ) -> Result<(), JournalModelError> {
     validate_parent_creation_transition(after, before).map_err(|_| {
-        JournalModelError::new(
-            "directory removal must preserve the exact parent identity/mode and remove one link",
-        )
+        JournalModelError::new("directory removal must preserve the exact parent identity and mode")
     })
 }
 
@@ -5278,6 +5307,10 @@ mod tests {
         );
         assert_eq!(
             parse_bootstrap_owner_name(&bootstrap_owner_name(&transaction_id)).unwrap(),
+            transaction_id
+        );
+        assert_eq!(
+            parse_bootstrap_intent_name(&bootstrap_intent_name(&transaction_id)).unwrap(),
             transaction_id
         );
         let parsed =

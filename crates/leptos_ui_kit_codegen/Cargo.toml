@@ -34,6 +34,7 @@ include = [
     "src/transaction/mod.rs",
     "src/transaction/replace.rs",
     "src/transaction/runtime.rs",
+    "src/transaction/store.rs",
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
     "tests/public_api.rs",

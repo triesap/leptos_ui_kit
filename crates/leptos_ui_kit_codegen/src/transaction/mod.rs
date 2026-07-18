@@ -3,6 +3,7 @@ mod journal;
 mod lock;
 mod replace;
 mod runtime;
+mod store;
 
 pub(crate) use lock::DEFAULT_KIT_COORDINATION_IGNORE_PATH;
 pub use lock::{DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock};
