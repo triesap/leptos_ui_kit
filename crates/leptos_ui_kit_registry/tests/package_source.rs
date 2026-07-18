@@ -57,10 +57,31 @@ const REGISTRY_TESTS: [&str; 7] = [
 
 const FACADE_FILES: [&str; 1] = ["src/lib.rs"];
 const PRIMITIVES_FILES: [&str; 1] = ["src/lib.rs"];
-const CODEGEN_FILES: [&str; 3] = [
+const CODEGEN_FILES: [&str; 24] = [
+    "src/command.rs",
+    "src/digest.rs",
+    "src/error.rs",
+    "src/install_lock.rs",
     "src/lib.rs",
+    "src/orchestration.rs",
+    "src/patch/css.rs",
+    "src/patch/html.rs",
+    "src/patch/mod.rs",
+    "src/patch/module.rs",
+    "src/path_safety.rs",
+    "src/planning/add.rs",
+    "src/planning/files.rs",
+    "src/planning/init.rs",
+    "src/planning/mod.rs",
+    "src/planning/sync.rs",
+    "src/tests.rs",
+    "src/transaction/fs.rs",
+    "src/transaction/lock.rs",
+    "src/transaction/mod.rs",
+    "src/transaction/replace.rs",
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
+    "tests/public_api.rs",
 ];
 const CLI_FILES: [&str; 11] = [
     "src/bin/cargo-leptos_ui_kit.rs",

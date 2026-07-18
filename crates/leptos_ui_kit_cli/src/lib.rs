@@ -267,7 +267,7 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
     if command == "--version" || command == "-V" {
         return run_version(&args[1..]);
     }
-    if args[1..].iter().any(|arg| is_help_arg(arg)) {
+    if args[1..].iter().any(is_help_arg) {
         println!("{}", command_help(command)?);
         return Ok(());
     }
