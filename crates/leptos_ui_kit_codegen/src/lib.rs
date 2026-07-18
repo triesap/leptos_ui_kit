@@ -59,7 +59,8 @@ use planning::{
 };
 #[cfg(test)]
 use transaction::{
-    FaultFs, FsEvent, FsOperation, apply_planned_files_with, apply_planned_files_with_snapshot,
+    DEFAULT_KIT_COORDINATION_IGNORE_PATH, FaultFs, FsEvent, FsOperation, KIT_ADVISORY_LOCK_CONTENT,
+    KIT_COORDINATION_IGNORE_CONTENT, apply_planned_files_with, apply_planned_files_with_snapshot,
 };
 
 #[cfg(test)]

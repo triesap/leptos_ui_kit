@@ -1,8 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
+    process::{Child, Command},
     sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use leptos_ui_kit_registry::{
@@ -173,7 +176,7 @@ fn init_plan_uses_configured_stylesheet_path() {
 }
 
 #[test]
-fn init_write_creates_expected_files_and_releases_lock() {
+fn init_write_creates_expected_files_and_persistent_coordination() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -191,7 +194,7 @@ fn init_write_creates_expected_files_and_releases_lock() {
     assert!(root.join("src/components/mod.rs").is_file());
     assert!(root.join("src/components/ui/mod.rs").is_file());
     assert!(root.join(DEFAULT_KIT_LOCK_PATH).is_file());
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    assert_exact_persistent_coordination(root);
     assert!(
         fs::read_to_string(root.join("index.html"))
             .expect("read index")
@@ -544,7 +547,7 @@ fn add_write_installs_button_state() {
             .iter()
             .any(|item| item.item_name() == "spinner")
     );
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    assert_exact_persistent_coordination(root);
 }
 
 #[test]
@@ -715,7 +718,7 @@ fn apply_sync_refuses_edited_pinned_blocks_atomically_on_every_css_path() {
 
         assert_sync_unsafe_patch_path(case, error, css_path);
         assert_eq!(snapshot_project_files(root), before, "{case}");
-        assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists(), "{case}");
+        assert_exact_persistent_coordination(root);
     }
 }
 
@@ -743,7 +746,7 @@ fn apply_sync_refuses_config_lock_stylesheet_disagreement_atomically() {
     assert_sync_unsafe_patch_path("cross-path", error, "styles/moved.css");
     assert_eq!(snapshot_project_files(root), before);
     assert!(!root.join("styles/moved.css").exists());
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    assert_exact_persistent_coordination(root);
 }
 
 #[test]
@@ -1234,7 +1237,7 @@ fn assert_successful_sync(
     assert!(second.is_empty(), "{case}: second sync must be empty");
     assert!(second.files.is_empty(), "{case}: no second-sync files");
     assert!(second.changes.is_empty(), "{case}: no second-sync changes");
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists(), "{case}");
+    assert_exact_persistent_coordination(root);
 }
 
 fn assert_style_dependency_order(
@@ -2257,12 +2260,16 @@ fn path_safety_rejects_unsafe_paths() {
 }
 
 #[test]
-fn path_safety_does_not_expose_the_internal_sentinel_hidden_name() {
+fn path_safety_does_not_expose_internal_coordination_hidden_names() {
     for path in [
         DEFAULT_KIT_WRITE_LOCK_PATH,
+        DEFAULT_KIT_COORDINATION_IGNORE_PATH,
         "src/components/ui/.write.lock",
+        "src/components/ui/.gitignore",
         "src/components/ui/arbitrary/.write.lock",
+        "src/components/ui/arbitrary/.gitignore",
         "styles/.write.lock",
+        "styles/.gitignore",
     ] {
         assert!(
             validate_logical_write_path(path).is_err(),
@@ -2315,18 +2322,905 @@ fn path_safety_rejects_symlink_escape() {
 }
 
 #[test]
-fn transaction_lock_fails_when_lock_exists() {
+fn advisory_write_lock_contention_is_typed_and_nonblocking() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let _first = WriteLock::acquire(root).expect("first lock");
-    let error = WriteLock::acquire(root).expect_err("second lock should fail");
+    let error = WriteLock::acquire(root).expect_err("second lock should contend");
 
-    assert!(matches!(error, CodegenError::LockExists(_)));
+    assert!(matches!(
+        error,
+        CodegenError::WriteLockContended { ref path }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH
+    ));
+}
+
+#[test]
+fn first_use_publishes_only_an_initialized_and_locked_inode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let fs = Arc::new(FaultFs::passthrough());
+
+    let lock = WriteLock::acquire_with(root, fs.clone()).expect("publish first-use lock");
+    let operations = fs
+        .events()
+        .iter()
+        .map(|event| event.operation)
+        .collect::<Vec<_>>();
+    let position = |operation| {
+        operations
+            .iter()
+            .position(|candidate| *candidate == operation)
+            .unwrap_or_else(|| panic!("missing {operation:?} bootstrap operation"))
+    };
+
+    assert!(
+        position(FsOperation::TryLock) < position(FsOperation::WriteHandle)
+            && position(FsOperation::WriteHandle) < position(FsOperation::SyncHandle)
+            && position(FsOperation::SyncHandle) < position(FsOperation::HardLink),
+        "candidate must be privately locked, written, and synced before publication: {operations:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        position(FsOperation::CreateNewFile) < position(FsOperation::OpenCandidateOwner)
+            && position(FsOperation::OpenCandidateOwner) < position(FsOperation::TryLock)
+            && position(FsOperation::HardLink) < position(FsOperation::RemoveFileByHandle),
+        "Windows candidate guard must exist before its owner and be consumed only after publication: {operations:?}"
+    );
+    assert_exact_persistent_coordination(root);
+    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    drop(lock);
+}
+
+const LOCK_STAGE_ROLE_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_ROLE";
+const LOCK_STAGE_PROJECT_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_PROJECT";
+const LOCK_STAGE_CONTROL_ENV: &str = "LEPTOS_UI_KIT_LOCK_STAGE_CONTROL";
+
+#[test]
+fn visible_unlocked_candidate_converges_on_the_published_lock() {
+    let sandbox = tempfile::tempdir().expect("stage-race sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create stage-race project");
+    fs::create_dir(&control).expect("create stage-race control");
+
+    let mut creator = spawn_lock_stage_worker("paused-create", &project, &control);
+    wait_for_worker_path(&control.join("candidate-visible"), &mut creator);
+    assert!(!project.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    let visible_candidates = transaction_candidate_paths(&project);
+    assert_eq!(visible_candidates.len(), 1);
+    let visible_identity = coordination_file_identity(&visible_candidates[0]);
+    assert_eq!(
+        fs::metadata(&visible_candidates[0])
+            .expect("visible candidate metadata")
+            .len(),
+        0
+    );
+
+    #[cfg(not(windows))]
+    let holder = WriteLock::acquire(&project).expect("publisher claims unlocked stale candidate");
+    #[cfg(windows)]
+    let contender = WriteLock::acquire(&project)
+        .expect_err("the live Windows source guard must block candidate reclamation");
+    #[cfg(windows)]
+    assert!(matches!(contender, CodegenError::WriteLockContended { .. }));
+    let published_identity = coordination_lock_identity(&project);
+    #[cfg(not(windows))]
+    {
+        assert_exact_persistent_coordination(&project);
+        let claimed_candidates = transaction_candidate_paths(&project);
+        assert!(claimed_candidates.is_empty());
+    }
+    #[cfg(windows)]
+    {
+        let guarded_candidates = transaction_candidate_paths(&project);
+        assert_eq!(guarded_candidates.len(), 1);
+        assert_eq!(
+            coordination_file_identity(&guarded_candidates[0]),
+            visible_identity
+        );
+    }
+
+    fs::write(control.join("release-creator"), b"release\n").expect("release creator");
+    #[cfg(not(windows))]
+    wait_for_worker_path(&control.join("creator-contended"), &mut creator);
+    #[cfg(windows)]
+    wait_for_worker_path(&control.join("creator-acquired"), &mut creator);
+    creator.wait_success();
+    #[cfg(not(windows))]
+    drop(holder);
+
+    assert_eq!(coordination_lock_identity(&project), published_identity);
+    assert_ne!(visible_identity, published_identity);
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+
+    let lock = WriteLock::acquire(&project).expect("reacquire converged lock");
+    assert_eq!(coordination_lock_identity(&project), published_identity);
+    drop(lock);
+}
+
+#[test]
+fn privately_locked_first_use_candidate_blocks_until_it_converges() {
+    let sandbox = tempfile::tempdir().expect("active-candidate sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create active-candidate project");
+    fs::create_dir(&control).expect("create active-candidate control");
+
+    let mut creator = spawn_lock_stage_worker("paused-private-lock", &project, &control);
+    wait_for_worker_path(&control.join("candidate-locked"), &mut creator);
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1);
+    let candidate_identity = coordination_file_identity(&candidates[0]);
+
+    let contender = WriteLock::acquire(&project)
+        .expect_err("publisher must not plan while another candidate is privately locked");
+    assert!(matches!(contender, CodegenError::WriteLockContended { .. }));
+    let published_identity = coordination_lock_identity(&project);
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        coordination_file_identity(&candidates[0]),
+        candidate_identity
+    );
+
+    fs::write(control.join("release-private-lock"), b"release\n")
+        .expect("release private candidate");
+    wait_for_worker_path(&control.join("private-creator-acquired"), &mut creator);
+    creator.wait_success();
+
+    assert_eq!(coordination_lock_identity(&project), published_identity);
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[test]
+fn killed_writer_after_lock_publication_recovers_exact_coordination_state() {
+    let sandbox = tempfile::tempdir().expect("post-publication crash sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create crash project");
+    fs::create_dir(&control).expect("create crash control");
+
+    let mut publisher = spawn_lock_stage_worker("paused-hardlink", &project, &control);
+    wait_for_worker_path(&control.join("lock-published"), &mut publisher);
+    let lock_path = project.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    let lock_identity = coordination_file_identity(&lock_path);
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1, "published lock must retain one alias");
+    assert_eq!(coordination_file_identity(&candidates[0]), lock_identity);
+    assert_eq!(
+        fs::read(&candidates[0]).expect("read published candidate alias"),
+        KIT_ADVISORY_LOCK_CONTENT
+    );
+    let contender = WriteLock::acquire(&project).expect_err("publisher must hold final inode");
+    assert!(matches!(contender, CodegenError::WriteLockContended { .. }));
+
+    publisher.kill_and_wait();
+
+    let recovered = WriteLock::acquire(&project).expect("recover published candidate alias");
+    assert_eq!(coordination_lock_identity(&project), lock_identity);
+    drop(recovered);
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[test]
+fn killed_bootstrap_creation_and_ignore_transitions_recover_exactly() {
+    let baseline = tempfile::tempdir().expect("directory-transition baseline");
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    let baseline_lock = WriteLock::acquire_with(baseline.path(), baseline_fs.clone())
+        .expect("baseline coordination bootstrap");
+    drop(baseline_lock);
+    let directory_creations = baseline_fs
+        .events()
+        .into_iter()
+        .filter(|event| event.operation == FsOperation::CreateDirectory)
+        .count();
+    assert_eq!(
+        directory_creations, 6,
+        "every current coordination-directory creation must have a crash role"
+    );
+
+    let mut cases = (1..=directory_creations)
+        .map(|ordinal| {
+            (
+                format!("paused-directory-{ordinal}"),
+                format!("directory-created-{ordinal}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    cases.extend([
+        ("paused-create".to_owned(), "candidate-visible".to_owned()),
+        (
+            "paused-ignore-create".to_owned(),
+            "ignore-candidate-created".to_owned(),
+        ),
+        (
+            "paused-ignore-hardlink".to_owned(),
+            "ignore-published".to_owned(),
+        ),
+    ]);
+
+    for (role, ready) in cases {
+        let sandbox = tempfile::tempdir().expect("crash transition sandbox");
+        let project = sandbox.path().join("project");
+        let control = sandbox.path().join("control");
+        fs::create_dir(&project).expect("create crash transition project");
+        fs::create_dir(&control).expect("create crash transition control");
+
+        let mut worker = spawn_lock_stage_worker(&role, &project, &control);
+        wait_for_worker_path(&control.join(&ready), &mut worker);
+        worker.kill_and_wait();
+
+        let recovered = WriteLock::acquire(&project)
+            .unwrap_or_else(|error| panic!("recover {role} transition: {error}"));
+        drop(recovered);
+        assert_only_verified_coordination_residuals(&project);
+        assert_exact_persistent_coordination(&project);
+    }
+}
+
+fn seed_stale_lock_candidate(root: &Path, ordinal: u128, mode: u32) -> PathBuf {
+    let transactions = root.join("src/components/ui/_kit/.transactions");
+    if !transactions.exists() {
+        fs::create_dir(&transactions).expect("create stale-candidate transaction directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&transactions, fs::Permissions::from_mode(0o700))
+                .expect("set stale-candidate transaction mode");
+        }
+    }
+    let candidate = transactions.join(format!("lock-bootstrap-{ordinal:032x}"));
+    fs::write(&candidate, b"").expect("seed stale lock candidate");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(mode))
+            .expect("set stale lock candidate mode");
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    candidate
+}
+
+#[test]
+fn stale_cleanup_removes_every_duplicate_hard_link_alias_before_success() {
+    let dir = tempfile::tempdir().expect("duplicate-alias tempdir");
+    let root = dir.path();
+    let initial = WriteLock::acquire(root).expect("bootstrap persistent coordination");
+    let lock_identity = coordination_lock_identity(root);
+    drop(initial);
+
+    let first = seed_stale_lock_candidate(root, 1, 0o600);
+    let second = first
+        .parent()
+        .expect("candidate parent")
+        .join(format!("lock-bootstrap-{:032x}", 2_u128));
+    fs::hard_link(&first, &second).expect("create duplicate candidate alias");
+    assert_eq!(
+        coordination_file_identity(&first),
+        coordination_file_identity(&second)
+    );
+
+    let recovered = WriteLock::acquire(root).expect("clean duplicate candidate aliases");
+    assert_eq!(coordination_lock_identity(root), lock_identity);
+    drop(recovered);
+
+    assert!(transaction_candidate_paths(root).is_empty());
+    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert_only_verified_coordination_residuals(root);
+    assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn stale_cleanup_rescans_and_removes_a_candidate_that_arrives_during_cleanup() {
+    let sandbox = tempfile::tempdir().expect("late-candidate sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create late-candidate project");
+    fs::create_dir(&control).expect("create late-candidate control");
+    let initial = WriteLock::acquire(&project).expect("bootstrap persistent coordination");
+    let lock_identity = coordination_lock_identity(&project);
+    drop(initial);
+    seed_stale_lock_candidate(&project, 10, 0o600);
+
+    let ready = control.join("first-candidate-claimed");
+    let release = control.join("release-first-candidate");
+    let worker_project = project.clone();
+    let worker_ready = ready.clone();
+    let worker_release = release.clone();
+    let worker = thread::spawn(move || {
+        let fs = Arc::new(FaultFs::pause_after_success(
+            FsOperation::TryLock,
+            2,
+            worker_ready,
+            worker_release,
+        ));
+        let lock = WriteLock::acquire_with(&worker_project, fs)
+            .expect("cleanup writer acquires after rescan");
+        drop(lock);
+    });
+
+    wait_for_stage_path(&ready);
+    seed_stale_lock_candidate(&project, 11, 0o600);
+    fs::write(&release, b"release\n").expect("release cleanup writer");
+    worker.join().expect("join cleanup writer");
+
+    assert_eq!(coordination_lock_identity(&project), lock_identity);
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert!(
+        !project
+            .join("src/components/ui/_kit/.transactions")
+            .exists()
+    );
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
 }
 
 #[cfg(unix)]
 #[test]
-fn legacy_sentinel_rejects_parent_and_final_symlink_indirection() {
+fn stale_cleanup_recovers_owner_restrictive_modes_but_rejects_external_aliases() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    for (ordinal, mode) in [(20_u128, 0o000), (21, 0o200), (22, 0o400)] {
+        let dir = tempfile::tempdir().expect("restrictive-candidate tempdir");
+        let root = dir.path();
+        let initial = WriteLock::acquire(root).expect("bootstrap persistent coordination");
+        let lock_identity = coordination_lock_identity(root);
+        drop(initial);
+        seed_stale_lock_candidate(root, ordinal, mode);
+
+        let recovered = WriteLock::acquire(root)
+            .unwrap_or_else(|error| panic!("recover mode {mode:04o} candidate: {error}"));
+        assert_eq!(coordination_lock_identity(root), lock_identity);
+        drop(recovered);
+        assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+        assert_only_verified_coordination_residuals(root);
+        assert_exact_persistent_coordination(root);
+    }
+
+    let dir = tempfile::tempdir().expect("external-alias tempdir");
+    let root = dir.path();
+    let initial = WriteLock::acquire(root).expect("bootstrap persistent coordination");
+    let lock_identity = coordination_lock_identity(root);
+    drop(initial);
+    let candidate = seed_stale_lock_candidate(root, 23, 0o000);
+    let external = root.join("application-owned-alias");
+    fs::hard_link(&candidate, &external).expect("create external hard-link alias");
+    let candidate_identity = coordination_file_identity(&candidate);
+    assert_eq!(coordination_file_identity(&external), candidate_identity);
+    assert_eq!(
+        fs::metadata(&candidate)
+            .expect("candidate metadata")
+            .nlink(),
+        2
+    );
+
+    let error = WriteLock::acquire(root)
+        .expect_err("external hard-link alias must block owner-mode recovery");
+    assert!(matches!(
+        error,
+        CodegenError::InvalidCoordinationState { .. }
+    ));
+    assert_eq!(coordination_lock_identity(root), lock_identity);
+    assert_eq!(coordination_file_identity(&candidate), candidate_identity);
+    assert_eq!(coordination_file_identity(&external), candidate_identity);
+    assert_eq!(
+        fs::metadata(&candidate)
+            .expect("candidate metadata after rejection")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o000
+    );
+    assert_eq!(
+        fs::metadata(&external)
+            .expect("external metadata after rejection")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o000
+    );
+}
+
+#[test]
+fn persistent_stale_candidate_removal_failure_surfaces_then_recovers() {
+    let dir = tempfile::tempdir().expect("persistent-removal tempdir");
+    let root = dir.path();
+    let initial = WriteLock::acquire(root).expect("bootstrap persistent coordination");
+    let lock_identity = coordination_lock_identity(root);
+    drop(initial);
+    let candidate = seed_stale_lock_candidate(root, 30, 0o600);
+    #[cfg(windows)]
+    let removal_operation = FsOperation::RemoveFileByHandle;
+    #[cfg(not(windows))]
+    let removal_operation = FsOperation::RemoveFile;
+    let fs = Arc::new(FaultFs::fail_from(removal_operation, 1));
+
+    let error = WriteLock::acquire_with(root, fs)
+        .expect_err("persistent stale-candidate removal fault must surface");
+    assert!(matches!(error, CodegenError::Io { .. }));
+    assert_eq!(coordination_lock_identity(root), lock_identity);
+    assert!(
+        candidate.exists(),
+        "failed removal must preserve the candidate"
+    );
+
+    let recovered = WriteLock::acquire(root).expect("next writer recovers stale candidate");
+    assert_eq!(coordination_lock_identity(root), lock_identity);
+    drop(recovered);
+    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert_only_verified_coordination_residuals(root);
+    assert_exact_persistent_coordination(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn transaction_directory_substitution_never_mutates_the_detached_candidate() {
+    let sandbox = tempfile::tempdir().expect("transaction substitution sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create substitution project");
+    fs::create_dir(&control).expect("create substitution control");
+
+    let mut worker = spawn_lock_stage_worker("paused-detach", &project, &control);
+    wait_for_worker_path(&control.join("detach-candidate-visible"), &mut worker);
+    let transactions = project.join("src/components/ui/_kit/.transactions");
+    let moved = project.join("src/components/ui/_kit/.transactions-moved");
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1);
+    let candidate_name = candidates[0]
+        .file_name()
+        .expect("candidate name")
+        .to_owned();
+    let candidate_identity = coordination_file_identity(&candidates[0]);
+    fs::rename(&transactions, &moved).expect("detach transaction directory");
+    fs::create_dir(&transactions).expect("create replacement transaction directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&transactions, fs::Permissions::from_mode(0o700))
+            .expect("set replacement transaction mode");
+    }
+
+    fs::write(control.join("release-detach"), b"release\n").expect("release detached worker");
+    wait_for_worker_path(&control.join("detach-rejected"), &mut worker);
+    worker.wait_success();
+
+    let moved_candidate = moved.join(candidate_name);
+    assert_eq!(
+        coordination_file_identity(&moved_candidate),
+        candidate_identity
+    );
+    assert_eq!(
+        fs::read(moved_candidate).expect("read detached candidate"),
+        b""
+    );
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert!(!project.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn kit_ancestor_substitution_never_mutates_detached_candidates() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (case, ancestor, moved_name, candidate_tail) in [
+        (
+            "kit",
+            "src/components/ui/_kit",
+            "_kit-moved",
+            ".transactions",
+        ),
+        ("ui", "src/components/ui", "ui-moved", "_kit/.transactions"),
+    ] {
+        let sandbox = tempfile::tempdir().expect("ancestor substitution sandbox");
+        let project = sandbox.path().join("project");
+        let control = sandbox.path().join("control");
+        fs::create_dir(&project).expect("create substitution project");
+        fs::create_dir(&control).expect("create substitution control");
+
+        let mut worker = spawn_lock_stage_worker("paused-detach", &project, &control);
+        wait_for_worker_path(&control.join("detach-candidate-visible"), &mut worker);
+        let candidates = transaction_candidate_paths(&project);
+        assert_eq!(candidates.len(), 1, "{case}");
+        let candidate_name = candidates[0]
+            .file_name()
+            .expect("candidate name")
+            .to_owned();
+        let candidate_identity = coordination_file_identity(&candidates[0]);
+        let ancestor_path = project.join(ancestor);
+        let moved = ancestor_path
+            .parent()
+            .expect("ancestor parent")
+            .join(moved_name);
+        fs::rename(&ancestor_path, &moved).expect("detach coordination ancestor");
+        let replacement_transactions = project.join("src/components/ui/_kit/.transactions");
+        fs::create_dir_all(&replacement_transactions).expect("create replacement chain");
+        fs::set_permissions(
+            project.join("src/components/ui/_kit"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("set replacement kit mode");
+        fs::set_permissions(&replacement_transactions, fs::Permissions::from_mode(0o700))
+            .expect("set replacement transaction mode");
+
+        fs::write(control.join("release-detach"), b"release\n").expect("release detached worker");
+        wait_for_worker_path(&control.join("detach-rejected"), &mut worker);
+        worker.wait_success();
+
+        let moved_candidate = moved.join(candidate_tail).join(candidate_name);
+        assert_eq!(
+            coordination_file_identity(&moved_candidate),
+            candidate_identity,
+            "{case}"
+        );
+        assert_eq!(
+            fs::read(moved_candidate).expect("read detached candidate"),
+            b"",
+            "{case}"
+        );
+        assert!(transaction_candidate_paths(&project).is_empty(), "{case}");
+        assert!(
+            !project.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists(),
+            "{case}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_leaf_substitution_is_rejected_before_publication_or_cleanup() {
+    let sandbox = tempfile::tempdir().expect("candidate substitution sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create substitution project");
+    fs::create_dir(&control).expect("create substitution control");
+
+    let mut worker = spawn_lock_stage_worker("paused-source", &project, &control);
+    wait_for_worker_path(&control.join("source-candidate-synced"), &mut worker);
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1);
+    let candidate = &candidates[0];
+    let moved = project.join("src/components/ui/_kit/detached-candidate");
+    let identity = coordination_file_identity(candidate);
+    fs::rename(candidate, &moved).expect("detach initialized candidate leaf");
+    fs::write(candidate, b"attacker replacement\n").expect("write replacement candidate leaf");
+
+    fs::write(control.join("release-source"), b"release\n").expect("release source worker");
+    wait_for_worker_path(&control.join("source-rejected"), &mut worker);
+    worker.wait_success();
+
+    assert_eq!(coordination_file_identity(&moved), identity);
+    assert_eq!(
+        fs::read(&moved).expect("read detached initialized candidate"),
+        KIT_ADVISORY_LOCK_CONTENT
+    );
+    assert_eq!(
+        fs::read(candidate).expect("read attacker replacement"),
+        b"attacker replacement\n"
+    );
+    assert!(!project.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_source_guard_prevents_candidate_leaf_substitution() {
+    let sandbox = tempfile::tempdir().expect("candidate guard sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create candidate guard project");
+    fs::create_dir(&control).expect("create candidate guard control");
+
+    let mut worker = spawn_lock_stage_worker("paused-source-guard", &project, &control);
+    wait_for_worker_path(&control.join("source-guard-held"), &mut worker);
+    let candidates = transaction_candidate_paths(&project);
+    assert_eq!(candidates.len(), 1);
+    let moved = project.join("src/components/ui/_kit/detached-candidate");
+    let error = fs::rename(&candidates[0], &moved)
+        .expect_err("Windows source guard must deny candidate rename");
+    assert!(matches!(error.raw_os_error(), Some(5) | Some(32)));
+    assert!(!moved.exists());
+
+    fs::write(control.join("release-source-guard"), b"release\n")
+        .expect("release source guard worker");
+    wait_for_worker_path(&control.join("source-guard-acquired"), &mut worker);
+    worker.wait_success();
+
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[test]
+fn concurrent_destination_creation_is_no_clobber_and_converges() {
+    let sandbox = tempfile::tempdir().expect("destination race sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create destination race project");
+    fs::create_dir(&control).expect("create destination race control");
+
+    let mut worker = spawn_lock_stage_worker("paused-destination", &project, &control);
+    wait_for_worker_path(&control.join("destination-candidate-synced"), &mut worker);
+    let lock_path = project.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    fs::write(&lock_path, KIT_ADVISORY_LOCK_CONTENT).expect("publish competing destination");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))
+            .expect("set competing destination mode");
+    }
+    let identity = coordination_file_identity(&lock_path);
+
+    fs::write(control.join("release-destination"), b"release\n")
+        .expect("release destination race worker");
+    wait_for_worker_path(&control.join("destination-converged"), &mut worker);
+    worker.wait_success();
+
+    assert_eq!(coordination_file_identity(&lock_path), identity);
+    assert_eq!(
+        fs::read(&lock_path).expect("read competing destination"),
+        KIT_ADVISORY_LOCK_CONTENT
+    );
+    assert!(transaction_candidate_paths(&project).is_empty());
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_coordination_bootstrap_supports_long_project_paths() {
+    let sandbox = tempfile::tempdir().expect("long-path sandbox");
+    let mut project = sandbox.path().to_path_buf();
+    for index in 0..24 {
+        project.push(format!("project-segment-{index:02}"));
+    }
+    fs::create_dir_all(&project).expect("create long project path");
+    assert!(
+        project.as_os_str().len() > 260,
+        "test path must exceed MAX_PATH"
+    );
+
+    let lock = WriteLock::acquire(&project).expect("bootstrap below long project path");
+    drop(lock);
+
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pinned_directory_chain_denies_ancestor_substitution() {
+    let sandbox = tempfile::tempdir().expect("pinned-chain sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    fs::create_dir(&project).expect("create pinned-chain project");
+    fs::create_dir(&control).expect("create pinned-chain control");
+
+    let mut worker = spawn_lock_stage_worker("paused-directory-guards", &project, &control);
+    wait_for_worker_path(&control.join("directory-guards-held"), &mut worker);
+    for (source, destination) in [
+        (
+            "src/components/ui/_kit/.transactions",
+            "src/components/ui/_kit/.transactions-moved",
+        ),
+        ("src/components/ui/_kit", "src/components/ui/_kit-moved"),
+        ("src/components/ui", "src/components/ui-moved"),
+    ] {
+        let error = fs::rename(project.join(source), project.join(destination))
+            .expect_err("pinned Windows directory must deny rename");
+        assert!(matches!(error.raw_os_error(), Some(5) | Some(32)));
+    }
+
+    fs::write(control.join("release-directory-guards"), b"release\n")
+        .expect("release pinned-chain worker");
+    wait_for_worker_path(&control.join("directory-guards-acquired"), &mut worker);
+    worker.wait_success();
+
+    assert_only_verified_coordination_residuals(&project);
+    assert_exact_persistent_coordination(&project);
+}
+
+#[test]
+fn transaction_lock_stage_worker() {
+    let Some(role) = env::var_os(LOCK_STAGE_ROLE_ENV) else {
+        return;
+    };
+    let project = PathBuf::from(
+        env::var_os(LOCK_STAGE_PROJECT_ENV).expect("stage worker project environment"),
+    );
+    let control = PathBuf::from(
+        env::var_os(LOCK_STAGE_CONTROL_ENV).expect("stage worker control environment"),
+    );
+    let role = role.to_str().expect("UTF-8 stage worker role");
+    if let Some(ordinal) = role.strip_prefix("paused-directory-") {
+        let ordinal = ordinal.parse::<usize>().expect("directory pause ordinal");
+        let fs = Arc::new(FaultFs::pause_after_success(
+            FsOperation::CreateDirectory,
+            ordinal,
+            control.join(format!("directory-created-{ordinal}")),
+            control.join(format!("release-directory-{ordinal}")),
+        ));
+        let lock = WriteLock::acquire_with(&project, fs).expect("directory pause resumes");
+        drop(lock);
+        return;
+    }
+    match role {
+        "paused-create" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::CreateNewFile,
+                1,
+                control.join("candidate-visible"),
+                control.join("release-creator"),
+            ));
+            #[cfg(not(windows))]
+            {
+                let error = WriteLock::acquire_with(&project, fs)
+                    .expect_err("paused unlocked creator must converge as a contender");
+                assert!(matches!(error, CodegenError::WriteLockContended { .. }));
+                fs::write(control.join("creator-contended"), b"contended\n")
+                    .expect("signal creator contention");
+            }
+            #[cfg(windows)]
+            {
+                let lock = WriteLock::acquire_with(&project, fs)
+                    .expect("guarded creator must converge on the published lock");
+                fs::write(control.join("creator-acquired"), b"acquired\n")
+                    .expect("signal creator acquisition");
+                drop(lock);
+            }
+        }
+        "paused-private-lock" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::TryLock,
+                1,
+                control.join("candidate-locked"),
+                control.join("release-private-lock"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs)
+                .expect("private candidate owner converges on the published inode");
+            fs::write(control.join("private-creator-acquired"), b"acquired\n")
+                .expect("signal private creator acquisition");
+            drop(lock);
+        }
+        "paused-hardlink" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::HardLink,
+                1,
+                control.join("lock-published"),
+                control.join("release-publisher"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs).expect("publisher resumes");
+            drop(lock);
+        }
+        "paused-ignore-create" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::CreateNewFile,
+                2,
+                control.join("ignore-candidate-created"),
+                control.join("release-ignore-candidate"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs).expect("ignore candidate resumes");
+            drop(lock);
+        }
+        "paused-ignore-hardlink" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::HardLink,
+                2,
+                control.join("ignore-published"),
+                control.join("release-ignore-publication"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs).expect("ignore publication resumes");
+            drop(lock);
+        }
+        "paused-detach" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::CreateNewFile,
+                1,
+                control.join("detach-candidate-visible"),
+                control.join("release-detach"),
+            ));
+            let error = WriteLock::acquire_with(&project, fs)
+                .expect_err("detached transaction directory must fail closed");
+            assert!(matches!(
+                error,
+                CodegenError::UnsafePath { .. }
+                    | CodegenError::PreimageConflict { .. }
+                    | CodegenError::ProjectRootChanged { .. }
+            ));
+            fs::write(control.join("detach-rejected"), b"rejected\n")
+                .expect("signal detached rejection");
+        }
+        "paused-source" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::SyncHandle,
+                1,
+                control.join("source-candidate-synced"),
+                control.join("release-source"),
+            ));
+            let error = WriteLock::acquire_with(&project, fs)
+                .expect_err("substituted candidate leaf must fail closed");
+            assert!(matches!(error, CodegenError::UnsafePath { .. }));
+            fs::write(control.join("source-rejected"), b"rejected\n")
+                .expect("signal source rejection");
+        }
+        "paused-source-guard" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::SyncHandle,
+                1,
+                control.join("source-guard-held"),
+                control.join("release-source-guard"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs)
+                .expect("guarded candidate publishes after rejected substitution");
+            fs::write(control.join("source-guard-acquired"), b"acquired\n")
+                .expect("signal source guard acquisition");
+            drop(lock);
+        }
+        "paused-destination" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::SyncHandle,
+                1,
+                control.join("destination-candidate-synced"),
+                control.join("release-destination"),
+            ));
+            let lock = WriteLock::acquire_with(&project, fs)
+                .expect("publisher converges on competing valid destination");
+            fs::write(control.join("destination-converged"), b"converged\n")
+                .expect("signal destination convergence");
+            drop(lock);
+        }
+        "paused-directory-guards" => {
+            let fs = Arc::new(FaultFs::pause_after_success(
+                FsOperation::CreateNewFile,
+                1,
+                control.join("directory-guards-held"),
+                control.join("release-directory-guards"),
+            ));
+            let lock =
+                WriteLock::acquire_with(&project, fs).expect("pinned-chain publisher resumes");
+            fs::write(control.join("directory-guards-acquired"), b"acquired\n")
+                .expect("signal pinned-chain acquisition");
+            drop(lock);
+        }
+        other => panic!("unknown lock-stage worker role {other}"),
+    }
+}
+
+#[test]
+fn existing_empty_lock_is_rejected_without_timed_handoff_or_replacement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
+    fs::write(&lock_path, b"").expect("seed in-progress marker");
+    let identity = coordination_lock_identity(root);
+    let fs = Arc::new(FaultFs::passthrough());
+
+    let error =
+        WriteLock::acquire_with(root, fs).expect_err("pre-existing empty state must fail closed");
+
+    assert!(matches!(
+        error,
+        CodegenError::InvalidCoordinationState { ref path, .. }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH
+    ));
+    assert_eq!(coordination_lock_identity(root), identity);
+    assert_eq!(fs::read(lock_path).expect("read in-progress marker"), b"");
+    assert!(!root.join(DEFAULT_KIT_COORDINATION_IGNORE_PATH).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn advisory_lock_bootstrap_rejects_parent_and_final_symlink_indirection() {
     let dir = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     let root = dir.path();
@@ -2356,90 +3250,150 @@ fn legacy_sentinel_rejects_parent_and_final_symlink_indirection() {
 }
 
 #[test]
-fn legacy_sentinel_drop_does_not_remove_a_substituted_inode() {
+fn advisory_lock_drop_preserves_and_releases_the_persistent_inode() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let lock = WriteLock::acquire(root).expect("acquire lock");
-    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
-    let moved = root.join("src/components/ui/_kit/original.write.lock");
-    fs::rename(&lock_path, &moved).expect("move acquired inode");
-    fs::write(&lock_path, b"replacement\n").expect("substitute lock inode");
+    let identity = coordination_lock_identity(root);
+    assert_exact_persistent_coordination(root);
 
     drop(lock);
 
-    assert_eq!(
-        fs::read(&lock_path).expect("replacement lock"),
-        b"replacement\n"
-    );
-    assert_eq!(fs::read(moved).expect("original lock"), b"locked\n");
+    assert_eq!(coordination_lock_identity(root), identity);
+    assert_exact_persistent_coordination(root);
+    let reacquired = WriteLock::acquire(root).expect("reacquire released inode");
+    assert_eq!(coordination_lock_identity(root), identity);
+    drop(reacquired);
 }
 
 #[test]
-fn transaction_atomic_write_creates_file_and_releases_lock() {
+fn atomic_write_preserves_the_persistent_advisory_lock() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
 
-    {
-        let _lock = WriteLock::acquire(root).expect("lock");
-        write_file_atomic(root, "styles/kit.css", b":root {}\n").expect("write css");
-        assert!(root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
-    }
+    write_file_atomic(root, "styles/kit.css", b":root {}\n").expect("write css");
+    let identity = coordination_lock_identity(root);
 
     assert_eq!(
         fs::read_to_string(root.join("styles/kit.css")).expect("read css"),
         ":root {}\n"
     );
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    assert_exact_persistent_coordination(root);
+    let lock = WriteLock::acquire(root).expect("atomic writer released lock");
+    assert_eq!(coordination_lock_identity(root), identity);
+    drop(lock);
 }
 
 #[test]
-fn legacy_write_lock_uses_exact_sentinel_and_preserves_debug_shape() {
+fn advisory_write_lock_uses_exact_format_and_preserves_debug_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let lock = WriteLock::acquire(root).expect("lock");
 
     assert_eq!(
-        fs::read(root.join(DEFAULT_KIT_WRITE_LOCK_PATH)).expect("read sentinel"),
-        b"locked\n"
+        fs::read(root.join(DEFAULT_KIT_WRITE_LOCK_PATH)).expect("read advisory lock"),
+        KIT_ADVISORY_LOCK_CONTENT
+    );
+    assert_eq!(
+        fs::read(root.join(DEFAULT_KIT_COORDINATION_IGNORE_PATH))
+            .expect("read coordination ignore"),
+        KIT_COORDINATION_IGNORE_CONTENT
     );
     assert_eq!(
         format!("{lock:?}"),
         format!(
             "WriteLock {{ path: {:?} }}",
-            root.join(DEFAULT_KIT_WRITE_LOCK_PATH)
+            fs::canonicalize(root)
+                .expect("canonical project root")
+                .join(DEFAULT_KIT_WRITE_LOCK_PATH)
         )
     );
 }
 
 #[test]
-fn legacy_sentinel_write_failure_leaves_the_created_inode_and_reports_its_path() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::WriteHandle, 1));
+fn bootstrap_faults_leave_only_verified_coordination_residuals() {
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    let baseline_lock =
+        WriteLock::acquire_with(baseline.path(), baseline_fs.clone()).expect("baseline bootstrap");
+    drop(baseline_lock);
+    let mut operation_counts = Vec::<(FsOperation, usize)>::new();
+    for event in baseline_fs.events() {
+        if let Some((_, count)) = operation_counts
+            .iter_mut()
+            .find(|(operation, _)| *operation == event.operation)
+        {
+            *count += 1;
+        } else {
+            operation_counts.push((event.operation, 1));
+        }
+    }
 
-    let error = WriteLock::acquire_with(root, fault_fs.clone())
-        .expect_err("sentinel content write must fail");
+    for (operation, count) in operation_counts {
+        for ordinal in 1..=count {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            let fault_fs = Arc::new(FaultFs::fail_nth(operation, ordinal));
 
-    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
-    assert!(matches!(error, CodegenError::Io { path, .. } if path == lock_path));
-    assert_eq!(fs::read(&lock_path).expect("created sentinel inode"), b"");
-    let events = fault_fs.events();
-    assert_eq!(
-        events
-            .iter()
-            .map(|event| event.operation)
-            .collect::<Vec<_>>(),
-        vec![
-            FsOperation::CreateDirAll,
-            FsOperation::CreateNewFile,
-            FsOperation::WriteHandle,
-        ]
-    );
+            let result = WriteLock::acquire_with(root, fault_fs);
+            drop(result);
+
+            assert!(
+                std::panic::catch_unwind(|| assert_only_verified_coordination_residuals(root))
+                    .is_ok(),
+                "invalid bootstrap residual after {operation:?} {ordinal}"
+            );
+        }
+    }
 }
 
 #[test]
-fn legacy_apply_plans_before_observing_an_existing_write_lock() {
+fn persistent_bootstrap_faults_surface_and_the_next_writer_recovers() {
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    let baseline_lock =
+        WriteLock::acquire_with(baseline.path(), baseline_fs.clone()).expect("baseline bootstrap");
+    drop(baseline_lock);
+    let mut operation_counts = Vec::<(FsOperation, usize)>::new();
+    for event in baseline_fs.events() {
+        if let Some((_, count)) = operation_counts
+            .iter_mut()
+            .find(|(operation, _)| *operation == event.operation)
+        {
+            *count += 1;
+        } else {
+            operation_counts.push((event.operation, 1));
+        }
+    }
+
+    for (operation, count) in operation_counts {
+        for ordinal in 1..=count {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            let fault_fs = Arc::new(FaultFs::fail_from(operation, ordinal));
+
+            let result = WriteLock::acquire_with(root, fault_fs);
+            assert!(
+                result.is_err(),
+                "persistent {operation:?} fault at ordinal {ordinal} was masked"
+            );
+            drop(result);
+
+            let recovered = WriteLock::acquire(root).unwrap_or_else(|error| {
+                panic!(
+                    "next writer failed to recover persistent {operation:?} fault at ordinal {ordinal}: {error}"
+                )
+            });
+            drop(recovered);
+            assert_only_verified_coordination_residuals(root);
+            assert_exact_persistent_coordination(root);
+        }
+    }
+}
+
+#[test]
+fn apply_rejects_legacy_write_lock_before_reading_invalid_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     setup_empty_project(root);
@@ -2447,21 +3401,34 @@ fn legacy_apply_plans_before_observing_an_existing_write_lock() {
     let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
     fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("create lock parent");
     fs::write(&lock_path, b"locked\n").expect("write legacy lock");
+    let identity = coordination_lock_identity(root);
 
-    let error = apply_init(root).expect_err("invalid plan must win before lock acquisition");
+    let error = apply_init(root).expect_err("legacy lock must win before invalid config parsing");
 
-    assert!(matches!(error, CodegenError::Config(_)));
+    assert!(matches!(
+        error,
+        CodegenError::LegacyWriteLock { ref path }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH
+    ));
+    assert!(error.to_string().contains("remove the file manually"));
+    assert_eq!(coordination_lock_identity(root), identity);
     assert_eq!(fs::read(lock_path).expect("read legacy lock"), b"locked\n");
+    assert!(!root.join(DEFAULT_KIT_COORDINATION_IGNORE_PATH).exists());
 }
 
 #[test]
-fn legacy_empty_cohort_skips_all_transaction_io() {
+fn empty_preplanned_cohort_still_bootstraps_and_acquires() {
     let dir = tempfile::tempdir().expect("tempdir");
     let fs = Arc::new(FaultFs::passthrough());
 
     apply_planned_files_with(dir.path(), &[], &[], fs.clone()).expect("empty apply");
 
-    assert!(fs.events().is_empty());
+    assert!(
+        fs.events()
+            .iter()
+            .any(|event| event.operation == FsOperation::TryLock)
+    );
+    assert_exact_persistent_coordination(dir.path());
 }
 
 #[test]
@@ -2485,6 +3452,118 @@ fn planning_context_reuses_one_coherent_cached_observation() {
         Some(PathPreimage::RegularFile { content_hash, .. })
             if content_hash == &hash_content_bytes(b"first\n")
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn same_context_project_root_detachment_conflicts_at_every_revalidation_boundary() {
+    for boundary in ["cohort", "final target"] {
+        let parent = tempfile::tempdir().expect("root-detachment tempdir");
+        let project = parent.path().join("project");
+        let detached = parent.path().join("detached-project");
+        fs::create_dir(&project).expect("create project root");
+        fs::create_dir(project.join("styles")).expect("create styles");
+        fs::write(project.join("styles/kit.css"), "before\n").expect("seed target");
+        let context = PlanningContext::open(&project).expect("open planning context");
+        context
+            .observe_path("styles/kit.css")
+            .expect("observe target");
+        let snapshot = context.finish_snapshot();
+
+        fs::rename(&project, &detached).expect("detach project root");
+        fs::create_dir(&project).expect("create replacement project root");
+
+        let result = if boundary == "cohort" {
+            snapshot.revalidate_all(&context)
+        } else {
+            snapshot.revalidate_path(&context, "styles/kit.css")
+        };
+
+        assert!(
+            matches!(result, Err(CodegenError::ProjectRootChanged { .. })),
+            "{boundary} boundary must reject the detached project root: {result:?}"
+        );
+        assert_eq!(
+            fs::read(detached.join("styles/kit.css")).expect("read detached target"),
+            b"before\n"
+        );
+        assert!(!project.join("styles/kit.css").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn same_context_project_root_alias_retarget_conflicts_at_every_revalidation_boundary() {
+    for boundary in ["cohort", "final target"] {
+        let parent = tempfile::tempdir().expect("root-alias-retarget tempdir");
+        let first = parent.path().join("first");
+        let second = parent.path().join("second");
+        let alias = parent.path().join("project");
+        for root in [&first, &second] {
+            fs::create_dir(root).expect("create aliased project root");
+            fs::create_dir(root.join("styles")).expect("create aliased styles directory");
+        }
+        fs::write(first.join("styles/kit.css"), "first\n").expect("seed first target");
+        fs::write(second.join("styles/kit.css"), "second\n").expect("seed second target");
+        std::os::unix::fs::symlink(&first, &alias).expect("create project-root alias");
+        let context = PlanningContext::open(&alias).expect("open aliased planning context");
+        context
+            .observe_path("styles/kit.css")
+            .expect("observe aliased target");
+        let snapshot = context.finish_snapshot();
+
+        fs::remove_file(&alias).expect("remove original project-root alias");
+        std::os::unix::fs::symlink(&second, &alias).expect("retarget project-root alias");
+
+        let result = if boundary == "cohort" {
+            snapshot.revalidate_all(&context)
+        } else {
+            snapshot.revalidate_path(&context, "styles/kit.css")
+        };
+
+        assert!(
+            matches!(result, Err(CodegenError::ProjectRootChanged { .. })),
+            "{boundary} boundary must reject the retargeted project-root alias: {result:?}"
+        );
+        assert_eq!(
+            fs::read(first.join("styles/kit.css")).expect("read first target"),
+            b"first\n"
+        );
+        assert_eq!(
+            fs::read(second.join("styles/kit.css")).expect("read second target"),
+            b"second\n"
+        );
+    }
+}
+
+#[test]
+fn same_context_expected_ancestor_detachment_conflicts_at_every_revalidation_boundary() {
+    for boundary in ["cohort", "final target"] {
+        let directory = tempfile::tempdir().expect("ancestor-detachment tempdir");
+        let root = directory.path();
+        fs::create_dir(root.join("styles")).expect("create styles");
+        let context = PlanningContext::open(root).expect("open planning context");
+        context
+            .observe_path("styles/kit.css")
+            .expect("observe absent target");
+        let snapshot = context.finish_snapshot();
+
+        fs::rename(root.join("styles"), root.join("detached-styles"))
+            .expect("detach expected ancestor");
+
+        let result = if boundary == "cohort" {
+            snapshot.revalidate_all(&context)
+        } else {
+            snapshot.revalidate_path(&context, "styles/kit.css")
+        };
+
+        assert!(
+            matches!(result, Err(CodegenError::PreimageConflict { .. })),
+            "{boundary} boundary must reject the detached ancestor: {result:?}"
+        );
+        assert!(!root.join("styles").exists());
+        assert!(!root.join("styles/kit.css").exists());
+    }
 }
 
 #[test]
@@ -2518,7 +3597,7 @@ fn whole_cohort_preimage_conflict_aborts_before_target_writes() {
 }
 
 #[test]
-fn malformed_cohort_missing_a_later_preimage_aborts_before_any_transaction_io() {
+fn malformed_cohort_missing_a_later_preimage_aborts_before_target_transaction_io() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir(root.join("styles")).expect("styles");
@@ -2549,12 +3628,18 @@ fn malformed_cohort_missing_a_later_preimage_aborts_before_any_transaction_io() 
     assert!(
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/second.css")
     );
-    assert!(fault_fs.events().is_empty());
+    assert!(!fault_fs.events().iter().any(|event| {
+        matches!(
+            event.operation,
+            FsOperation::WriteFile | FsOperation::Rename
+        )
+    }));
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("first target"),
         b"first-before\n"
     );
     assert!(!root.join("styles/second.css").exists());
+    assert_exact_persistent_coordination(root);
 }
 
 #[test]
@@ -2653,6 +3738,66 @@ fn target_swap_after_cohort_validation_is_caught_before_rename() {
             .iter()
             .any(|event| event.operation == FsOperation::Rename)
     );
+}
+
+#[test]
+fn target_changes_after_final_revalidation_are_caught_before_rename() {
+    for (case, initial) in [
+        ("existing target mutation", Some("before\n")),
+        ("absent target appearance", None),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("styles")).expect("styles");
+        let target = root.join("styles/kit.css");
+        if let Some(initial) = initial {
+            fs::write(&target, initial).expect("seed target");
+        }
+        let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture snapshot");
+        let files = vec![PlannedFile {
+            path: "styles/kit.css".to_owned(),
+            action: if initial.is_some() {
+                PlannedFileAction::Update
+            } else {
+                PlannedFileAction::Create
+            },
+            content: "planned\n".to_owned(),
+        }];
+        let changes = vec![ChangeRecord::new(
+            if initial.is_some() {
+                ChangeKind::UpdateFile
+            } else {
+                ChangeKind::CreateFile
+            },
+            "styles/kit.css",
+            true,
+        )];
+        let fault_fs = Arc::new(FaultFs::mutate_after_final_revalidation(
+            target.clone(),
+            b"raced-after\n".to_vec(),
+        ));
+
+        let error =
+            apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+                .expect_err(case);
+
+        assert!(
+            matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/kit.css"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            fs::read(&target).expect("read raced target"),
+            b"raced-after\n",
+            "{case}"
+        );
+        assert!(
+            !fault_fs
+                .events()
+                .iter()
+                .any(|event| event.operation == FsOperation::Rename),
+            "{case}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2839,7 +3984,7 @@ fn mode_only_preimage_change_conflicts_before_target_writes() {
 
 #[cfg(unix)]
 #[test]
-fn retargeted_project_alias_conflicts_before_lock_creation() {
+fn retargeted_project_alias_conflicts_after_coordination_but_before_target_io() {
     let parent = tempfile::tempdir().expect("tempdir");
     let first = parent.path().join("first");
     let second = parent.path().join("second");
@@ -2871,11 +4016,17 @@ fn retargeted_project_alias_conflicts_before_lock_creation() {
             .expect_err("retargeted root must conflict");
 
     assert!(matches!(error, CodegenError::ProjectRootChanged { .. }));
-    assert!(fault_fs.events().is_empty());
+    assert!(!fault_fs.events().iter().any(|event| {
+        matches!(
+            event.operation,
+            FsOperation::WriteFile | FsOperation::Rename
+        )
+    }));
     assert_eq!(
         fs::read(second.join("styles/kit.css")).expect("second target"),
         b"second\n"
     );
+    assert_exact_persistent_coordination(&second);
 }
 
 #[test]
@@ -2982,37 +4133,208 @@ fn legacy_rename_failure_leaves_a_partial_cohort_and_temporary_file() {
         fs::read(root.join("styles/second.leptos-ui-kit.tmp")).expect("second temporary remains"),
         b"second\n"
     );
-    assert!(!root.join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
+    assert_exact_persistent_coordination(root);
 }
 
-#[test]
-fn legacy_lock_cleanup_failure_is_swallowed_and_leaves_the_sentinel() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    fs::create_dir_all(root.join("styles")).expect("styles");
-    let files = vec![PlannedFile {
-        path: "styles/kit.css".to_owned(),
-        action: PlannedFileAction::Create,
-        content: ":root {}\n".to_owned(),
-    }];
-    let changes = vec![ChangeRecord::new(
-        ChangeKind::CreateFile,
-        "styles/kit.css",
-        true,
-    )];
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::RemoveFile, 1));
-
-    apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect("cleanup failure is not surfaced by the legacy guard");
-
+fn assert_exact_persistent_coordination(root: &Path) {
     assert_eq!(
-        fs::read(root.join(DEFAULT_KIT_WRITE_LOCK_PATH)).expect("stale sentinel"),
-        b"locked\n"
+        fs::read(root.join(DEFAULT_KIT_WRITE_LOCK_PATH)).expect("read advisory lock"),
+        KIT_ADVISORY_LOCK_CONTENT
     );
     assert_eq!(
-        fs::read(root.join("styles/kit.css")).expect("committed target"),
-        b":root {}\n"
+        fs::read(root.join(DEFAULT_KIT_COORDINATION_IGNORE_PATH))
+            .expect("read coordination ignore"),
+        KIT_COORDINATION_IGNORE_CONTENT
     );
+}
+
+fn spawn_lock_stage_worker(role: &str, project: &Path, control: &Path) -> LockStageWorker {
+    let child = Command::new(env::current_exe().expect("current unit-test executable"))
+        .args([
+            "--exact",
+            "tests::transaction_lock_stage_worker",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LOCK_STAGE_ROLE_ENV, role)
+        .env(LOCK_STAGE_PROJECT_ENV, project)
+        .env(LOCK_STAGE_CONTROL_ENV, control)
+        .spawn()
+        .expect("spawn lock-stage worker");
+    LockStageWorker { child: Some(child) }
+}
+
+struct LockStageWorker {
+    child: Option<Child>,
+}
+
+impl LockStageWorker {
+    fn wait_success(&mut self) {
+        let mut child = self.child.take().expect("live lock-stage worker");
+        let status = child.wait().expect("wait for lock-stage worker");
+        assert!(status.success(), "lock-stage worker failed: {status}");
+    }
+
+    fn kill_and_wait(&mut self) {
+        let mut child = self.child.take().expect("live lock-stage worker");
+        child.kill().expect("kill lock-stage worker");
+        let _ = child.wait().expect("reap killed lock-stage worker");
+    }
+}
+
+impl Drop for LockStageWorker {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn wait_for_worker_path(path: &Path, worker: &mut LockStageWorker) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        if let Some(status) = worker
+            .child
+            .as_mut()
+            .expect("live lock-stage worker")
+            .try_wait()
+            .expect("poll lock-stage worker")
+        {
+            panic!(
+                "lock-stage worker exited before {}: {status}",
+                path.display()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_stage_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn transaction_candidate_paths(root: &Path) -> Vec<PathBuf> {
+    let directory = root.join("src/components/ui/_kit/.transactions");
+    let mut paths = match fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("read transaction candidate").path())
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read transaction candidates: {error}"),
+    };
+    paths.sort();
+    paths
+}
+
+fn coordination_file_identity(path: &Path) -> (u64, u64) {
+    let parent_path = path.parent().expect("coordination file parent");
+    let name = path.file_name().expect("coordination file name");
+    let parent = cap_std::fs::Dir::open_ambient_dir(parent_path, cap_std::ambient_authority())
+        .unwrap_or_else(|error| {
+            panic!(
+                "open coordination parent {}: {error}",
+                parent_path.display()
+            )
+        });
+    let metadata = parent
+        .symlink_metadata(Path::new(name))
+        .unwrap_or_else(|error| panic!("inspect coordination file {}: {error}", path.display()));
+    (
+        cap_fs_ext::MetadataExt::dev(&metadata),
+        cap_fs_ext::MetadataExt::ino(&metadata),
+    )
+}
+
+fn coordination_lock_identity(root: &Path) -> (u64, u64) {
+    coordination_file_identity(&root.join(DEFAULT_KIT_WRITE_LOCK_PATH))
+}
+
+fn assert_only_verified_coordination_residuals(root: &Path) {
+    let allowed_directories = BTreeSet::from([
+        "src",
+        "src/components",
+        "src/components/ui",
+        "src/components/ui/_kit",
+    ]);
+    let allowed_files = BTreeMap::from([
+        (DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT),
+        (
+            DEFAULT_KIT_COORDINATION_IGNORE_PATH,
+            KIT_COORDINATION_IGNORE_CONTENT,
+        ),
+    ]);
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("read coordination residual directory") {
+            let entry = entry.expect("read coordination residual entry");
+            let path = entry.path();
+            let logical_path = path
+                .strip_prefix(root)
+                .expect("residual remains below root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).expect("residual metadata");
+
+            if metadata.is_dir() {
+                assert!(
+                    allowed_directories.contains(logical_path.as_str()),
+                    "unexpected residual directory {logical_path}"
+                );
+                #[cfg(unix)]
+                if logical_path == "src/components/ui/_kit" {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    assert_eq!(
+                        metadata.permissions().mode() & 0o7777,
+                        0o700,
+                        "coordination residual directory mode"
+                    );
+                }
+                pending.push(path);
+                continue;
+            }
+
+            assert!(metadata.is_file(), "non-file residual {logical_path}");
+            let expected = allowed_files
+                .get(logical_path.as_str())
+                .unwrap_or_else(|| panic!("unexpected residual file {logical_path}"));
+            assert_eq!(
+                fs::read(path).expect("read coordination residual"),
+                *expected,
+                "invalid residual contents for {logical_path}"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let expected_mode = if logical_path == DEFAULT_KIT_WRITE_LOCK_PATH {
+                    0o600
+                } else {
+                    0o644
+                };
+                assert_eq!(
+                    metadata.permissions().mode() & 0o7777,
+                    expected_mode,
+                    "coordination residual file mode for {logical_path}"
+                );
+            }
+        }
+    }
 }
 
 fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {

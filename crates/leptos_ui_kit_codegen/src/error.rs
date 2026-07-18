@@ -36,6 +36,16 @@ pub enum CodegenError {
         reason: String,
     },
     DuplicatePath(String),
+    WriteLockContended {
+        path: String,
+    },
+    LegacyWriteLock {
+        path: String,
+    },
+    InvalidCoordinationState {
+        path: String,
+        reason: String,
+    },
     LockExists(PathBuf),
 }
 
@@ -65,6 +75,19 @@ impl fmt::Display for CodegenError {
                 write!(f, "project root changed at {}: {reason}", path.display())
             }
             Self::DuplicatePath(path) => write!(f, "duplicate planned write path: {path}"),
+            Self::WriteLockContended { path } => {
+                write!(f, "project write lock is already held at {path}")
+            }
+            Self::LegacyWriteLock { path } => write!(
+                f,
+                "legacy write lock exists at {path}; verify no older leptos_ui_kit process is running, remove the file manually, and retry"
+            ),
+            Self::InvalidCoordinationState { path, reason } => {
+                write!(
+                    f,
+                    "invalid installer coordination state at {path}: {reason}; verify no leptos_ui_kit process is running, inspect and repair or remove the entry manually, and retry"
+                )
+            }
             Self::LockExists(path) => write!(f, "write lock already exists: {}", path.display()),
         }
     }

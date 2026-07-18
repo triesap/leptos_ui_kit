@@ -1,6 +1,8 @@
 use std::{path::Path, sync::Arc};
 
-use crate::path_safety::{PlanningContext, capture_plan_snapshot};
+use crate::path_safety::PlanningContext;
+#[cfg(test)]
+use crate::path_safety::capture_plan_snapshot;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, PathPreimage, PlanSnapshot, PlannedFile,
     validate_planned_write_paths,
@@ -11,13 +13,14 @@ use super::{
     lock::WriteLock,
 };
 
-pub(crate) fn apply_planned_files(
-    project_root: &Path,
+pub(crate) fn apply_planned_files_locked(
+    context: &PlanningContext,
+    lock: &WriteLock,
     files: &[PlannedFile],
     changes: &[ChangeRecord],
     snapshot: &PlanSnapshot,
 ) -> Result<(), CodegenError> {
-    apply_planned_files_with_snapshot(project_root, files, changes, snapshot, Arc::new(SystemFs))
+    apply_planned_files_locked_with(context, lock, files, changes, snapshot, Arc::new(SystemFs))
 }
 
 #[cfg(test)]
@@ -27,15 +30,26 @@ pub(crate) fn apply_planned_files_with(
     changes: &[ChangeRecord],
     fs: Arc<dyn FsOps>,
 ) -> Result<(), CodegenError> {
-    if files.is_empty() {
-        return Ok(());
-    }
     let snapshot = capture_plan_snapshot(project_root, files.iter().map(|file| &file.path))?;
     apply_planned_files_with_snapshot(project_root, files, changes, &snapshot, fs)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_planned_files_with_snapshot(
     project_root: &Path,
+    files: &[PlannedFile],
+    changes: &[ChangeRecord],
+    snapshot: &PlanSnapshot,
+    fs: Arc<dyn FsOps>,
+) -> Result<(), CodegenError> {
+    let transaction = PlanningContext::open(project_root)?;
+    let lock = WriteLock::acquire_with_context_and_fs(&transaction, Arc::clone(&fs))?;
+    apply_planned_files_locked_with(&transaction, &lock, files, changes, snapshot, fs)
+}
+
+fn apply_planned_files_locked_with(
+    transaction: &PlanningContext,
+    lock: &WriteLock,
     files: &[PlannedFile],
     changes: &[ChangeRecord],
     snapshot: &PlanSnapshot,
@@ -56,20 +70,19 @@ pub(crate) fn apply_planned_files_with_snapshot(
         }
     }
 
+    snapshot.revalidate_all(transaction)?;
+
     if files.is_empty() {
         return Ok(());
     }
-
-    let transaction = snapshot.open_transaction_context(project_root)?;
-    let _lock = WriteLock::acquire_with_context(&transaction, Arc::clone(&fs))?;
-    snapshot.revalidate_all(&transaction)?;
 
     for file in files
         .iter()
         .filter(|file| !lock_paths.contains(&file.path.as_str()))
     {
         write_file_atomic_with(
-            &transaction,
+            transaction,
+            lock,
             &file.path,
             file.content.as_bytes(),
             snapshot,
@@ -80,7 +93,8 @@ pub(crate) fn apply_planned_files_with_snapshot(
     for lock_path in lock_paths {
         if let Some(lock_file) = files.iter().find(|file| file.path == lock_path) {
             write_file_atomic_with(
-                &transaction,
+                transaction,
+                lock,
                 &lock_file.path,
                 lock_file.content.as_bytes(),
                 snapshot,
@@ -97,13 +111,23 @@ pub fn write_file_atomic(
     logical_path: &str,
     content: &[u8],
 ) -> Result<(), CodegenError> {
-    let snapshot = capture_plan_snapshot(project_root, [logical_path])?;
-    let transaction = snapshot.open_transaction_context(project_root)?;
-    write_file_atomic_with(&transaction, logical_path, content, &snapshot, &SystemFs)
+    let transaction = PlanningContext::open(project_root)?;
+    let lock = WriteLock::acquire_with_context(&transaction)?;
+    transaction.observe_path(logical_path)?;
+    let snapshot = transaction.finish_snapshot();
+    write_file_atomic_with(
+        &transaction,
+        &lock,
+        logical_path,
+        content,
+        &snapshot,
+        &SystemFs,
+    )
 }
 
 fn write_file_atomic_with(
     transaction: &PlanningContext,
+    _lock: &WriteLock,
     logical_path: &str,
     content: &[u8],
     snapshot: &PlanSnapshot,
@@ -113,13 +137,6 @@ fn write_file_atomic_with(
     transaction.ensure_parent(logical_path)?;
     let transaction_root = transaction.project_root();
     let full_path = transaction_root.join(logical_path);
-    if let Some(parent) = full_path.parent() {
-        fs.create_dir_all(parent)
-            .map_err(|source| CodegenError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-    }
 
     let temp_path = full_path.with_extension("leptos-ui-kit.tmp");
     let temp_logical = temp_path
@@ -154,6 +171,7 @@ fn write_file_atomic_with(
     transaction.validate_auxiliary_path(temp_logical)?;
     let (commit_parent, target_name) = transaction.open_parent(logical_path)?;
     transaction.ensure_same_directory(logical_path, &stage_parent, &commit_parent)?;
+    snapshot.revalidate_path(transaction, logical_path)?;
     fs.rename(
         &stage_parent,
         Path::new(&temp_name),

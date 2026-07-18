@@ -638,6 +638,28 @@ fn public_error_variants_and_conversion_bounds_remain_constructible() {
         CodegenError::DuplicatePath(path) if path == "dup"
     ));
     assert!(matches!(
+        CodegenError::WriteLockContended {
+            path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+        },
+        CodegenError::WriteLockContended { path }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH
+    ));
+    assert!(matches!(
+        CodegenError::LegacyWriteLock {
+            path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+        },
+        CodegenError::LegacyWriteLock { path }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH
+    ));
+    assert!(matches!(
+        CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+            reason: "unsupported marker".to_owned(),
+        },
+        CodegenError::InvalidCoordinationState { path, reason }
+            if path == DEFAULT_KIT_WRITE_LOCK_PATH && reason == "unsupported marker"
+    ));
+    assert!(matches!(
         CodegenError::LockExists(path.clone()),
         CodegenError::LockExists(value) if value == path
     ));

@@ -30,7 +30,7 @@ pub(crate) fn plan_add_with_config_writer(
     plan_add_with_context(&context, project_root, item_name, config_writer)
 }
 
-fn plan_add_with_context(
+pub(crate) fn plan_add_with_context(
     context: &PlanningContext,
     project_root: &Path,
     item_name: &str,

@@ -32,12 +32,20 @@ pub(crate) fn plan_sync_with_config_writer(
     config_writer: KitConfigWriter,
 ) -> Result<SyncPlan, CodegenError> {
     let context = PlanningContext::open(project_root)?;
+    plan_sync_with_context(&context, project_root, config_writer)
+}
+
+pub(crate) fn plan_sync_with_context(
+    context: &PlanningContext,
+    project_root: &Path,
+    config_writer: KitConfigWriter,
+) -> Result<SyncPlan, CodegenError> {
     let init_plan = plan_init_with_context(
-        &context,
+        context,
         project_root,
         leptos_ui_kit_registry::canonical_kit_json,
     )?;
-    let config_content = planned_or_existing_kit_config_content(&context, &init_plan.files)?;
+    let config_content = planned_or_existing_kit_config_content(context, &init_plan.files)?;
     let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
     let files = init_plan
@@ -52,7 +60,7 @@ pub(crate) fn plan_sync_with_config_writer(
         .collect::<Vec<_>>();
 
     plan_sync_from_config(
-        &context,
+        context,
         project_root,
         files,
         changes,

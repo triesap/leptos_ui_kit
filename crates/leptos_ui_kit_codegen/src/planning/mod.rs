@@ -7,12 +7,14 @@ pub(crate) use add::desired_builtin_item;
 pub use add::plan_add;
 #[cfg(test)]
 pub(crate) use add::plan_add_with_config_writer;
+pub(crate) use add::plan_add_with_context;
 pub(crate) use files::*;
 pub use init::plan_init;
 #[cfg(test)]
 pub(crate) use init::plan_init_with_config_provider;
 pub(crate) use init::plan_init_with_context;
 pub use sync::plan_sync;
+pub(crate) use sync::plan_sync_with_context;
 #[cfg(test)]
 pub(crate) use sync::{plan_built_in_item, plan_sync_with_config_writer};
 pub(crate) use sync::{plan_sync_from_config, prepare_kit_config_write};

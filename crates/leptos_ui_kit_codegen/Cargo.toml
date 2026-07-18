@@ -35,16 +35,25 @@ include = [
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
     "tests/public_api.rs",
+    "tests/transaction_process.rs",
     "tests/transaction_security.rs",
 ]
 
 [dependencies]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
+getrandom.workspace = true
 leptos_ui_kit_registry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+fs_at = "0.2.1"
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

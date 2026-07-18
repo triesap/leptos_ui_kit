@@ -1,25 +1,35 @@
 use std::path::Path;
 
-use crate::transaction::apply_planned_files;
-use crate::{AddPlan, CodegenError, InitPlan, SyncPlan, plan_add, plan_init, plan_sync};
+use leptos_ui_kit_registry::{canonical_kit_json, kit_config_for_write};
+
+use crate::path_safety::PlanningContext;
+use crate::planning::{plan_add_with_context, plan_init_with_context, plan_sync_with_context};
+use crate::transaction::{WriteLock, apply_planned_files_locked};
+use crate::{AddPlan, CodegenError, InitPlan, SyncPlan};
 
 pub fn apply_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
-    let plan = plan_init(project_root)?;
-    apply_planned_files(project_root, &plan.files, &plan.changes, &plan.snapshot)?;
+    let context = PlanningContext::open(project_root)?;
+    let lock = WriteLock::acquire_with_context(&context)?;
+    let plan = plan_init_with_context(&context, project_root, canonical_kit_json)?;
+    apply_planned_files_locked(&context, &lock, &plan.files, &plan.changes, &plan.snapshot)?;
 
     Ok(plan)
 }
 
 pub fn apply_add(project_root: &Path, item_name: &str) -> Result<AddPlan, CodegenError> {
-    let plan = plan_add(project_root, item_name)?;
-    apply_planned_files(project_root, &plan.files, &plan.changes, &plan.snapshot)?;
+    let context = PlanningContext::open(project_root)?;
+    let lock = WriteLock::acquire_with_context(&context)?;
+    let plan = plan_add_with_context(&context, project_root, item_name, kit_config_for_write)?;
+    apply_planned_files_locked(&context, &lock, &plan.files, &plan.changes, &plan.snapshot)?;
 
     Ok(plan)
 }
 
 pub fn apply_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
-    let plan = plan_sync(project_root)?;
-    apply_planned_files(project_root, &plan.files, &plan.changes, &plan.snapshot)?;
+    let context = PlanningContext::open(project_root)?;
+    let lock = WriteLock::acquire_with_context(&context)?;
+    let plan = plan_sync_with_context(&context, project_root, kit_config_for_write)?;
+    apply_planned_files_locked(&context, &lock, &plan.files, &plan.changes, &plan.snapshot)?;
 
     Ok(plan)
 }
