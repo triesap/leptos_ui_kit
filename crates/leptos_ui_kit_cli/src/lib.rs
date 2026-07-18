@@ -1505,14 +1505,26 @@ fn current_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{collections::BTreeMap, fs};
 
-    use leptos_ui_kit_codegen::plan_init;
+    use leptos_ui_kit_codegen::{lock_to_json, plan_init};
     use leptos_ui_kit_registry::{
-        desired_builtin_button_item, kit_config_to_json, kit_config_with_desired_item,
-        parse_kit_json_str,
+        canonical_kit_config, desired_builtin_button_item, kit_config_to_json,
+        kit_config_with_desired_item, parse_kit_json_str,
     };
     use tempfile::tempdir;
+
+    const PINNED_BUTTON_CSS: &str =
+        include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/button.css");
+    const PINNED_SPINNER_CSS: &str =
+        include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/spinner.css");
+    const APP_TOKEN_OVERRIDES: &str = r#"
+/* application-owned token overrides */
+:root {
+  --kit-color-primary: rebeccapurple;
+  --kit-button-gap: 0.75rem;
+}
+"#;
 
     #[test]
     fn info_envelope_json_outputs_detected_project_shape() {
@@ -1792,6 +1804,96 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("desired item builtin:tokens is installed"));
         assert!(output.contains("desired item builtin:spinner is installed"));
         assert!(output.contains("desired item builtin:button is installed"));
+    }
+
+    #[test]
+    fn pinned_button_spinner_migrations_are_canonical_and_strict_doctor_clean() {
+        for (css_path, with_overrides) in [
+            (DEFAULT_CSS_PATH, false),
+            (DEFAULT_CSS_PATH, true),
+            ("styles/custom-theme.css", false),
+            ("styles/custom-theme.css", true),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, css_path);
+            reconstruct_pinned_button_install(root, css_path, with_overrides);
+
+            let first = apply_sync(root).unwrap_or_else(|error| {
+                panic!(
+                    "pinned migration failed for {css_path} (overrides={with_overrides}): {error}"
+                )
+            });
+            assert!(
+                !first.is_empty(),
+                "pinned migration unexpectedly had no changes for {css_path} (overrides={with_overrides})"
+            );
+
+            assert_current_button_install(
+                root,
+                css_path,
+                with_overrides.then_some(APP_TOKEN_OVERRIDES),
+            );
+            assert_strict_doctor_success(root);
+            assert!(
+                apply_sync(root).expect("second pinned sync").is_empty(),
+                "pinned migration was not idempotent for {css_path} (overrides={with_overrides})"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_relocates_a_current_tracked_late_foundation_before_dependents() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+
+        let css_path = root.join(DEFAULT_CSS_PATH);
+        let css = fs::read_to_string(&css_path).expect("read current css");
+        let tokens = managed_css_block(&css, "tokens");
+        let mut late = remove_managed_css_block(css, "tokens");
+        if !late.ends_with('\n') {
+            late.push('\n');
+        }
+        late.push_str(&tokens);
+        late.push_str(APP_TOKEN_OVERRIDES);
+        fs::write(&css_path, late).expect("write late tokens css");
+
+        let first = apply_sync(root).expect("relocate tracked tokens");
+        assert!(!first.is_empty());
+        assert_current_button_install(root, DEFAULT_CSS_PATH, Some(APP_TOKEN_OVERRIDES));
+        assert_strict_doctor_success(root);
+        assert!(
+            apply_sync(root)
+                .expect("second late-foundation sync")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sync_inserts_one_foundation_for_multiple_current_dependents() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let css_path = "styles/multi-dependent.css";
+        create_current_button_install(root, css_path);
+
+        let stylesheet = root.join(css_path);
+        let css = fs::read_to_string(&stylesheet).expect("read current css");
+        fs::write(&stylesheet, remove_managed_css_block(css, "tokens"))
+            .expect("remove tokens block");
+        remove_tokens_from_config_and_lock(root);
+
+        let first = apply_sync(root).expect("insert shared tokens foundation");
+        assert!(!first.is_empty());
+        assert_current_button_install(root, css_path, None);
+        let css = fs::read_to_string(&stylesheet).expect("read migrated css");
+        assert_eq!(css.matches("/* leptos-ui-kit:start tokens */").count(), 1);
+        assert_strict_doctor_success(root);
+        assert!(
+            apply_sync(root)
+                .expect("second multi-dependent sync")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2230,6 +2332,273 @@ leptos_router = "0.9.0-alpha"
             "<html><head></head><body></body></html>\n",
         )
         .expect("write index");
+    }
+
+    fn create_current_button_install(root: &Path, css_path: &str) {
+        create_doctor_project(root);
+        if css_path != DEFAULT_CSS_PATH {
+            let mut config = canonical_kit_config().expect("canonical config");
+            config.styles.css = css_path.to_owned();
+            let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+            fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("create config parent");
+            fs::write(
+                config_path,
+                kit_config_to_json(&config).expect("serialize custom config"),
+            )
+            .expect("write custom config");
+        }
+
+        apply_init(root).expect("initialize migration project");
+        apply_add(root, "button").expect("install current button closure");
+    }
+
+    fn reconstruct_pinned_button_install(root: &Path, css_path: &str, with_overrides: bool) {
+        assert_eq!(
+            hash_content_bytes(PINNED_BUTTON_CSS.as_bytes()),
+            "sha256:b9414172fc55c4d62e8b4ccd21c9c5d6427729e2ed30e2d5e1c5b808945dee46"
+        );
+        assert_eq!(
+            hash_content_bytes(PINNED_SPINNER_CSS.as_bytes()),
+            "sha256:736f9458ba25973db7371e02732ee9f87e02fe7d9e6686e94d76f52cfc26cd6d"
+        );
+
+        let stylesheet = root.join(css_path);
+        let css = fs::read_to_string(&stylesheet).expect("read current stylesheet");
+        let css = remove_managed_css_block(css, "tokens");
+        let css = replace_managed_css_block(css, "spinner", PINNED_SPINNER_CSS);
+        let mut css = replace_managed_css_block(css, "button", PINNED_BUTTON_CSS);
+        if with_overrides {
+            css.push_str(APP_TOKEN_OVERRIDES);
+        }
+        fs::write(&stylesheet, css).expect("write pinned stylesheet");
+
+        remove_tokens_from_config_and_lock(root);
+        let mut lock = read_install_lock(root);
+        for (item_id, block_id, generated) in [
+            ("builtin:spinner", "spinner", PINNED_SPINNER_CSS),
+            ("builtin:button", "button", PINNED_BUTTON_CSS),
+        ] {
+            let item = lock.items.get_mut(item_id).expect("pinned lock item");
+            let block = item
+                .style_blocks
+                .iter_mut()
+                .find(|block| block.block_id == block_id)
+                .expect("pinned lock style block");
+            assert_eq!(block.css_path, css_path);
+            block.generated_hash = hash_content_bytes(generated.as_bytes());
+        }
+        write_install_lock(root, &lock);
+    }
+
+    fn remove_tokens_from_config_and_lock(root: &Path) {
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+                .expect("parse installed config");
+        let old_len = config.items.len();
+        config.items.retain(|item| item.item_name() != "tokens");
+        assert_eq!(config.items.len() + 1, old_len);
+        let config_json = kit_config_to_json(&config).expect("serialize legacy config");
+        fs::write(&config_path, &config_json).expect("write legacy config");
+
+        let mut lock = read_install_lock(root);
+        assert!(lock.items.remove("builtin:tokens").is_some());
+        assert_eq!(
+            lock.style_blocks_by_id.remove("tokens").as_deref(),
+            Some("builtin:tokens")
+        );
+        lock.project.config_hash = hash_content_bytes(config_json.as_bytes());
+        write_install_lock(root, &lock);
+    }
+
+    fn managed_css_block(css: &str, block_id: &str) -> String {
+        extract_managed_css_block(css, block_id)
+            .unwrap_or_else(|error| panic!("inspect managed CSS block {block_id}: {error}"))
+            .unwrap_or_else(|| panic!("missing managed CSS block {block_id}"))
+    }
+
+    fn remove_managed_css_block(mut css: String, block_id: &str) -> String {
+        let block = managed_css_block(&css, block_id);
+        let start = css.find(&block).expect("managed block source range");
+        css.replace_range(start..start + block.len(), "");
+        css
+    }
+
+    fn replace_managed_css_block(mut css: String, block_id: &str, replacement: &str) -> String {
+        let block = managed_css_block(&css, block_id);
+        let start = css.find(&block).expect("managed block source range");
+        css.replace_range(start..start + block.len(), replacement);
+        css
+    }
+
+    fn read_install_lock(root: &Path) -> InstallLock {
+        let input =
+            fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read install lock");
+        parse_install_lock_str_at_path(&input, Path::new(DEFAULT_KIT_LOCK_PATH))
+            .expect("parse install lock")
+    }
+
+    fn write_install_lock(root: &Path, lock: &InstallLock) {
+        fs::write(
+            root.join(DEFAULT_KIT_LOCK_PATH),
+            lock_to_json(lock).expect("serialize install lock"),
+        )
+        .expect("write install lock");
+    }
+
+    fn current_registry_style(block_id: &str) -> String {
+        let item = load_built_in_registry_item(block_id).expect("load style registry item");
+        let target = item
+            .targets
+            .style_blocks
+            .iter()
+            .find(|target| target.id == block_id)
+            .expect("registry style target");
+        read_built_in_registry_source(&target.source).expect("read registry style source")
+    }
+
+    fn assert_current_button_install(root: &Path, css_path: &str, override_css: Option<&str>) {
+        let css = fs::read_to_string(root.join(css_path)).expect("read migrated stylesheet");
+        for block_id in ["tokens", "spinner", "button"] {
+            assert_eq!(
+                managed_css_block(&css, block_id),
+                current_registry_style(block_id),
+                "managed block {block_id} is not current"
+            );
+        }
+
+        let tokens_at = css
+            .find("/* leptos-ui-kit:start tokens */")
+            .expect("tokens marker");
+        let spinner_at = css
+            .find("/* leptos-ui-kit:start spinner */")
+            .expect("spinner marker");
+        let button_at = css
+            .find("/* leptos-ui-kit:start button */")
+            .expect("button marker");
+        assert!(tokens_at < spinner_at, "tokens must precede spinner");
+        assert!(tokens_at < button_at, "tokens must precede button");
+        assert!(spinner_at < button_at, "spinner must precede button");
+
+        match override_css {
+            Some(override_css) => {
+                assert_eq!(css.matches(override_css).count(), 1);
+                let override_at = css.find(override_css).expect("application override");
+                assert!(
+                    button_at < override_at,
+                    "application overrides must remain last"
+                );
+            }
+            None => assert!(!css.contains("application-owned token overrides")),
+        }
+
+        let config_input =
+            fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read migrated config");
+        let config = parse_kit_json_str(&config_input).expect("parse migrated config");
+        assert_eq!(config.styles.css, css_path);
+        assert_eq!(
+            config
+                .items
+                .iter()
+                .map(|item| item.item_name())
+                .collect::<Vec<_>>(),
+            ["tokens", "spinner", "button"]
+        );
+
+        let lock = read_install_lock(root);
+        assert_eq!(
+            lock.project.config_hash,
+            hash_content_bytes(config_input.as_bytes())
+        );
+        assert_complete_button_lock(root, css_path, &css, &lock);
+    }
+
+    fn assert_complete_button_lock(root: &Path, css_path: &str, css: &str, lock: &InstallLock) {
+        assert_eq!(
+            lock.items.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["builtin:button", "builtin:spinner", "builtin:tokens"]
+        );
+
+        let mut expected_files_by_path = BTreeMap::new();
+        let mut expected_styles_by_id = BTreeMap::new();
+        for (item_id, item) in &lock.items {
+            let registry =
+                load_built_in_registry_item(&item.name).expect("load installed registry item");
+            assert_eq!(item.id, *item_id);
+            assert_eq!(item.source, "builtin");
+            assert_eq!(item.version, SCHEMA_VERSION);
+            assert_eq!(item.content_hash, registry.content_hash);
+
+            let files = item
+                .files
+                .iter()
+                .map(|file| (file.path.as_str(), file))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(files.len(), registry.targets.ui_files.len());
+            for target in &registry.targets.ui_files {
+                let logical_path = format!("src/components/ui/{}", target.path);
+                let file = files
+                    .get(logical_path.as_str())
+                    .unwrap_or_else(|| panic!("missing lock target {logical_path}"));
+                let generated = read_built_in_registry_source(&target.source)
+                    .expect("read registry Rust source");
+                let generated_hash = hash_content_bytes(generated.as_bytes());
+                assert_eq!(file.kind, "rust");
+                assert_eq!(file.generated_hash, generated_hash);
+                assert_eq!(file.local_hash_at_install, generated_hash);
+                assert_eq!(
+                    hash_content_bytes(
+                        &fs::read(root.join(&file.path)).expect("read installed Rust source")
+                    ),
+                    generated_hash
+                );
+                assert!(
+                    expected_files_by_path
+                        .insert(file.path.clone(), item_id.clone())
+                        .is_none()
+                );
+            }
+
+            let style_blocks = item
+                .style_blocks
+                .iter()
+                .map(|block| (block.block_id.as_str(), block))
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(style_blocks.len(), registry.targets.style_blocks.len());
+            for target in &registry.targets.style_blocks {
+                let block = style_blocks
+                    .get(target.id.as_str())
+                    .unwrap_or_else(|| panic!("missing lock style target {}", target.id));
+                let generated = read_built_in_registry_source(&target.source)
+                    .expect("read registry CSS source");
+                assert_eq!(block.css_path, css_path);
+                assert_eq!(
+                    block.generated_hash,
+                    hash_content_bytes(generated.as_bytes())
+                );
+                assert_eq!(managed_css_block(css, &target.id), generated);
+                assert!(
+                    expected_styles_by_id
+                        .insert(block.block_id.clone(), item_id.clone())
+                        .is_none()
+                );
+            }
+        }
+
+        assert_eq!(lock.files_by_path, expected_files_by_path);
+        assert_eq!(lock.style_blocks_by_id, expected_styles_by_id);
+    }
+
+    fn assert_strict_doctor_success(root: &Path) {
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+        assert_eq!(
+            doctor_status(&doctor),
+            CommandStatus::Success,
+            "strict doctor was not clean:\n{output}"
+        );
     }
 
     fn init_git(root: &Path) {
