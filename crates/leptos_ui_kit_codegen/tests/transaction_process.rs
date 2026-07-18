@@ -11,7 +11,9 @@ use std::{
 };
 
 use cap_std::{ambient_authority, fs::Dir};
-use leptos_ui_kit_codegen::{CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_init};
+use leptos_ui_kit_codegen::{
+    CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_init, apply_sync,
+};
 use tempfile::tempdir;
 
 const WORKER_ROLE_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_ROLE";
@@ -249,8 +251,8 @@ fn transaction_process_worker() {
             apply_init(&project).expect("worker applies init");
         }
         "recover" => {
-            let lock = WriteLock::acquire(&project).expect("fresh worker recovers transaction");
-            drop(lock);
+            apply_sync(&project)
+                .expect_err("recovery succeeds before sync reports the missing kit config");
         }
         other => panic!("unknown transaction-process worker role {other}"),
     }

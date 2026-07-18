@@ -41,6 +41,9 @@ const KIT_DIRECTORY_COMPONENTS: [&str; 4] = ["src", "components", "ui", "_kit"];
 pub struct WriteLock {
     path: PathBuf,
     file: Option<std::fs::File>,
+    identity: (u64, u64),
+    project_root: PathBuf,
+    project_identity: (u64, u64),
 }
 
 struct PinnedKitDirectories {
@@ -261,12 +264,55 @@ impl WriteLock {
             kit_directory,
             opened,
         )?;
-        super::replace::recover_pending_transaction(context, fs.as_ref())?;
+        let (project_root, project_device, project_inode) = context.project_identity();
 
         Ok(Self {
             path: opened.path,
             file: Some(opened.file.into_std()),
+            identity: opened.identity,
+            project_root: project_root.to_path_buf(),
+            project_identity: (project_device, project_inode),
         })
+    }
+
+    pub(crate) fn validate_context(&self, context: &PlanningContext) -> Result<(), CodegenError> {
+        let (project_root, device, inode) = context.project_identity();
+        if project_root != self.project_root || (device, inode) != self.project_identity {
+            return Err(CodegenError::ProjectRootChanged {
+                path: project_root.to_path_buf(),
+                reason: "write lock belongs to a different project identity".to_owned(),
+            });
+        }
+        context.revalidate_project_root_identity()?;
+
+        let held = self
+            .file
+            .as_ref()
+            .ok_or_else(|| CodegenError::InvalidCoordinationState {
+                path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+                reason: "the held advisory-lock handle is no longer available".to_owned(),
+            })?;
+        let cloned = held.try_clone().map_err(|source| CodegenError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        let mut held = File::from_std(cloned);
+        let held_identity = file_identity(&held, &self.path)?;
+        if held_identity != self.identity {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+                reason: "the held advisory-lock handle no longer identifies the acquired inode"
+                    .to_owned(),
+            });
+        }
+        validate_cap_file_mode(&held, 0o600, DEFAULT_KIT_WRITE_LOCK_PATH)?;
+        let marker = read_bounded_cap_file(&mut held, &self.path)?;
+        validate_lock_marker(&marker)?;
+        validate_single_link_lock(context, &held, held_identity, &self.path)
+    }
+
+    pub(crate) fn identity(&self) -> (u64, u64) {
+        self.identity
     }
 }
 
@@ -293,6 +339,60 @@ fn validate_opened_lock(
     context.revalidate_auxiliary_identity(DEFAULT_KIT_WRITE_LOCK_PATH, opened.identity)
 }
 
+fn validate_completed_opened_lock(
+    context: &PlanningContext,
+    fs: &dyn FsOps,
+    opened: &mut OpenedLock,
+) -> Result<(), CodegenError> {
+    validate_opened_lock(context, fs, opened)?;
+    validate_single_link_lock(context, &opened.file, opened.identity, &opened.path)
+}
+
+fn validate_single_link_lock(
+    context: &PlanningContext,
+    held: &File,
+    expected_identity: (u64, u64),
+    path: &Path,
+) -> Result<(), CodegenError> {
+    context.revalidate_auxiliary_identity(DEFAULT_KIT_WRITE_LOCK_PATH, expected_identity)?;
+    validate_lock_link_count(held, path)?;
+
+    let current = context.open_auxiliary_file(DEFAULT_KIT_WRITE_LOCK_PATH, true)?;
+    let current_identity = file_identity(&current, path)?;
+    if current_identity != expected_identity {
+        return Err(CodegenError::UnsafePath {
+            path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+            reason: "persistent advisory lock changed while its link count was validated"
+                .to_owned(),
+        });
+    }
+    validate_lock_link_count(&current, path)?;
+    context.revalidate_auxiliary_file(DEFAULT_KIT_WRITE_LOCK_PATH, &current)?;
+
+    // Re-read through the advisory-lock handle after pathname revalidation so
+    // an alias introduced during the check cannot be mistaken for completed
+    // bootstrap state.
+    validate_lock_link_count(held, path)
+}
+
+fn validate_lock_link_count(file: &File, path: &Path) -> Result<(), CodegenError> {
+    let metadata = file.metadata().map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    ensure_safe_regular_metadata(DEFAULT_KIT_WRITE_LOCK_PATH, &metadata)?;
+    let links = metadata.nlink();
+    if links == 1 {
+        return Ok(());
+    }
+    Err(CodegenError::InvalidCoordinationState {
+        path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+        reason: format!(
+            "persistent advisory lock must have exactly one hard link after bootstrap cleanup; found {links}"
+        ),
+    })
+}
+
 fn complete_coordination_bootstrap(
     context: &PlanningContext,
     fs: &dyn FsOps,
@@ -300,11 +400,14 @@ fn complete_coordination_bootstrap(
     kit_directory: &Dir,
     mut opened: OpenedLock,
 ) -> Result<OpenedLock, CodegenError> {
+    // A newly published lock may still have its private publisher alias at
+    // this point, so the initial validation intentionally checks identity,
+    // marker, and mode without enforcing the completed-state link invariant.
     validate_opened_lock(context, fs, &mut opened)?;
     opened = cleanup_stale_candidates_before_planning(context, fs, kit_directory, opened)?;
     bootstrap_coordination_ignore(context, fs, pinned_kit, kit_directory)?;
     opened = cleanup_stale_candidates_before_planning(context, fs, kit_directory, opened)?;
-    validate_opened_lock(context, fs, &mut opened)?;
+    validate_completed_opened_lock(context, fs, &mut opened)?;
     Ok(opened)
 }
 
@@ -3106,4 +3209,172 @@ fn sync_created_directory_chain(
         sync_directory(fs, &directory, &context.project_root().join(&path))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod held_lock_validation_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write as _;
+
+    fn acquire(root: &Path) -> (PlanningContext, WriteLock) {
+        let context = PlanningContext::open(root).expect("planning context");
+        let lock = WriteLock::acquire_with_context(&context).expect("write lock");
+        (context, lock)
+    }
+
+    fn overwrite_held_lock(lock: &WriteLock, content: &[u8]) {
+        let held = lock.file.as_ref().expect("held lock handle");
+        let mut writer = held.try_clone().expect("clone held lock handle");
+        writer
+            .seek(SeekFrom::Start(0))
+            .expect("seek held lock handle");
+        writer.set_len(0).expect("truncate held lock handle");
+        writer.write_all(content).expect("write held lock handle");
+        writer.sync_all().expect("sync held lock handle");
+    }
+
+    #[test]
+    fn held_lock_validation_accepts_the_acquired_project_and_inode() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+
+        let held = File::from_std(
+            lock.file
+                .as_ref()
+                .expect("held lock handle")
+                .try_clone()
+                .expect("clone held lock handle"),
+        );
+        assert_eq!(
+            held.metadata().expect("held lock metadata").nlink(),
+            1,
+            "acquisition must remove its publisher alias before returning",
+        );
+        lock.validate_context(&context)
+            .expect("unchanged held lock must validate");
+    }
+
+    #[test]
+    fn held_lock_validation_rejects_a_different_project() {
+        let first = tempfile::tempdir().expect("first temporary project");
+        let second = tempfile::tempdir().expect("second temporary project");
+        let (_, lock) = acquire(first.path());
+        let other = PlanningContext::open(second.path()).expect("other planning context");
+
+        let error = lock
+            .validate_context(&other)
+            .expect_err("a lock from another project must fail closed");
+        assert!(matches!(error, CodegenError::ProjectRootChanged { .. }));
+        assert!(lock.file.is_some());
+    }
+
+    #[test]
+    fn held_lock_validation_rejects_changed_contents_without_consuming_the_handle() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+
+        overwrite_held_lock(&lock, b"tampered\n");
+        let error = lock
+            .validate_context(&context)
+            .expect_err("changed lock contents must fail closed");
+        assert!(matches!(
+            error,
+            CodegenError::InvalidCoordinationState { path, .. }
+                if path == DEFAULT_KIT_WRITE_LOCK_PATH
+        ));
+        assert!(lock.file.is_some());
+
+        overwrite_held_lock(&lock, KIT_ADVISORY_LOCK_CONTENT);
+        lock.validate_context(&context)
+            .expect("restored contents prove the held handle was preserved");
+    }
+
+    #[test]
+    fn held_lock_validation_rejects_an_extra_hard_link_without_consuming_the_handle() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let path = directory.path().join(DEFAULT_KIT_WRITE_LOCK_PATH);
+        let alias = directory.path().join("write-lock-hard-link-alias");
+        fs::hard_link(&path, &alias).expect("create hard-link alias");
+
+        let validation = lock.validate_context(&context);
+        fs::remove_file(&alias).expect("remove hard-link alias");
+
+        let error = validation.expect_err("a multiply linked lock must fail closed");
+        assert!(matches!(
+            error,
+            CodegenError::InvalidCoordinationState { path, reason }
+                if path == DEFAULT_KIT_WRITE_LOCK_PATH
+                    && reason.contains("exactly one hard link")
+        ));
+        assert!(lock.file.is_some());
+        lock.validate_context(&context)
+            .expect("removing the alias proves the held handle was preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_lock_validation_rejects_wrong_mode_without_consuming_the_handle() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let held = lock.file.as_ref().expect("held lock handle");
+        held.set_permissions(fs::Permissions::from_mode(0o644))
+            .expect("set unsafe lock mode");
+
+        let error = lock
+            .validate_context(&context)
+            .expect_err("wrong lock mode must fail closed");
+        assert!(matches!(
+            error,
+            CodegenError::InvalidCoordinationState { path, .. }
+                if path == DEFAULT_KIT_WRITE_LOCK_PATH
+        ));
+        assert!(lock.file.is_some());
+
+        held.set_permissions(fs::Permissions::from_mode(0o600))
+            .expect("restore safe lock mode");
+        lock.validate_context(&context)
+            .expect("restored mode proves the held handle was preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_lock_validation_rejects_missing_symlinked_and_replaced_paths() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let path = directory.path().join(DEFAULT_KIT_WRITE_LOCK_PATH);
+        fs::remove_file(&path).expect("detach held lock inode");
+
+        let missing = lock
+            .validate_context(&context)
+            .expect_err("a missing lock path must fail closed");
+        assert!(matches!(missing, CodegenError::Io { .. }));
+        assert!(lock.file.is_some());
+
+        let referent = directory.path().join("replacement-lock");
+        fs::write(&referent, KIT_ADVISORY_LOCK_CONTENT).expect("write symlink referent");
+        fs::set_permissions(&referent, fs::Permissions::from_mode(0o600))
+            .expect("secure symlink referent");
+        symlink(&referent, &path).expect("symlink lock path");
+        let symlinked = lock
+            .validate_context(&context)
+            .expect_err("a symlinked lock path must fail closed");
+        assert!(matches!(symlinked, CodegenError::UnsafePath { .. }));
+        assert!(lock.file.is_some());
+
+        fs::remove_file(&path).expect("remove lock symlink");
+        fs::write(&path, KIT_ADVISORY_LOCK_CONTENT).expect("write replacement lock");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("secure replacement lock");
+        let replaced = lock
+            .validate_context(&context)
+            .expect_err("a replaced lock inode must fail closed");
+        assert!(matches!(replaced, CodegenError::UnsafePath { .. }));
+        assert!(lock.file.is_some());
+    }
 }

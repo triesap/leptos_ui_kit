@@ -29,9 +29,11 @@ include = [
     "src/planning/sync.rs",
     "src/tests.rs",
     "src/transaction/fs.rs",
+    "src/transaction/journal.rs",
     "src/transaction/lock.rs",
     "src/transaction/mod.rs",
     "src/transaction/replace.rs",
+    "src/transaction/runtime.rs",
     "tests/fixtures/theme_pre_refactor_06124efa/button.css",
     "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
     "tests/public_api.rs",
@@ -47,6 +49,9 @@ leptos_ui_kit_registry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+
+[target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))'.dependencies]
+rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 fs_at = "0.2.1"

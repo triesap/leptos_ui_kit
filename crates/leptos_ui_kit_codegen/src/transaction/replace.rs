@@ -142,17 +142,20 @@ pub(crate) fn apply_planned_files_with_snapshot(
 ) -> Result<(), CodegenError> {
     let transaction = PlanningContext::open(project_root)?;
     let lock = WriteLock::acquire_with_context_and_fs(&transaction, Arc::clone(&fs))?;
+    lock.validate_context(&transaction)?;
+    recover_pending_transaction(&transaction, fs.as_ref())?;
     apply_planned_files_locked_with(&transaction, &lock, files, changes, snapshot, fs)
 }
 
 fn apply_planned_files_locked_with(
     transaction: &PlanningContext,
-    _lock: &WriteLock,
+    lock: &WriteLock,
     files: &[PlannedFile],
     changes: &[ChangeRecord],
     snapshot: &PlanSnapshot,
     fs: Arc<dyn FsOps>,
 ) -> Result<(), CodegenError> {
+    lock.validate_context(transaction)?;
     let paths = files
         .iter()
         .map(|file| file.path.clone())
@@ -277,6 +280,7 @@ pub fn write_file_atomic(
 ) -> Result<(), CodegenError> {
     let transaction = PlanningContext::open(project_root)?;
     let lock = WriteLock::acquire_with_context(&transaction)?;
+    recover_pending_locked(&transaction, &lock)?;
     transaction.observe_path(logical_path)?;
     let snapshot = transaction.finish_snapshot();
     let fs = SystemFs;
@@ -602,6 +606,14 @@ pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
         reason: "a durable transaction journal must be recovered by the next mutating command"
             .to_owned(),
     })
+}
+
+pub(crate) fn recover_pending_locked(
+    context: &PlanningContext,
+    lock: &WriteLock,
+) -> Result<(), CodegenError> {
+    lock.validate_context(context)?;
+    recover_pending_transaction(context, &SystemFs)
 }
 
 pub(super) fn recover_pending_transaction(

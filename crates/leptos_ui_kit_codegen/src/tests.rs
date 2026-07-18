@@ -4412,7 +4412,8 @@ fn failed_rollback_retains_a_strict_recovery_required_journal() {
             .map(Vec::len),
         Some(2)
     );
-    let recovered = WriteLock::acquire(root).expect("next writer recovers durable transaction");
+    let recovered =
+        recover_pending_for_test(root).expect("next writer recovers durable transaction");
     drop(recovered);
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("recovered first target"),
@@ -4479,7 +4480,7 @@ fn third_state_application_edits_block_recovery_without_mutating_evidence() {
     fs::write(root.join("styles/first.css"), b"application edit\n").expect("write third state");
     let before = snapshot_project_files(root);
 
-    let error = WriteLock::acquire(root).expect_err("third state blocks recovery");
+    let error = recover_pending_for_test(root).expect_err("third state blocks recovery");
 
     assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
     assert_eq!(snapshot_project_files(root), before);
@@ -4533,7 +4534,7 @@ fn invalid_wrong_project_and_unsupported_journals_block_without_mutation() {
         }
         let before = snapshot_project_files(root);
 
-        let error = WriteLock::acquire(root).expect_err(case);
+        let error = recover_pending_for_test(root).expect_err(case);
 
         assert!(matches!(
             error,
@@ -4565,6 +4566,13 @@ fn seed_failed_rollback_journal(root: &Path) -> PathBuf {
     let journals = transaction_journal_paths(root);
     assert_eq!(journals.len(), 1);
     journals.into_iter().next().expect("journal path")
+}
+
+fn recover_pending_for_test(root: &Path) -> Result<WriteLock, CodegenError> {
+    let context = PlanningContext::open(root)?;
+    let lock = WriteLock::acquire_with_context(&context)?;
+    recover_pending_locked(&context, &lock)?;
+    Ok(lock)
 }
 
 #[test]

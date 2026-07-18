@@ -1214,6 +1214,7 @@ dependencies = [
  "fs_at",
  "getrandom 0.3.4",
  "leptos_ui_kit_registry",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

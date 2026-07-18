@@ -52,17 +52,31 @@ struct DirectoryIdentity {
     inode: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExactRegularFileObservation {
+    identity: (u64, u64),
+    byte_len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotObservation {
+    preimage: PathPreimage,
+    regular_file: Option<ExactRegularFileObservation>,
+}
+
 /// A point-in-time, read-only record of every mutable project observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanSnapshot {
     root: ProjectRootIdentity,
-    observations: BTreeMap<String, PathPreimage>,
+    observations: BTreeMap<String, SnapshotObservation>,
     directories: BTreeMap<String, DirectoryIdentity>,
 }
 
 impl PlanSnapshot {
     pub fn preimage(&self, logical_path: &str) -> Option<&PathPreimage> {
-        self.observations.get(logical_path)
+        self.observations
+            .get(logical_path)
+            .map(|observation| &observation.preimage)
     }
 
     pub fn observations(
@@ -70,7 +84,7 @@ impl PlanSnapshot {
     ) -> impl ExactSizeIterator<Item = (&str, &PathPreimage)> + DoubleEndedIterator + '_ {
         self.observations
             .iter()
-            .map(|(path, preimage)| (path.as_str(), preimage))
+            .map(|(path, observation)| (path.as_str(), &observation.preimage))
     }
 
     pub fn len(&self) -> usize {
@@ -79,6 +93,37 @@ impl PlanSnapshot {
 
     pub fn is_empty(&self) -> bool {
         self.observations.is_empty()
+    }
+
+    pub(crate) fn regular_file_identity(&self, logical_path: &str) -> Option<(u64, u64)> {
+        self.observations
+            .get(logical_path)
+            .and_then(|observation| observation.regular_file)
+            .map(|regular_file| regular_file.identity)
+    }
+
+    pub(crate) fn byte_len(&self, logical_path: &str) -> Option<u64> {
+        self.observations
+            .get(logical_path)
+            .and_then(|observation| observation.regular_file)
+            .map(|regular_file| regular_file.byte_len)
+    }
+
+    pub(crate) fn directory_identity(&self, logical_path: &str) -> Option<(u64, u64)> {
+        if logical_path.is_empty() {
+            return Some((self.root.device, self.root.inode));
+        }
+        self.directories
+            .get(logical_path)
+            .map(|identity| (identity.device, identity.inode))
+    }
+
+    pub(crate) fn directory_identities(&self) -> impl Iterator<Item = (&str, (u64, u64))> + '_ {
+        std::iter::once(("", (self.root.device, self.root.inode))).chain(
+            self.directories
+                .iter()
+                .map(|(path, identity)| (path.as_str(), (identity.device, identity.inode))),
+        )
     }
 
     pub(crate) fn revalidate_all(&self, context: &PlanningContext) -> Result<(), CodegenError> {
@@ -90,8 +135,19 @@ impl PlanSnapshot {
                     reason: error.to_string(),
                 }
             })?;
-            if &actual.preimage != expected {
-                return Err(preimage_conflict(logical_path, expected, &actual.preimage));
+            if actual.preimage != expected.preimage {
+                return Err(preimage_conflict(
+                    logical_path,
+                    &expected.preimage,
+                    &actual.preimage,
+                ));
+            }
+            if actual.regular_file != expected.regular_file {
+                return Err(exact_regular_file_conflict(
+                    logical_path,
+                    expected.regular_file,
+                    actual.regular_file,
+                ));
             }
         }
         context.revalidate_directories(&self.directories, None)?;
@@ -117,8 +173,19 @@ impl PlanSnapshot {
                 reason: error.to_string(),
             }
         })?;
-        if &actual.preimage != expected {
-            return Err(preimage_conflict(logical_path, expected, &actual.preimage));
+        if actual.preimage != expected.preimage {
+            return Err(preimage_conflict(
+                logical_path,
+                &expected.preimage,
+                &actual.preimage,
+            ));
+        }
+        if actual.regular_file != expected.regular_file {
+            return Err(exact_regular_file_conflict(
+                logical_path,
+                expected.regular_file,
+                actual.regular_file,
+            ));
         }
         context.revalidate_directories(&self.directories, Some(logical_path))?;
         Ok(())
@@ -148,6 +215,7 @@ impl PlanSnapshot {
 struct CachedObservation {
     preimage: PathPreimage,
     bytes: Option<Vec<u8>>,
+    regular_file: Option<ExactRegularFileObservation>,
 }
 
 pub(crate) struct PlanningContext {
@@ -197,6 +265,43 @@ impl PlanningContext {
 
     pub(crate) fn project_identity(&self) -> (&Path, u64, u64) {
         (&self.root.canonical_root, self.root.device, self.root.inode)
+    }
+
+    pub(crate) fn inspect_directory_identity(
+        &self,
+        logical_path: &str,
+    ) -> Result<Option<(u64, u64)>, CodegenError> {
+        self.revalidate_project_root_identity()?;
+        if logical_path.is_empty() {
+            let metadata = self.dir.dir_metadata().map_err(|source| CodegenError::Io {
+                path: self.root.canonical_root.clone(),
+                source,
+            })?;
+            ensure_directory_metadata(".", &metadata)?;
+            let identity = metadata_identity(&metadata);
+            if identity != (self.root.device, self.root.inode) {
+                return Err(CodegenError::ProjectRootChanged {
+                    path: self.root.canonical_root.clone(),
+                    reason: "held project-root capability no longer has the opened identity"
+                        .to_owned(),
+                });
+            }
+            return Ok(Some(identity));
+        }
+
+        validate_relative_path(logical_path)?;
+        let probe = format!("{logical_path}/directory-probe");
+        let Some((directory, _)) = self.walk_parent(&probe, false)? else {
+            return Ok(None);
+        };
+        let metadata = directory
+            .dir_metadata()
+            .map_err(|source| CodegenError::Io {
+                path: self.root.canonical_root.join(logical_path),
+                source,
+            })?;
+        ensure_directory_metadata(logical_path, &metadata)?;
+        Ok(Some(metadata_identity(&metadata)))
     }
 
     pub(crate) fn open_pinned_project_root(&self) -> Result<Dir, CodegenError> {
@@ -301,7 +406,15 @@ impl PlanningContext {
                 .observations
                 .borrow()
                 .iter()
-                .map(|(path, observation)| (path.clone(), observation.preimage.clone()))
+                .map(|(path, observation)| {
+                    (
+                        path.clone(),
+                        SnapshotObservation {
+                            preimage: observation.preimage.clone(),
+                            regular_file: observation.regular_file,
+                        },
+                    )
+                })
                 .collect(),
             directories: self.directories.borrow().clone(),
         }
@@ -478,6 +591,7 @@ impl PlanningContext {
             return Ok(CachedObservation {
                 preimage: PathPreimage::Absent,
                 bytes: None,
+                regular_file: None,
             });
         };
 
@@ -487,6 +601,7 @@ impl PlanningContext {
                 return Ok(CachedObservation {
                     preimage: PathPreimage::Absent,
                     bytes: None,
+                    regular_file: None,
                 });
             }
             Err(source) => {
@@ -533,6 +648,10 @@ impl PlanningContext {
                 mode: preserved_mode(&opened_metadata),
             },
             bytes: Some(bytes),
+            regular_file: Some(ExactRegularFileObservation {
+                identity: metadata_identity(&opened_metadata),
+                byte_len: opened_metadata.len(),
+            }),
         })
     }
 
@@ -1009,6 +1128,29 @@ fn preimage_conflict(
     CodegenError::PreimageConflict {
         path: logical_path.to_owned(),
         reason: format!("expected {expected:?}, found {actual:?}"),
+    }
+}
+
+fn exact_regular_file_conflict(
+    logical_path: &str,
+    expected: Option<ExactRegularFileObservation>,
+    actual: Option<ExactRegularFileObservation>,
+) -> CodegenError {
+    let reason = match (expected, actual) {
+        (Some(expected), Some(actual)) if expected.identity != actual.identity => {
+            "regular-file identity changed after planning".to_owned()
+        }
+        (Some(expected), Some(actual)) if expected.byte_len != actual.byte_len => format!(
+            "regular-file byte length changed after planning: expected {}, found {}",
+            expected.byte_len, actual.byte_len
+        ),
+        (None, Some(_)) => "an absent path became a regular file after planning".to_owned(),
+        (Some(_), None) => "a regular file became absent after planning".to_owned(),
+        _ => "regular-file observation changed after planning".to_owned(),
+    };
+    CodegenError::PreimageConflict {
+        path: logical_path.to_owned(),
+        reason,
     }
 }
 
