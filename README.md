@@ -46,22 +46,34 @@ Multi-member workspace installs are not supported.
 
 ## Dependency Plan
 
-Most primitive-backed components require:
+A supported app provides Leptos with the `csr` feature as its base dependency
+for generated Rust components:
 
 ```toml
 [dependencies]
-leptos = "0.9.0-alpha"
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+```
+
+Only `collapsible`, `dialog`, `menu`, and `tabs` additionally require:
+
+```toml
+[dependencies]
 web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
 ```
 
 `router-link` additionally requires:
 
 ```toml
+[dependencies]
 leptos_router = "0.9.0-alpha"
 ```
 
-The CLI reports the dependencies required by the selected registry items and
-verifies them with `doctor --strict`. It does not mutate `Cargo.toml`.
+The CSS-only `tokens` item has no item-specific Cargo requirements. The
+remaining Rust built-ins require only the Leptos base. The CLI resolves the
+configured items and their registry dependency closure, merges the complete
+Cargo requirement plan, and verifies that same closure-authoritative plan with
+`doctor --strict`. It reports required manifest changes but never edits
+`Cargo.toml`.
 
 ## Components
 
@@ -137,10 +149,14 @@ kit.
 
 Run `leptos_ui_kit sync` after upgrading. An untouched tracked managed block is
 rewritten to the semantic fallback form, the `tokens` block is installed, and
-the lock and desired state are reconciled. A locally edited managed block is
-never overwritten. Move custom declarations outside the managed markers (for
-example, into `styles/themes.css`), restore or reinstall the generated block,
-run `sync`, then reapply the application-owned overrides after `kit.css`.
+the lock and desired state are reconciled. The configured stylesheet is
+reconciled as one transaction: the foundation block is placed before its
+generated dependents, while later application-owned declarations remain after
+the generated defaults and retain cascade precedence. A locally edited managed
+block is never overwritten. Move custom declarations outside the managed
+markers (for example, into `styles/themes.css`), restore or reinstall the
+generated block, run `sync`, then reapply the application-owned overrides after
+the configured kit stylesheet.
 
 ## Version
 

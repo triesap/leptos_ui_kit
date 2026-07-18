@@ -15,6 +15,20 @@ Semantic Versioning.
   mount, while retaining the document-body default.
 - Reconcile existing untouched generated CSS through `sync`, preserve edited
   managed blocks as conflicts, and extend strict doctor and fixture coverage.
+- Reconcile each configured stylesheet atomically so the `tokens` foundation
+  precedes its generated dependents while later application CSS keeps cascade
+  precedence.
+- Preserve explicit `--kit-menu-item-radius` values verbatim and apply derived
+  radius arithmetic only to the semantic fallback.
+- Route collapsible, dialog, menu, and tabs trigger border widths through the
+  shared `--kit-border-width` semantic token.
+- Report managed-CSS ownership, marker, and normalization failures against the
+  configured stylesheet path and reject config/lock path disagreement.
+- Make doctor validate config, lock, generated targets, ownership indexes, CSS
+  order, and Cargo requirements from one resolved registry closure.
+- Extend runtime package health checks across the registry root, manifests,
+  referenced sources, theme contract, public schema, and their shared identity
+  metadata.
 - Document theme stylesheet ordering, nested scopes, dependency requirements,
   and migration guidance.
 
