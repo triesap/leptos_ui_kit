@@ -1061,10 +1061,13 @@ dependencies = [
 name = "leptos_ui_kit_cli"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "leptos_ui_kit_codegen",
  "leptos_ui_kit_registry",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "tempfile",
 ]
 

@@ -1,30 +1,28 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env, fs,
+    collections::BTreeSet,
+    fs,
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
 
-use flate2::read::GzDecoder;
 use serde_json::Value;
-use tar::Archive;
 use tempfile::tempdir;
 
 #[allow(dead_code)]
 #[path = "../build_assets.rs"]
 mod build_assets;
-#[allow(dead_code)]
-#[path = "../build_provenance.rs"]
-mod build_provenance;
+#[path = "../../../tests/support/package_workspace.rs"]
+mod package_workspace_support;
 
 use build_assets::ASSET_SPECS;
-use build_provenance::GIT_REPOSITORY_OVERRIDE_ENV;
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const PROVENANCE_REV_ENV: &str = "LEPTOS_UI_KIT_GIT_REV";
-const PROVENANCE_SOURCE_ENV: &str = "LEPTOS_UI_KIT_GIT_REV_SOURCE";
+use package_workspace_support::{
+    assert_full_revision, assert_local_package_metadata, assert_success,
+    cargo_command as extracted_cargo, contains_bytes,
+    extract_workspace as extract_package_workspace, git_command, package_workspace, source_head,
+    workspace_root,
+};
 
 const PACKAGE_BASE: [&str; 5] = [
     ".cargo_vcs_info.json",
@@ -116,7 +114,7 @@ struct PackageSpec {
 #[test]
 #[ignore = "slow package-source acceptance; run with --ignored --exact"]
 fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_git() {
-    let source_root = workspace_root();
+    let source_root = workspace_root(env!("CARGO_MANIFEST_DIR"));
     let temporary = tempdir().expect("create package-source acceptance root");
     let archive_target = temporary.path().join("archive-target");
     let archives = package_workspace(&source_root, &archive_target);
@@ -159,105 +157,19 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
     );
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("canonical workspace root")
-}
-
-fn package_workspace(source_root: &Path, target_dir: &Path) -> BTreeMap<&'static str, PathBuf> {
-    let mut command = Command::new(env!("CARGO"));
-    command
-        .current_dir(source_root)
-        .args([
-            "package",
-            "--workspace",
-            "--allow-dirty",
-            "--no-verify",
-            "--locked",
-            "--target-dir",
-        ])
-        .arg(target_dir)
-        .env_remove(PROVENANCE_REV_ENV)
-        .env_remove(PROVENANCE_SOURCE_ENV);
-    for name in GIT_REPOSITORY_OVERRIDE_ENV {
-        command.env_remove(name);
-    }
-    let output = command
-        .output()
-        .expect("run cargo package for workspace archives");
-    assert_success("cargo package --workspace", &output);
-
-    let package_dir = target_dir.join("package");
-    let expected_names = PACKAGES
-        .iter()
-        .map(|spec| format!("{}-{VERSION}.crate", spec.name))
-        .collect::<BTreeSet<_>>();
-    let actual_names = fs::read_dir(&package_dir)
-        .expect("read Cargo package output")
-        .filter_map(|entry| {
-            let entry = entry.expect("read Cargo package entry");
-            let metadata = entry.metadata().expect("inspect Cargo package entry");
-            if metadata.is_dir() {
-                return None;
-            }
-            assert!(
-                metadata.is_file(),
-                "Cargo package outputs must be regular files"
-            );
-            Some(
-                entry
-                    .file_name()
-                    .into_string()
-                    .expect("UTF-8 Cargo package filename"),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(actual_names, expected_names, "exact workspace archive set");
-
-    PACKAGES
-        .iter()
-        .map(|spec| {
-            (
-                spec.name,
-                package_dir.join(format!("{}-{VERSION}.crate", spec.name)),
-            )
-        })
-        .collect()
-}
-
 fn extract_workspace(
-    archives: &BTreeMap<&str, PathBuf>,
+    archives: &std::collections::BTreeMap<&str, PathBuf>,
     workspace: &Path,
     source_root: &Path,
 ) -> BTreeSet<String> {
-    let package_root = workspace.join("crates");
-    let staging_root = workspace.join(".package-extract");
-    fs::create_dir_all(&package_root).expect("create extracted package root");
-    fs::create_dir_all(&staging_root).expect("create package extraction staging root");
+    let extracted_packages = extract_package_workspace(archives, workspace);
     let mut revisions = BTreeSet::new();
 
     for spec in PACKAGES {
-        let archive_path = archives
+        let extracted = extracted_packages
             .get(spec.name)
-            .unwrap_or_else(|| panic!("missing archive for {}", spec.name));
-        let file = fs::File::open(archive_path)
-            .unwrap_or_else(|error| panic!("open {}: {error}", archive_path.display()));
-        Archive::new(GzDecoder::new(file))
-            .unpack(&staging_root)
-            .unwrap_or_else(|error| panic!("extract {}: {error}", archive_path.display()));
-
-        let archive_root = staging_root.join(package_directory(spec.name));
-        let extracted = package_root.join(spec.name);
-        fs::rename(&archive_root, &extracted).unwrap_or_else(|error| {
-            panic!(
-                "move {} to canonical package layout {}: {error}",
-                archive_root.display(),
-                extracted.display()
-            )
-        });
-        let actual = collect_package_files(&extracted);
+            .unwrap_or_else(|| panic!("missing extracted package for {}", spec.name));
+        let actual = collect_package_files(extracted);
         let expected = expected_inventory(spec);
         assert_eq!(actual, expected, "exact {} archive inventory", spec.name);
 
@@ -285,8 +197,6 @@ fn extract_workspace(
         revisions.insert(rev.to_owned());
     }
 
-    fs::remove_dir(&staging_root).expect("remove empty package extraction staging root");
-    write_synthetic_manifest(workspace);
     revisions
 }
 
@@ -343,50 +253,6 @@ fn logical_path(path: &Path) -> String {
         .map(|component| component.as_os_str().to_str().expect("UTF-8 packaged path"))
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn write_synthetic_manifest(workspace: &Path) {
-    let members = PACKAGES
-        .iter()
-        .map(|spec| format!("    \"crates/{}\",", spec.name))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let patches = PACKAGES
-        .iter()
-        .filter(|spec| {
-            matches!(
-                spec.name,
-                "leptos_ui_kit_registry" | "leptos_ui_kit_codegen" | "leptos_ui_kit_primitives"
-            )
-        })
-        .map(|spec| format!("{} = {{ path = \"crates/{}\" }}", spec.name, spec.name))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        workspace.join("Cargo.toml"),
-        format!(
-            "[workspace]\nresolver = \"2\"\nmembers = [\n{members}\n]\n\n[patch.crates-io]\n{patches}\n"
-        ),
-    )
-    .expect("write synthetic package workspace manifest");
-}
-
-fn package_directory(name: &str) -> String {
-    format!("{name}-{VERSION}")
-}
-
-fn source_head(source_root: &Path) -> String {
-    let output = git_command(source_root)
-        .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .output()
-        .expect("read package-source HEAD");
-    assert_success("git rev-parse package-source HEAD", &output);
-    let rev = String::from_utf8(output.stdout)
-        .expect("UTF-8 package-source HEAD")
-        .trim()
-        .to_ascii_lowercase();
-    assert_full_revision(&rev);
-    rev
 }
 
 fn assert_outside_git(workspace: &Path) {
@@ -530,81 +396,6 @@ fn run_version(
         .unwrap_or_else(|error| panic!("run extracted {binary}: {error}"))
 }
 
-fn extracted_cargo(workspace: &Path, cargo_home: &Path, target_dir: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO"));
-    command
-        .current_dir(workspace)
-        .env("CARGO_HOME", cargo_home)
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove(PROVENANCE_REV_ENV)
-        .env_remove(PROVENANCE_SOURCE_ENV)
-        .env_remove("CARGO_BUILD_TARGET")
-        .env_remove("CARGO_BUILD_RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTFLAGS");
-    for name in GIT_REPOSITORY_OVERRIDE_ENV {
-        command.env_remove(name);
-    }
-    command
-}
-
-fn assert_local_package_metadata(
-    label: &str,
-    workspace: &Path,
-    cargo_home: &Path,
-    target_dir: &Path,
-) {
-    let output = extracted_cargo(workspace, cargo_home, target_dir)
-        .args(["metadata", "--format-version", "1", "--locked"])
-        .output()
-        .unwrap_or_else(|error| panic!("read {label} package metadata: {error}"));
-    assert_success(&format!("{label} package metadata"), &output);
-    let metadata: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("parse {label} package metadata: {error}"));
-    let packages = metadata["packages"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{label} package metadata packages"));
-
-    for spec in PACKAGES {
-        let matches = packages
-            .iter()
-            .filter(|package| package["name"] == spec.name)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            matches.len(),
-            1,
-            "{label} must resolve exactly one local {} package",
-            spec.name
-        );
-        assert!(
-            matches[0]["source"].is_null(),
-            "{label} resolved {} from a registry instead of its extracted archive",
-            spec.name
-        );
-        let manifest = PathBuf::from(
-            matches[0]["manifest_path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{label} {} manifest path", spec.name)),
-        )
-        .canonicalize()
-        .unwrap_or_else(|error| panic!("canonical {} manifest: {error}", spec.name));
-        assert_eq!(
-            manifest,
-            workspace
-                .join("crates")
-                .join(spec.name)
-                .join("Cargo.toml")
-                .canonicalize()
-                .unwrap_or_else(|error| panic!(
-                    "canonical expected {} manifest: {error}",
-                    spec.name
-                ))
-        );
-    }
-}
-
 fn assert_version_output(label: &str, output: &Output, expected_rev: &str, forbidden: &[&Path]) {
     assert_success(&format!("{label} version"), output);
     let stdout = String::from_utf8(output.stdout.clone()).expect("UTF-8 extracted version stdout");
@@ -626,41 +417,4 @@ fn assert_version_output(label: &str, output: &Output, expected_rev: &str, forbi
             "{label} stderr leaked {path}"
         );
     }
-}
-
-fn git_command(directory: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(directory);
-    for name in GIT_REPOSITORY_OVERRIDE_ENV {
-        command.env_remove(name);
-    }
-    command
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    command
-}
-
-fn assert_full_revision(rev: &str) {
-    assert_eq!(rev.len(), 40, "complete Git object ID: {rev}");
-    assert!(
-        rev.bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "lowercase hexadecimal Git object ID: {rev}"
-    );
-}
-
-fn assert_success(label: &str, output: &Output) {
-    assert!(
-        output.status.success(),
-        "{label} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
 }

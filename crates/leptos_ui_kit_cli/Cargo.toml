@@ -39,6 +39,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+flate2 = "1"
+sha2.workspace = true
+tar = "0.4"
 tempfile.workspace = true
 
 [lints]
