@@ -195,6 +195,10 @@ impl PlanningContext {
         &self.root.canonical_root
     }
 
+    pub(crate) fn project_identity(&self) -> (&Path, u64, u64) {
+        (&self.root.canonical_root, self.root.device, self.root.inode)
+    }
+
     pub(crate) fn open_pinned_project_root(&self) -> Result<Dir, CodegenError> {
         let directory = Dir::open_ambient_dir(&self.root.canonical_root, ambient_authority())
             .map_err(|source| CodegenError::Io {
@@ -294,11 +298,6 @@ impl PlanningContext {
                 .collect(),
             directories: self.directories.borrow().clone(),
         }
-    }
-
-    pub(crate) fn ensure_parent(&self, logical_path: &str) -> Result<(), CodegenError> {
-        self.walk_parent(logical_path, true)?;
-        Ok(())
     }
 
     pub(crate) fn ensure_parent_with<F>(

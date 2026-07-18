@@ -4034,11 +4034,7 @@ fn newly_created_parent_identity_is_bound_through_commit() {
                 .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(staged_paths.len(), 1);
-    assert_eq!(
-        fs::read(&staged_paths[0]).expect("staged file remains"),
-        b"planned\n"
-    );
+    assert!(staged_paths.is_empty(), "rollback removes detached stages");
     assert!(
         !fault_fs
             .events()
@@ -4300,7 +4296,7 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
 }
 
 #[test]
-fn rename_failure_leaves_an_uncommitted_random_stage_for_later_recovery() {
+fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
@@ -4326,10 +4322,7 @@ fn rename_failure_leaves_an_uncommitted_random_stage_for_later_recovery() {
         .expect_err("second rename must fail");
 
     assert!(matches!(error, CodegenError::Io { .. }));
-    assert_eq!(
-        fs::read(root.join("styles/first.css")).expect("first target committed"),
-        b"first\n"
-    );
+    assert!(!root.join("styles/first.css").exists());
     assert!(!root.join("styles/second.css").exists());
     let stages = fs::read_dir(root.join("styles"))
         .expect("read stage parent")
@@ -4340,12 +4333,217 @@ fn rename_failure_leaves_an_uncommitted_random_stage_for_later_recovery() {
                 .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
         })
         .collect::<Vec<_>>();
-    assert_eq!(stages.len(), 1);
+    assert!(stages.is_empty());
+    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn failed_rollback_retains_a_strict_recovery_required_journal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
+    fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    let files = vec![
+        PlannedFile {
+            path: "styles/first.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "first-after\n".to_owned(),
+        },
+        PlannedFile {
+            path: "styles/second.css".to_owned(),
+            action: PlannedFileAction::Update,
+            content: "second-after\n".to_owned(),
+        },
+    ];
+    let changes = vec![
+        ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
+        ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
+    ];
+    let fault_fs = Arc::new(FaultFs::fail_from(FsOperation::Rename, 2));
+
+    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
+        .expect_err("commit and rollback renames must fail persistently");
+
+    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
     assert_eq!(
-        fs::read(&stages[0]).expect("second stage remains"),
-        b"second\n"
+        fs::read(root.join("styles/first.css")).expect("first target"),
+        b"first-after\n"
+    );
+    assert_eq!(
+        fs::read(root.join("styles/second.css")).expect("second target"),
+        b"second-before\n"
+    );
+    let transactions = root.join("src/components/ui/_kit/.transactions");
+    let journals = fs::read_dir(&transactions)
+        .expect("recovery directory")
+        .map(|entry| entry.expect("journal entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(journals.len(), 1);
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journals[0]).expect("read journal"))
+            .expect("strict valid journal JSON");
+    assert_eq!(
+        value.get("version").and_then(|value| value.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        value
+            .pointer("/state/kind")
+            .and_then(|value| value.as_str()),
+        Some("rollingBack")
+    );
+    assert_eq!(
+        value
+            .get("entries")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(2)
     );
     assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn rollback_removes_every_transaction_created_target_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let files = vec![
+        PlannedFile {
+            path: "src/components/ui/generated/first.rs".to_owned(),
+            action: PlannedFileAction::Create,
+            content: "pub struct First;\n".to_owned(),
+        },
+        PlannedFile {
+            path: "src/components/ui/generated/nested/second.rs".to_owned(),
+            action: PlannedFileAction::Create,
+            content: "pub struct Second;\n".to_owned(),
+        },
+    ];
+    let changes = vec![
+        ChangeRecord::new(
+            ChangeKind::CreateFile,
+            "src/components/ui/generated/first.rs",
+            true,
+        ),
+        ChangeRecord::new(
+            ChangeKind::CreateFile,
+            "src/components/ui/generated/nested/second.rs",
+            true,
+        ),
+    ];
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::Rename, 2));
+
+    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
+        .expect_err("second commit rename fails");
+
+    assert!(matches!(error, CodegenError::Io { .. }));
+    assert!(!root.join("src/components/ui/generated").exists());
+    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert_exact_persistent_coordination(root);
+}
+
+#[test]
+fn every_transaction_io_fault_avoids_partial_application_state() {
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let (files, changes) = setup_two_file_update(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
+        .expect("baseline transaction");
+    let operations = [
+        FsOperation::CreateDirectory,
+        FsOperation::CreateNewFile,
+        FsOperation::WriteHandle,
+        FsOperation::SetFileMode,
+        FsOperation::SyncHandle,
+        FsOperation::SyncDirectory,
+        FsOperation::HardLink,
+        FsOperation::RenameJournal,
+        FsOperation::Rename,
+        FsOperation::RemoveFile,
+        FsOperation::RemoveDirectory,
+    ];
+
+    for operation in operations {
+        let count = baseline_fs
+            .events()
+            .iter()
+            .filter(|event| event.operation == operation)
+            .count();
+        for ordinal in 1..=count {
+            let directory = tempfile::tempdir().expect("fault tempdir");
+            let root = directory.path();
+            let (files, changes) = setup_two_file_update(root);
+            let fault_fs = Arc::new(FaultFs::fail_nth(operation, ordinal));
+
+            let result = apply_planned_files_with(root, &files, &changes, fault_fs);
+
+            let first = fs::read(root.join("styles/first.css")).expect("first target");
+            let second = fs::read(root.join("styles/second.css")).expect("second target");
+            let exact_before = first == b"first-before\n" && second == b"second-before\n";
+            let exact_after = first == b"first-after\n" && second == b"second-after\n";
+            assert!(
+                exact_before || exact_after,
+                "partial state after {operation:?} fault {ordinal}: {result:?}"
+            );
+            if exact_before {
+                assert!(result.is_err(), "rolled-back fault must surface");
+            }
+            for journal in transaction_journal_paths(root) {
+                let _: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&journal).expect("read retained journal"))
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "invalid retained journal after {operation:?} {ordinal}: {error}"
+                            )
+                        });
+            }
+        }
+    }
+}
+
+fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
+    fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    (
+        vec![
+            PlannedFile {
+                path: "styles/first.css".to_owned(),
+                action: PlannedFileAction::Update,
+                content: "first-after\n".to_owned(),
+            },
+            PlannedFile {
+                path: "styles/second.css".to_owned(),
+                action: PlannedFileAction::Update,
+                content: "second-after\n".to_owned(),
+            },
+        ],
+        vec![
+            ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
+            ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
+        ],
+    )
+}
+
+fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
+    let directory = root.join("src/components/ui/_kit/.transactions");
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.expect("transaction entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
+        })
+        .collect()
 }
 
 fn assert_exact_persistent_coordination(root: &Path) {

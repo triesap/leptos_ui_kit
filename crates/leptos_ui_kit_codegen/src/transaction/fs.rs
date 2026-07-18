@@ -94,6 +94,15 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         to_name: &Path,
         to: &Path,
     ) -> io::Result<()>;
+    fn rename_journal(
+        &self,
+        from_parent: &Dir,
+        from_name: &Path,
+        from: &Path,
+        to_parent: &Dir,
+        to_name: &Path,
+        to: &Path,
+    ) -> io::Result<()>;
 }
 
 #[derive(Debug, Default)]
@@ -326,6 +335,18 @@ impl FsOps for SystemFs {
     ) -> io::Result<()> {
         from_parent.rename(from_name, to_parent, to_name)
     }
+
+    fn rename_journal(
+        &self,
+        from_parent: &Dir,
+        from_name: &Path,
+        from: &Path,
+        to_parent: &Dir,
+        to_name: &Path,
+        to: &Path,
+    ) -> io::Result<()> {
+        self.rename(from_parent, from_name, from, to_parent, to_name, to)
+    }
 }
 
 fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
@@ -390,6 +411,7 @@ pub(crate) enum FsOperation {
     BeforeFinalRevalidation,
     AfterFinalRevalidation,
     Rename,
+    RenameJournal,
 }
 
 #[cfg(test)]
@@ -885,5 +907,18 @@ impl FsOps for FaultFs {
     ) -> io::Result<()> {
         self.before(FsOperation::Rename, from, Some(to))?;
         SystemFs.rename(from_parent, from_name, from, to_parent, to_name, to)
+    }
+
+    fn rename_journal(
+        &self,
+        from_parent: &Dir,
+        from_name: &Path,
+        from: &Path,
+        to_parent: &Dir,
+        to_name: &Path,
+        to: &Path,
+    ) -> io::Result<()> {
+        self.before(FsOperation::RenameJournal, from, Some(to))?;
+        SystemFs.rename_journal(from_parent, from_name, from, to_parent, to_name, to)
     }
 }

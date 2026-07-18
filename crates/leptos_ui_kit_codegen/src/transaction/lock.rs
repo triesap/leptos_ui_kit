@@ -28,6 +28,8 @@ const LEGACY_WRITE_LOCK_CONTENT: &[u8] = b"locked\n";
 const TRANSACTIONS_DIRECTORY_NAME: &str = ".transactions";
 const LOCK_CANDIDATE_PREFIX: &str = "lock-bootstrap-";
 const IGNORE_CANDIDATE_PREFIX: &str = "ignore-bootstrap-";
+const TRANSACTION_JOURNAL_PREFIX: &str = "transaction-";
+const TRANSACTION_JOURNAL_SUFFIX: &str = ".json";
 const LOCK_CANDIDATE_RANDOM_BYTES: usize = 16;
 const LOCK_CANDIDATE_CREATE_ATTEMPTS: usize = 8;
 const CLEANUP_QUIESCENCE_ATTEMPTS: usize = 8;
@@ -1388,6 +1390,7 @@ fn cleanup_stale_lock_candidates(
         };
 
         let mut names = Vec::new();
+        let mut journal_present = false;
         for entry in transactions
             .directory
             .entries()
@@ -1401,6 +1404,10 @@ fn cleanup_stale_lock_candidates(
                 source,
             })?;
             let name = entry.file_name();
+            if transaction_journal_name(&name) {
+                journal_present = true;
+                continue;
+            }
             if candidate_kind(&name).is_none() {
                 return Err(invalid_transactions_entry(&name));
             }
@@ -1730,6 +1737,10 @@ fn cleanup_stale_lock_candidates(
             });
         }
 
+        if journal_present {
+            return Ok(StaleCandidateCleanupOutcome::Complete);
+        }
+
         let transactions_identity = transactions.identity;
         drop(claimed);
         drop(transactions.directory);
@@ -1815,6 +1826,20 @@ fn candidate_kind(name: &OsStr) -> Option<CandidateKind> {
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
+        })
+}
+
+fn transaction_journal_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.strip_prefix(TRANSACTION_JOURNAL_PREFIX)
+        .and_then(|value| value.strip_suffix(TRANSACTION_JOURNAL_SUFFIX))
+        .is_some_and(|suffix| {
+            suffix.len() == LOCK_CANDIDATE_RANDOM_BYTES * 2
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
 }
 

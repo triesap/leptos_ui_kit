@@ -46,6 +46,10 @@ pub enum CodegenError {
         path: String,
         reason: String,
     },
+    RecoveryRequired {
+        journal_path: PathBuf,
+        reason: String,
+    },
     LockExists(PathBuf),
 }
 
@@ -88,6 +92,14 @@ impl fmt::Display for CodegenError {
                     "invalid installer coordination state at {path}: {reason}; verify no leptos_ui_kit process is running, inspect and repair or remove the entry manually, and retry"
                 )
             }
+            Self::RecoveryRequired {
+                journal_path,
+                reason,
+            } => write!(
+                f,
+                "transaction recovery is required at {}: {reason}",
+                journal_path.display()
+            ),
             Self::LockExists(path) => write!(f, "write lock already exists: {}", path.display()),
         }
     }
