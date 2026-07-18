@@ -6,14 +6,43 @@ mod components;
 
 use components::ui::{
     Anchor, AnchorTarget, Button, ButtonSize, ButtonType, ButtonVariant, CollapsibleContent,
-    CollapsibleRoot,
-    CollapsibleTrigger, DialogClose, DialogContent, DialogDescription, DialogRoot, DialogTitle,
-    DialogTrigger, FieldLabel, FieldMessage, FieldRequired, FieldRoot, MenuContent,
-    MenuContentAlign, MenuContentSide, MenuRadioItem, MenuRoot, MenuTrigger, NativeSelect,
-    RouterLink, SelectField, SelectIcon, Spinner, SpinnerMode, Status, StatusPoliteness,
-    StatusRole, TabsList, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextAreaField, TextField,
-    TextInput, TextInputType,
+    CollapsibleRoot, CollapsibleTrigger, DialogClose, DialogContent, DialogContentRole,
+    DialogDescription, DialogRoot, DialogTitle, DialogTrigger, FieldLabel, FieldMessage,
+    FieldRequired, FieldRoot, FieldSlot, FieldSurface, MenuContent, MenuContentAlign,
+    MenuContentSide, MenuDirection, MenuItem, MenuItemIndicator, MenuItemKind, MenuLoop,
+    MenuRadioItem, MenuRoot, MenuTrigger, NativeSelect, RouterLink, SelectField, SelectIcon,
+    Spinner, SpinnerMode, Status, StatusPoliteness, StatusRole, TabsActivation, TabsDirection,
+    TabsList, TabsLoop, TabsOrientation, TabsPanel, TabsRoot, TabsTrigger, TextArea, TextAreaField,
+    TextField, TextInput, TextInputType,
 };
+
+#[allow(unused_imports)]
+mod historical_generated_module_paths {
+    use super::components::ui::anchor::{Anchor, AnchorTarget};
+    use super::components::ui::button::{Button, ButtonSize, ButtonType, ButtonVariant};
+    use super::components::ui::collapsible::{
+        CollapsibleContent, CollapsibleRoot, CollapsibleTrigger,
+    };
+    use super::components::ui::dialog::{
+        DialogClose, DialogContent, DialogContentRole, DialogDescription, DialogRoot, DialogTitle,
+        DialogTrigger,
+    };
+    use super::components::ui::field::{
+        FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSlot, FieldSurface, NativeSelect,
+        SelectField, SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType,
+    };
+    use super::components::ui::menu::{
+        MenuContent, MenuContentAlign, MenuContentSide, MenuDirection, MenuItem, MenuItemIndicator,
+        MenuItemKind, MenuLoop, MenuRadioItem, MenuRoot, MenuTrigger,
+    };
+    use super::components::ui::router_link::RouterLink;
+    use super::components::ui::spinner::{Spinner, SpinnerMode};
+    use super::components::ui::status::{Status, StatusPoliteness, StatusRole};
+    use super::components::ui::tabs::{
+        TabsActivation, TabsDirection, TabsList, TabsLoop, TabsOrientation, TabsPanel, TabsRoot,
+        TabsTrigger,
+    };
+}
 
 fn main() {
     leptos::mount::mount_to_body(App);
@@ -194,6 +223,340 @@ fn App() -> impl IntoView {
             </MenuRoot>
         </main>
     }
+}
+
+// Compile-only coverage for the complete generated Rust API that shipped before
+// the theme-token refactor. The workflow test installs these sources and checks
+// this fixture for both the host and wasm32 targets.
+#[allow(dead_code)]
+#[component]
+fn HistoricalApiCompatibility() -> impl IntoView {
+    historical_enum_variants();
+
+    let (string_value, _) = signal("value".to_owned());
+    let optional_message = Signal::derive(|| Some("Message".to_owned()));
+    let checked_index = Signal::derive(|| Some(0));
+    let dialog_open = RwSignal::new(false);
+
+    let slot = FieldSlot::new(|| view! { <span>"Slot"</span> });
+    let _ = slot.is_present();
+    let _ = slot.render();
+    let _ = FieldSlot::empty();
+    let _: FieldSlot = FieldSlot::default();
+    let _: FieldSlot = (|| view! { <span>"Converted slot"</span> }).into();
+
+    view! {
+        <section class="historical-api-compatibility">
+            <Anchor
+                href="/historical-anchor"
+                target=AnchorTarget::SameTab
+                rel="author"
+                class="historical-anchor"
+            >
+                "Anchor"
+            </Anchor>
+            <Button
+                variant=ButtonVariant::Secondary
+                size=ButtonSize::Md
+                button_type=ButtonType::Reset
+                disabled=false
+                loading=false
+                loading_label="Loading historical button"
+                on_click=Callback::new(|_: leptos::ev::MouseEvent| {})
+                class="historical-button"
+            >
+                "Button"
+            </Button>
+            <RouterLink href="/historical-router-link" class="historical-router-link">
+                "Router link"
+            </RouterLink>
+            <Spinner
+                mode=SpinnerMode::Status
+                label="Loading historical fixture"
+                class="historical-spinner"
+            />
+            <Status
+                role=StatusRole::Alert
+                politeness=StatusPoliteness::Assertive
+                atomic=false
+                class="historical-status"
+            >
+                "Status"
+            </Status>
+
+            <CollapsibleRoot
+                default_open=true
+                disabled=false
+                class="historical-collapsible"
+                content_id="historical-collapsible-content"
+            >
+                <CollapsibleTrigger class="historical-collapsible-trigger">
+                    "Trigger"
+                </CollapsibleTrigger>
+                <CollapsibleContent class="historical-collapsible-content">
+                    "Content"
+                </CollapsibleContent>
+            </CollapsibleRoot>
+
+            <DialogRoot
+                default_open=false
+                open=dialog_open
+                modal=true
+                class="historical-dialog"
+                id="historical-dialog"
+            >
+                <DialogTrigger disabled=false class="historical-dialog-trigger">
+                    "Trigger"
+                </DialogTrigger>
+                <DialogContent
+                    role=DialogContentRole::AlertDialog
+                    label="Historical dialog"
+                    class="historical-dialog-content"
+                >
+                    <DialogTitle class="historical-dialog-title">"Title"</DialogTitle>
+                    <DialogDescription class="historical-dialog-description">
+                        "Description"
+                    </DialogDescription>
+                    <DialogClose disabled=false class="historical-dialog-close">
+                        "Close"
+                    </DialogClose>
+                </DialogContent>
+            </DialogRoot>
+
+            <FieldRoot
+                id="historical-field"
+                required=true
+                invalid=false
+                disabled=false
+                class="historical-field"
+            >
+                <FieldLabel class="historical-field-label">
+                    "Label"
+                    <FieldRequired class="historical-field-required" />
+                </FieldLabel>
+                <FieldSurface class="historical-field-surface">
+                    <TextInput
+                        input_type=TextInputType::Text
+                        id="historical-text-input"
+                        name="historical_text_input"
+                        value=string_value
+                        autocomplete="name"
+                        required=true
+                        disabled=false
+                        invalid=false
+                        described_by="historical-text-input-help"
+                        on_input=Callback::new(|_: String| {})
+                        class="historical-text-input"
+                    />
+                </FieldSurface>
+                <FieldMessage class="historical-field-message">"Message"</FieldMessage>
+            </FieldRoot>
+            <TextArea
+                id="historical-text-area"
+                name="historical_text_area"
+                value=string_value
+                required=true
+                disabled=false
+                invalid=false
+                described_by="historical-text-area-help"
+                rows=6
+                on_input=Callback::new(|_: String| {})
+                class="historical-text-area"
+            />
+            <NativeSelect
+                id="historical-native-select"
+                name="historical_native_select"
+                value=string_value
+                required=true
+                disabled=false
+                invalid=false
+                described_by="historical-native-select-help"
+                on_change=Callback::new(|_: String| {})
+                class="historical-native-select"
+            >
+                <option value="value">"Value"</option>
+            </NativeSelect>
+            <SelectIcon class="historical-select-icon">"Icon"</SelectIcon>
+            <TextField
+                id="historical-text-field"
+                label="Text field"
+                input_type=TextInputType::Search
+                name="historical_text_field"
+                value=string_value
+                autocomplete="off"
+                required=true
+                invalid=false
+                disabled=false
+                message=optional_message
+                on_input=Callback::new(|_: String| {})
+                class="historical-text-field"
+                surface_class="historical-text-field-surface"
+                label_row_class="historical-text-field-label-row"
+                label_class="historical-text-field-label"
+                required_class="historical-text-field-required"
+                input_class="historical-text-field-input"
+                message_class="historical-text-field-message"
+                label_action=|| view! { <span>"Action"</span> }
+            />
+            <TextAreaField
+                id="historical-text-area-field"
+                label="Text area field"
+                name="historical_text_area_field"
+                value=string_value
+                required=true
+                invalid=false
+                disabled=false
+                message=optional_message
+                rows=7
+                on_input=Callback::new(|_: String| {})
+                class="historical-text-area-field"
+                surface_class="historical-text-area-field-surface"
+                label_row_class="historical-text-area-field-label-row"
+                label_class="historical-text-area-field-label"
+                required_class="historical-text-area-field-required"
+                text_area_class="historical-text-area-field-input"
+                message_class="historical-text-area-field-message"
+                label_action=|| view! { <span>"Action"</span> }
+            />
+            <SelectField
+                id="historical-select-field"
+                label="Select field"
+                name="historical_select_field"
+                value=string_value
+                selected_label=string_value
+                required=true
+                invalid=false
+                disabled=false
+                message=optional_message
+                on_change=Callback::new(|_: String| {})
+                class="historical-select-field"
+                surface_class="historical-select-field-surface"
+                label_row_class="historical-select-field-label-row"
+                label_class="historical-select-field-label"
+                required_class="historical-select-field-required"
+                select_class="historical-select-field-select"
+                value_row_class="historical-select-field-value-row"
+                value_class="historical-select-field-value"
+                icon_class="historical-select-field-icon"
+                message_class="historical-select-field-message"
+                label_action=|| view! { <span>"Action"</span> }
+                icon=|| view! { <span>"Icon"</span> }
+            >
+                <option value="value">"Value"</option>
+            </SelectField>
+
+            <MenuRoot
+                default_open=false
+                checked_index=checked_index
+                loop_policy=MenuLoop::Clamp
+                direction=MenuDirection::Rtl
+                class="historical-menu"
+                id="historical-menu"
+            >
+                <MenuTrigger disabled=false class="historical-menu-trigger">
+                    "Trigger"
+                </MenuTrigger>
+                <MenuContent
+                    side=MenuContentSide::Top
+                    align=MenuContentAlign::Center
+                    spacing=6.0
+                    viewport_padding=10.0
+                    class="historical-menu-content"
+                >
+                    <MenuItem
+                        index=0
+                        kind=MenuItemKind::Item
+                        disabled=false
+                        label="Item"
+                        on_select=Callback::new(|_: usize| {})
+                        class="historical-menu-item"
+                    >
+                        "Item"
+                        <MenuItemIndicator index=0 class="historical-menu-item-indicator">
+                            "Indicator"
+                        </MenuItemIndicator>
+                    </MenuItem>
+                    <MenuRadioItem
+                        index=1
+                        label="Radio item"
+                        disabled=false
+                        on_select=Callback::new(|_: usize| {})
+                        class="historical-menu-radio-item"
+                        label_class="historical-menu-radio-label"
+                        indicator_class="historical-menu-radio-indicator"
+                    >
+                        "Indicator"
+                    </MenuRadioItem>
+                </MenuContent>
+            </MenuRoot>
+
+            <TabsRoot
+                activation=TabsActivation::Manual
+                loop_policy=TabsLoop::Clamp
+                orientation=TabsOrientation::Vertical
+                direction=TabsDirection::Rtl
+                class="historical-tabs"
+                id="historical-tabs"
+            >
+                <TabsList class="historical-tabs-list">
+                    <TabsTrigger index=0 disabled=false class="historical-tabs-trigger">
+                        "Trigger"
+                    </TabsTrigger>
+                </TabsList>
+                <TabsPanel index=0 class="historical-tabs-panel">"Panel"</TabsPanel>
+            </TabsRoot>
+        </section>
+    }
+}
+
+#[allow(dead_code)]
+fn historical_enum_variants() {
+    let _: [AnchorTarget; 4] = [
+        AnchorTarget::SameTab,
+        AnchorTarget::Blank,
+        AnchorTarget::Parent,
+        AnchorTarget::Top,
+    ];
+    let _: [ButtonVariant; 3] = [
+        ButtonVariant::Primary,
+        ButtonVariant::Secondary,
+        ButtonVariant::Ghost,
+    ];
+    let _: [ButtonSize; 3] = [ButtonSize::Sm, ButtonSize::Md, ButtonSize::Lg];
+    let _: [ButtonType; 3] = [ButtonType::Button, ButtonType::Submit, ButtonType::Reset];
+    let _: [SpinnerMode; 2] = [SpinnerMode::Status, SpinnerMode::Decorative];
+    let _: [StatusRole; 2] = [StatusRole::Status, StatusRole::Alert];
+    let _: [StatusPoliteness; 2] = [StatusPoliteness::Polite, StatusPoliteness::Assertive];
+    let _: [DialogContentRole; 2] = [
+        DialogContentRole::Dialog,
+        DialogContentRole::AlertDialog,
+    ];
+    let _: [TextInputType; 6] = [
+        TextInputType::Text,
+        TextInputType::Email,
+        TextInputType::Password,
+        TextInputType::Search,
+        TextInputType::Tel,
+        TextInputType::Url,
+    ];
+    let _: [MenuContentSide; 4] = [
+        MenuContentSide::Bottom,
+        MenuContentSide::Top,
+        MenuContentSide::Right,
+        MenuContentSide::Left,
+    ];
+    let _: [MenuContentAlign; 3] = [
+        MenuContentAlign::Start,
+        MenuContentAlign::Center,
+        MenuContentAlign::End,
+    ];
+    let _: [MenuItemKind; 2] = [MenuItemKind::Item, MenuItemKind::Radio];
+    let _: [MenuDirection; 2] = [MenuDirection::Ltr, MenuDirection::Rtl];
+    let _: [MenuLoop; 2] = [MenuLoop::Wrap, MenuLoop::Clamp];
+    let _: [TabsActivation; 2] = [TabsActivation::Automatic, TabsActivation::Manual];
+    let _: [TabsLoop; 2] = [TabsLoop::Wrap, TabsLoop::Clamp];
+    let _: [TabsOrientation; 2] = [TabsOrientation::Horizontal, TabsOrientation::Vertical];
+    let _: [TabsDirection; 2] = [TabsDirection::Ltr, TabsDirection::Rtl];
 }
 
 #[cfg(target_arch = "wasm32")]
