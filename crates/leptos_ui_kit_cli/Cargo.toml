@@ -10,6 +10,19 @@ repository.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
+include = [
+    "src/bin/cargo-leptos_ui_kit.rs",
+    "src/lib.rs",
+    "src/main.rs",
+    "tests/fixtures/homepage_trunk_csr/Cargo.toml.fixture",
+    "tests/fixtures/homepage_trunk_csr/index.html",
+    "tests/fixtures/homepage_trunk_csr/src/main.rs",
+    "tests/fixtures/homepage_trunk_csr/styles/app.css",
+    "tests/fixtures/homepage_trunk_csr/styles/themes.css",
+    "tests/fixtures/theme_pre_refactor_06124efa/button.css",
+    "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
+    "tests/workflow.rs",
+]
 
 [[bin]]
 name = "leptos_ui_kit"

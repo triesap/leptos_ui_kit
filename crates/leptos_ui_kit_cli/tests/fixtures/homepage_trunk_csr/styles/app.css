@@ -1,0 +1,11 @@
+:root {
+  --app-background: #ffffff;
+}
+
+body {
+  margin: 0;
+  background: var(--app-background);
+  font-family:
+    system-ui,
+    sans-serif;
+}

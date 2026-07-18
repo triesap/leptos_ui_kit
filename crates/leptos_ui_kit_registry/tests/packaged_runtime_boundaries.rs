@@ -192,7 +192,7 @@ fn checkout_fallback_requires_the_canonical_repository() {
     }
     for remote in [
         "https://github.com/example/leptos_ui_kit.git",
-        "https://github.com/triesap/dev.git",
+        "https://github.com/example/unrelated.git",
         "https://github.example.com/triesap/leptos_ui_kit.git",
         "git@example.com:triesap/leptos_ui_kit.git",
         "github.com/triesap/leptos_ui_kit",
@@ -215,7 +215,7 @@ fn hostile_parent_checkout_is_not_a_provenance_source() {
             None,
             None,
             Some(CheckoutProvenance {
-                remote: "https://github.com/triesap/dev.git",
+                remote: "https://github.com/example/unrelated.git",
                 rev: REV_A,
             })
         ),
@@ -226,6 +226,13 @@ fn hostile_parent_checkout_is_not_a_provenance_source() {
 #[test]
 fn compiled_tool_provenance_is_valid_or_explicitly_unavailable() {
     let source = env!("LEPTOS_UI_KIT_GIT_REV_SOURCE");
+    let cargo_vcs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".cargo_vcs_info.json");
+    if cargo_vcs_path.is_file() && source != "explicit" {
+        assert_eq!(
+            source, "cargo-vcs",
+            "a package build without an explicit override must identify its package-local Cargo VCS metadata as the provenance source"
+        );
+    }
     match (source, canonical_tool_config()) {
         ("explicit" | "cargo-vcs" | "checkout", Ok(tool)) => {
             assert_eq!(tool.package, TOOL_PACKAGE);
@@ -235,6 +242,24 @@ fn compiled_tool_provenance_is_valid_or_explicitly_unavailable() {
             assert_eq!(rev.len(), 40);
             assert!(rev.bytes().all(|byte| byte.is_ascii_hexdigit()));
             assert_eq!(rev, rev.to_ascii_lowercase());
+            if source == "cargo-vcs" {
+                let metadata = serde_json::from_slice::<serde_json::Value>(
+                    &fs::read(&cargo_vcs_path).unwrap_or_else(|error| {
+                        panic!(
+                            "cargo-vcs provenance requires {}: {error}",
+                            cargo_vcs_path.display()
+                        )
+                    }),
+                )
+                .unwrap_or_else(|error| panic!("parse {}: {error}", cargo_vcs_path.display()));
+                assert_eq!(
+                    metadata
+                        .pointer("/git/sha1")
+                        .and_then(|value| value.as_str()),
+                    Some(rev.as_str()),
+                    "compiled cargo-vcs provenance must equal the package metadata"
+                );
+            }
         }
         ("unavailable", Err(ConfigError::MissingToolProvenance { package, binary })) => {
             assert_eq!(package, TOOL_PACKAGE);
@@ -427,7 +452,7 @@ fn checkout_probe_rejects_noncanonical_origin_without_reading_head() {
             "--get-all".to_owned(),
             "remote.origin.url".to_owned(),
         ],
-        "https://github.com/triesap/dev.git".to_owned(),
+        "https://github.com/example/unrelated.git".to_owned(),
     );
 
     let probe = probe_checkout(&manifest_dir, &mut git);
@@ -465,10 +490,10 @@ fn checkout_probe_treats_missing_git_or_wrong_layout_as_unavailable() {
 #[test]
 fn system_git_rejects_a_real_hostile_parent_checkout() {
     let dir = tempdir().expect("tempdir");
-    init_git_repository(dir.path(), "https://github.com/triesap/dev.git", true);
+    init_git_repository(dir.path(), "https://github.com/example/unrelated.git", true);
     let manifest_dir = dir
         .path()
-        .join("domains/triesap/leptos_ui_kit/crates/leptos_ui_kit_registry");
+        .join("nested/repository/crates/leptos_ui_kit_registry");
     fs::create_dir_all(&manifest_dir).expect("create hostile nested manifest directory");
 
     let probe = probe_checkout(&manifest_dir, &mut SystemGit);

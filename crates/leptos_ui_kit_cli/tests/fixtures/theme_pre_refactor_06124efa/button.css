@@ -1,0 +1,126 @@
+/* leptos-ui-kit:start button */
+:root {
+  --kit-color-primary: #111827;
+  --kit-color-primary-hover: #1f2937;
+  --kit-color-primary-foreground: #ffffff;
+  --kit-color-secondary: #ffffff;
+  --kit-color-secondary-hover: #f3f4f6;
+  --kit-color-secondary-foreground: #111827;
+  --kit-color-ghost: transparent;
+  --kit-color-ghost-hover: #f3f4f6;
+  --kit-color-ghost-foreground: #374151;
+  --kit-color-ghost-hover-foreground: #111827;
+  --kit-color-border: #d1d5db;
+  --kit-focus-ring: #2563eb;
+  --kit-radius-md: 0.375rem;
+  --kit-button-border-width: 1px;
+  --kit-button-disabled-opacity: 0.55;
+  --kit-button-focus-outline-width: 2px;
+  --kit-button-focus-outline-offset: 2px;
+  --kit-button-font-weight: 600;
+  --kit-button-gap: 0.375rem;
+  --kit-button-line-height: 1;
+  --kit-button-spinner-size: 1em;
+  --kit-button-transition-duration: 120ms;
+  --kit-button-transition-timing: ease;
+  --kit-button-sm-font-size: 0.875rem;
+  --kit-button-sm-min-height: 2rem;
+  --kit-button-sm-padding-inline: 0.75rem;
+  --kit-button-md-font-size: 0.9375rem;
+  --kit-button-md-min-height: 2.5rem;
+  --kit-button-md-padding-inline: 1rem;
+  --kit-button-lg-font-size: 1rem;
+  --kit-button-lg-min-height: 3rem;
+  --kit-button-lg-padding-inline: 1.25rem;
+}
+
+.kit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kit-button-gap);
+  border: var(--kit-button-border-width) solid transparent;
+  border-radius: var(--kit-radius-md);
+  font: inherit;
+  font-weight: var(--kit-button-font-weight);
+  line-height: var(--kit-button-line-height);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
+    border-color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
+    color var(--kit-button-transition-duration) var(--kit-button-transition-timing),
+    box-shadow var(--kit-button-transition-duration) var(--kit-button-transition-timing);
+}
+
+.kit-button:focus-visible {
+  outline: var(--kit-button-focus-outline-width) solid var(--kit-focus-ring);
+  outline-offset: var(--kit-button-focus-outline-offset);
+}
+
+.kit-button:disabled {
+  cursor: not-allowed;
+  opacity: var(--kit-button-disabled-opacity);
+}
+
+.kit-button-spinner {
+  inline-size: var(--kit-button-spinner-size);
+  block-size: var(--kit-button-spinner-size);
+}
+
+.kit-button-content {
+  display: contents;
+}
+
+.kit-button-content[data-loading] {
+  display: none;
+}
+
+.kit-button--primary {
+  background: var(--kit-color-primary);
+  color: var(--kit-color-primary-foreground);
+}
+
+.kit-button--primary:hover:not(:disabled) {
+  background: var(--kit-color-primary-hover);
+}
+
+.kit-button--secondary {
+  background: var(--kit-color-secondary);
+  border-color: var(--kit-color-border);
+  color: var(--kit-color-secondary-foreground);
+}
+
+.kit-button--secondary:hover:not(:disabled) {
+  background: var(--kit-color-secondary-hover);
+}
+
+.kit-button--ghost {
+  background: var(--kit-color-ghost);
+  color: var(--kit-color-ghost-foreground);
+}
+
+.kit-button--ghost:hover:not(:disabled) {
+  background: var(--kit-color-ghost-hover);
+  color: var(--kit-color-ghost-hover-foreground);
+}
+
+.kit-button--sm {
+  min-height: var(--kit-button-sm-min-height);
+  padding: 0 var(--kit-button-sm-padding-inline);
+  font-size: var(--kit-button-sm-font-size);
+}
+
+.kit-button--md {
+  min-height: var(--kit-button-md-min-height);
+  padding: 0 var(--kit-button-md-padding-inline);
+  font-size: var(--kit-button-md-font-size);
+}
+
+.kit-button--lg {
+  min-height: var(--kit-button-lg-min-height);
+  padding: 0 var(--kit-button-lg-padding-inline);
+  font-size: var(--kit-button-lg-font-size);
+}
+/* leptos-ui-kit:end button */

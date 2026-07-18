@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -9,12 +10,42 @@ use std::{
 use tempfile::tempdir;
 
 #[test]
+fn packaged_homepage_fixture_matches_workspace_canonical_copy_when_present() {
+    let canonical = workspace_root().join("tests/fixtures/homepage_trunk_csr");
+    if !canonical
+        .try_exists()
+        .expect("inspect canonical fixture root")
+    {
+        return;
+    }
+    assert!(
+        canonical.is_dir(),
+        "canonical fixture root must be a directory"
+    );
+    let mut packaged = fixture_snapshot(&fixture_root());
+    let manifest = packaged
+        .remove(Path::new("Cargo.toml.fixture"))
+        .expect("package-local fixture manifest");
+    assert!(
+        packaged
+            .insert(PathBuf::from("Cargo.toml"), manifest)
+            .is_none(),
+        "package-local fixture must have exactly one manifest"
+    );
+    assert_eq!(
+        packaged,
+        fixture_snapshot(&canonical),
+        "package-local homepage fixture diverged from the workspace canonical copy"
+    );
+}
+
+#[test]
 fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
     let dir = tempdir().expect("tempdir");
     let first = dir.path().join("logical-root-a");
     let second = dir.path().join("logical-root-b");
-    copy_dir(&fixture_root(), &first);
-    copy_dir(&fixture_root(), &second);
+    copy_homepage_fixture(&first);
+    copy_homepage_fixture(&second);
     let first = first.canonicalize().expect("canonical first project");
     let second = second.canonicalize().expect("canonical second project");
     let forbidden = build_path_sentinels();
@@ -168,7 +199,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 fn homepage_fixture_cli_workflow_smoke() {
     let dir = tempdir().expect("tempdir");
     let project = dir.path().join("homepage");
-    copy_dir(&fixture_root(), &project);
+    copy_homepage_fixture(&project);
 
     assert_success(&project, &["info", "--json"]);
     assert_success(&project, &["init", "--dry-run", "--json"]);
@@ -571,7 +602,7 @@ fn test_binary(env_var: &str, name: &str) -> PathBuf {
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/homepage_trunk_csr")
+        .join("tests/fixtures/homepage_trunk_csr")
         .canonicalize()
         .expect("canonical fixture root")
 }
@@ -581,6 +612,12 @@ fn workspace_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("canonical workspace root")
+}
+
+fn copy_homepage_fixture(to: &Path) {
+    copy_dir(&fixture_root(), to);
+    fs::rename(to.join("Cargo.toml.fixture"), to.join("Cargo.toml"))
+        .expect("activate fixture Cargo manifest");
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -595,4 +632,28 @@ fn copy_dir(from: &Path, to: &Path) {
             fs::copy(&source, &destination).expect("copy fixture file");
         }
     }
+}
+
+fn fixture_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, directory: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(directory).expect("read fixture directory") {
+            let entry = entry.expect("read fixture entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, snapshot);
+            } else {
+                assert!(path.is_file(), "fixture entries must be regular files");
+                snapshot.insert(
+                    path.strip_prefix(root)
+                        .expect("fixture path below root")
+                        .to_path_buf(),
+                    fs::read(&path).expect("read fixture file"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
 }

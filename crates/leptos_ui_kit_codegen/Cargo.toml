@@ -10,6 +10,11 @@ repository.workspace = true
 rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
+include = [
+    "src/lib.rs",
+    "tests/fixtures/theme_pre_refactor_06124efa/button.css",
+    "tests/fixtures/theme_pre_refactor_06124efa/spinner.css",
+]
 
 [dependencies]
 leptos_ui_kit_registry.workspace = true

@@ -2059,9 +2059,34 @@ mod tests {
     use tempfile::tempdir;
 
     const PINNED_BUTTON_CSS: &str =
-        include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/button.css");
+        include_str!("../tests/fixtures/theme_pre_refactor_06124efa/button.css");
     const PINNED_SPINNER_CSS: &str =
-        include_str!("../../../tests/fixtures/theme_pre_refactor_06124efa/spinner.css");
+        include_str!("../tests/fixtures/theme_pre_refactor_06124efa/spinner.css");
+
+    #[test]
+    fn packaged_css_fixtures_match_workspace_canonical_copies_when_present() {
+        let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/theme_pre_refactor_06124efa");
+        if !canonical
+            .try_exists()
+            .expect("inspect canonical fixture root")
+        {
+            return;
+        }
+        assert!(
+            canonical.is_dir(),
+            "canonical fixture root must be a directory"
+        );
+        assert_eq!(
+            PINNED_BUTTON_CSS,
+            fs::read_to_string(canonical.join("button.css")).expect("read canonical button CSS")
+        );
+        assert_eq!(
+            PINNED_SPINNER_CSS,
+            fs::read_to_string(canonical.join("spinner.css")).expect("read canonical spinner CSS")
+        );
+    }
+
     const TEST_TOOL_REV: &str = "0123456789abcdef0123456789abcdef01234567";
     const APP_TOKEN_OVERRIDES: &str = r#"
 /* application-owned token overrides */
