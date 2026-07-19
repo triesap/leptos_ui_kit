@@ -34,7 +34,8 @@ pub use orchestration::apply_init_with_transition_barrier;
 pub use orchestration::{apply_add, apply_init, apply_sync};
 #[doc(inline)]
 pub use patch::{
-    extract_managed_css_block, extract_managed_css_block_at_path,
+    HtmlHeadInspection, HtmlInspection, HtmlInspectionError, HtmlLinkInspection, HtmlSpan,
+    extract_managed_css_block, extract_managed_css_block_at_path, inspect_html,
     inspect_managed_css_blocks_at_path, patch_components_mod, patch_css_block,
     patch_css_block_at_path, patch_ui_mod, reconcile_managed_css_blocks_at_path,
 };

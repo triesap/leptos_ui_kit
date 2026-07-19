@@ -137,6 +137,7 @@ fn root_symbols_and_function_signatures_remain_available_downstream() {
         extract_managed_css_block_at_path;
     let _: fn(&str, &str) -> Result<BTreeMap<String, ManagedCssBlockRange>, CodegenError> =
         inspect_managed_css_blocks_at_path;
+    let _: fn(&str) -> Result<HtmlInspection, HtmlInspectionError> = inspect_html;
     let _: fn(
         &str,
         &str,
@@ -188,6 +189,13 @@ fn public_traits_associated_methods_and_fields_remain_available() {
     assert_partial_ord::<ManagedCssDependency>();
     assert_ord::<ManagedCssDependency>();
     assert_owned_traits::<ManagedCssBlockRange>();
+    assert_serde_owned_traits::<HtmlSpan>();
+    assert_serde_owned_traits::<HtmlHeadInspection>();
+    assert_serde_owned_traits::<HtmlLinkInspection>();
+    assert_serde_owned_traits::<HtmlInspection>();
+    assert_owned_traits::<HtmlInspectionError>();
+    assert_display::<HtmlInspectionError>();
+    assert_error::<HtmlInspectionError>();
     assert_owned_traits::<UiModuleExport>();
     assert_debug::<WriteLock>();
     assert_auto_traits::<WriteLock>();
