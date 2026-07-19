@@ -34,6 +34,7 @@ include = [
     "src/transaction/journal.rs",
     "src/transaction/lock.rs",
     "src/transaction/mod.rs",
+    "src/transaction/namespace_lifecycle.rs",
     "src/transaction/recovery.rs",
     "src/transaction/recovery_capture.rs",
     "src/transaction/recovery_policy.rs",

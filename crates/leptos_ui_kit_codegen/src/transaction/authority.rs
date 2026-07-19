@@ -26,6 +26,10 @@ impl<'a> TransactionAuthority<'a> {
         self.lock.validate_context(self.context)
     }
 
+    pub(super) const fn lock(&self) -> &'a WriteLock {
+        self.lock
+    }
+
     pub(super) fn rebind_parent_for_mutation(
         &self,
         fs: &dyn FsOps,

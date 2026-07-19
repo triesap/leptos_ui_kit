@@ -24,6 +24,7 @@ use super::journal::{
     canonical_root_hash, transaction_directory_name,
 };
 use super::lock::{DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT, WriteLock};
+use super::namespace_lifecycle::retire_terminal_namespace;
 use super::runtime::{
     EntropyPurpose, TransactionOutcome, TransactionRuntime, TransitionKey, TransitionWindow,
 };
@@ -584,10 +585,13 @@ impl<'a> ImmutableJournalStore<'a> {
                     .to_owned(),
             });
         }
-        // If this last exact unlink completed but only the following
-        // observation or sync failed, durable confirmed absence is terminal.
         self.certify_finalization_cleanup_stage(false)?;
-        self.remove_finalization_exact(&terminal, outcome)
+        retire_terminal_namespace(
+            self.context,
+            self.authority.lock(),
+            &self.runtime,
+            &terminal,
+        )
     }
 
     fn certify_active_finalization_slot(&self) -> Result<(), CodegenError> {
@@ -1180,13 +1184,13 @@ fn preserved_mode(metadata: &Metadata) -> PreservedFileMode {
 }
 
 #[cfg(unix)]
-fn canonical_native_bytes(path: &Path) -> Vec<u8> {
+pub(super) fn canonical_native_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
     path.as_os_str().as_bytes().to_vec()
 }
 
 #[cfg(windows)]
-fn canonical_native_bytes(path: &Path) -> Vec<u8> {
+pub(super) fn canonical_native_bytes(path: &Path) -> Vec<u8> {
     use std::os::windows::ffi::OsStrExt;
     path.as_os_str()
         .encode_wide()
@@ -1195,7 +1199,7 @@ fn canonical_native_bytes(path: &Path) -> Vec<u8> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn canonical_native_bytes(path: &Path) -> Vec<u8> {
+pub(super) fn canonical_native_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().as_bytes().to_vec()
 }
 

@@ -3,6 +3,7 @@ mod engine;
 mod fs;
 mod journal;
 mod lock;
+mod namespace_lifecycle;
 mod recovery;
 mod recovery_capture;
 mod recovery_policy;

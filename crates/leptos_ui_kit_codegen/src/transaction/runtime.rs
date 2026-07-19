@@ -241,6 +241,21 @@ pub(crate) enum TransitionKey {
         generation: u64,
         window: TransitionWindow,
     },
+    ArmNamespaceRetirementAuthority {
+        window: TransitionWindow,
+    },
+    MoveTransactionNamespaceToRetirement {
+        window: TransitionWindow,
+    },
+    RemoveInternalFinalizationLease {
+        window: TransitionWindow,
+    },
+    RetireTransactionNamespace {
+        window: TransitionWindow,
+    },
+    RetireNamespaceRetirementAuthority {
+        window: TransitionWindow,
+    },
 }
 
 pub(crate) trait TransitionObserver:
@@ -1054,12 +1069,32 @@ mod tests {
                 generation,
                 window,
             },
+            TransitionKey::ArmNamespaceRetirementAuthority { .. } => {
+                TransitionKey::ArmNamespaceRetirementAuthority { window }
+            }
+            TransitionKey::MoveTransactionNamespaceToRetirement { .. } => {
+                TransitionKey::MoveTransactionNamespaceToRetirement { window }
+            }
+            TransitionKey::RemoveInternalFinalizationLease { .. } => {
+                TransitionKey::RemoveInternalFinalizationLease { window }
+            }
+            TransitionKey::RetireTransactionNamespace { .. } => {
+                TransitionKey::RetireTransactionNamespace { window }
+            }
+            TransitionKey::RetireNamespaceRetirementAuthority { .. } => {
+                TransitionKey::RetireNamespaceRetirementAuthority { window }
+            }
         }
     }
 
     fn protocol_transition_points() -> Vec<TransitionKey> {
         let before = TransitionWindow::Before;
         let mut points = vec![
+            TransitionKey::ArmNamespaceRetirementAuthority { window: before },
+            TransitionKey::MoveTransactionNamespaceToRetirement { window: before },
+            TransitionKey::RemoveInternalFinalizationLease { window: before },
+            TransitionKey::RetireTransactionNamespace { window: before },
+            TransitionKey::RetireNamespaceRetirementAuthority { window: before },
             TransitionKey::BootstrapWorkspace { window: before },
             TransitionKey::PublishWorkspaceOwnership { window: before },
             TransitionKey::AdoptBootstrapFinalizationSlot { window: before },
@@ -1240,7 +1275,7 @@ mod tests {
     #[test]
     fn transition_key_surface_covers_every_protocol_mutation_before_and_after() {
         let points = protocol_transition_points();
-        assert_eq!(points.len(), 71);
+        assert_eq!(points.len(), 76);
 
         let expected = points
             .into_iter()
@@ -1258,7 +1293,7 @@ mod tests {
 
         assert_eq!(observer.wait_for_count(expected.len()), expected);
         assert_eq!(observer.events(), expected);
-        assert_eq!(expected.len(), 142);
+        assert_eq!(expected.len(), 152);
         for pair in expected.chunks_exact(2) {
             assert_eq!(pair[0], at_window(pair[0], TransitionWindow::Before));
             assert_eq!(pair[1], at_window(pair[0], TransitionWindow::After));

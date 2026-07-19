@@ -58,7 +58,7 @@ const REGISTRY_TESTS: [&str; 7] = [
 const FACADE_FILES: [&str; 1] = ["src/lib.rs"];
 const PRIMITIVES_FILES: [&str; 1] = ["src/lib.rs"];
 const CODEGEN_PLATFORM_FILES: [&str; 2] = ["src/lib.rs", "src/windows.rs"];
-const CODEGEN_FILES: [&str; 35] = [
+const CODEGEN_FILES: [&str; 36] = [
     "src/command.rs",
     "src/digest.rs",
     "src/error.rs",
@@ -82,6 +82,7 @@ const CODEGEN_FILES: [&str; 35] = [
     "src/transaction/journal.rs",
     "src/transaction/lock.rs",
     "src/transaction/mod.rs",
+    "src/transaction/namespace_lifecycle.rs",
     "src/transaction/recovery.rs",
     "src/transaction/recovery_capture.rs",
     "src/transaction/recovery_policy.rs",

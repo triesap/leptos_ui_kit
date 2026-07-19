@@ -48,7 +48,7 @@ use crate::path_safety::ObjectIdentity;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const MAX_CONTROL_ENVELOPE_BYTES: u64 = 1024 * 1024;
-const MAX_RECORD_ENVELOPE_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_RECORD_ENVELOPE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_NAMESPACE_ENTRIES: usize = 16_384;
 pub(super) const MAX_RECORDS: usize = 100_000;
 const WRITE_LOCK_NAME: &str = ".write.lock";
@@ -5712,6 +5712,10 @@ impl FinalizationRecord {
     pub(super) fn name(&self) -> &str {
         &self.name
     }
+
+    pub(super) fn observation(&self) -> &ExactFileObservation {
+        &self.observation
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6758,6 +6762,23 @@ pub(super) fn exact_directory(
             .link_count
             .ok_or_else(|| JournalModelError::new("exact directory link count is unavailable"))?,
     )
+}
+
+pub(super) fn exact_directory_observation(
+    exact: &ExactDirectoryStateV2,
+    link_count: Option<u64>,
+) -> ExactDirectoryObservation {
+    ExactDirectoryObservation {
+        identity: ObjectIdentity::from_u128(
+            exact.identity().namespace(),
+            exact.identity().object(),
+        ),
+        mode: PreservedFileMode {
+            readonly: exact.mode().readonly(),
+            posix_mode: exact.mode().posix_mode(),
+        },
+        link_count,
+    }
 }
 
 fn file_identity(exact: &ExactFileStateV2) -> ObjectIdentity {

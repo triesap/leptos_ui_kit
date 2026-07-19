@@ -278,6 +278,7 @@ pub(crate) struct ExactDirectoryInventory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExactRelocationSource {
     File(ExactFileObservation),
+    Directory(ExactDirectoryObservation),
     EmptyDirectory(ExactDirectoryObservation),
 }
 
@@ -1820,6 +1821,21 @@ fn relocate_noreplace_impl(
                 )));
             }
         }
+        ExactRelocationSource::Directory(expected) => {
+            let opened = open_directory_exact_impl(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if opened.observation != *expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    owner_path,
+                    "the exact directory owner changed before relocation",
+                )));
+            }
+        }
         ExactRelocationSource::EmptyDirectory(expected) => {
             let opened = open_directory_exact_impl(
                 owner_parent,
@@ -1885,6 +1901,21 @@ fn relocate_noreplace_impl(
                 return Err(NoReplaceRelocationError::Io(changed_during_observation(
                     destination_path,
                     "relocation placed a file other than the exact durable owner",
+                )));
+            }
+        }
+        ExactRelocationSource::Directory(expected) => {
+            let opened = open_directory_exact_impl(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if opened.observation != *expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    destination_path,
+                    "relocation placed a directory other than the exact durable owner",
                 )));
             }
         }
@@ -2729,6 +2760,21 @@ pub(crate) enum FsOperation {
         generation: u64,
         after: bool,
     },
+    ArmNamespaceRetirementAuthority {
+        after: bool,
+    },
+    MoveTransactionNamespaceToRetirement {
+        after: bool,
+    },
+    RemoveInternalFinalizationLease {
+        after: bool,
+    },
+    RetireTransactionNamespace {
+        after: bool,
+    },
+    RetireNamespaceRetirementAuthority {
+        after: bool,
+    },
     CreateDirectory,
     OpenCoordinationFile,
     InspectMetadata,
@@ -2826,6 +2872,11 @@ impl FsOperation {
                 | Self::RemoveTransactionWorkspace { .. }
                 | Self::RemoveFinalizationLease { .. }
                 | Self::CleanupFinalizationPartial { .. }
+                | Self::ArmNamespaceRetirementAuthority { .. }
+                | Self::MoveTransactionNamespaceToRetirement { .. }
+                | Self::RemoveInternalFinalizationLease { .. }
+                | Self::RetireTransactionNamespace { .. }
+                | Self::RetireNamespaceRetirementAuthority { .. }
         )
     }
 }
@@ -3119,6 +3170,31 @@ fn semantic_operation(key: super::runtime::TransitionKey) -> FsOperation {
             generation,
             after: after(window),
         },
+        TransitionKey::ArmNamespaceRetirementAuthority { window } => {
+            FsOperation::ArmNamespaceRetirementAuthority {
+                after: after(window),
+            }
+        }
+        TransitionKey::MoveTransactionNamespaceToRetirement { window } => {
+            FsOperation::MoveTransactionNamespaceToRetirement {
+                after: after(window),
+            }
+        }
+        TransitionKey::RemoveInternalFinalizationLease { window } => {
+            FsOperation::RemoveInternalFinalizationLease {
+                after: after(window),
+            }
+        }
+        TransitionKey::RetireTransactionNamespace { window } => {
+            FsOperation::RetireTransactionNamespace {
+                after: after(window),
+            }
+        }
+        TransitionKey::RetireNamespaceRetirementAuthority { window } => {
+            FsOperation::RetireNamespaceRetirementAuthority {
+                after: after(window),
+            }
+        }
     }
 }
 
@@ -4154,9 +4230,9 @@ mod exact_state_tests {
     use tempfile::TempDir;
 
     use super::{
-        DirectoryEndpoint, ExactDirectoryEntryKind, ExactIdentitySupport, ExclusiveCreateOutcome,
-        ExclusiveFileCopyOutcome, FaultFs, FsOperation, FsOps, HardLinkEndpoint, ParentSyncKind,
-        SystemFs, exact_identity_support,
+        DirectoryEndpoint, ExactDirectoryEntryKind, ExactIdentitySupport, ExactRelocationSource,
+        ExclusiveCreateOutcome, ExclusiveFileCopyOutcome, FaultFs, FsOperation, FsOps,
+        HardLinkEndpoint, ParentSyncKind, SystemFs, exact_identity_support,
     };
 
     struct Fixture {
@@ -4721,6 +4797,48 @@ mod exact_state_tests {
             )
             .expect_err("semantic exact-directory creation fault");
         assert!(!fault_path.exists());
+    }
+
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+    #[test]
+    fn populated_directory_relocation_preserves_exact_identity_and_children() {
+        let fixture = Fixture::new();
+        let active_path = fixture.path("active");
+        let retired_path = fixture.path("retired");
+        let active = SystemFs
+            .create_directory_exact(&fixture.files, Path::new("active"), &active_path, 0o700)
+            .expect("create active namespace");
+        std::fs::write(active_path.join("lease.json"), b"{}\n").expect("write namespace child");
+        let expected = SystemFs
+            .observe_directory(DirectoryEndpoint::new(
+                &fixture.files,
+                Path::new("active"),
+                &active.directory,
+                &active_path,
+            ))
+            .expect("observe populated namespace");
+
+        SystemFs
+            .relocate_noreplace(
+                &fixture.files,
+                Path::new("active"),
+                &active_path,
+                &fixture.files,
+                Path::new("retired"),
+                &retired_path,
+                &ExactRelocationSource::Directory(expected),
+            )
+            .expect("relocate populated namespace without replacement");
+
+        assert!(!active_path.exists());
+        assert_eq!(
+            std::fs::read(retired_path.join("lease.json")).expect("read moved child"),
+            b"{}\n"
+        );
+        let retired = SystemFs
+            .open_directory_exact(&fixture.files, Path::new("retired"), &retired_path, 0o700)
+            .expect("open retired namespace");
+        assert_eq!(retired.observation, expected);
     }
 
     #[test]

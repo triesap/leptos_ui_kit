@@ -13,6 +13,10 @@ use super::engine::{
 use super::fs::{DirectoryEndpoint, ExactDirectoryObservation, HardLinkEndpoint};
 use super::journal::{FinalizationOutcomeV2, TransactionId, canonical_root_hash};
 use super::lock::{DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT, WriteLock};
+use super::namespace_lifecycle::{
+    NamespaceRetirementStep, arm_retirement_authority, check_retirement_pending,
+    recover_retirement_step,
+};
 use super::recovery_capture::capture_stable_recovery_world;
 use super::recovery_policy::{
     RecordReconciliationActionV2, RecoveryAssessmentV2, RecoveryOutcomeV2, RecoveryPhaseActionV2,
@@ -82,6 +86,8 @@ impl RecoveryProgressBudget {
 
 pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
     let context = PlanningContext::open(project_root)?;
+    let runtime = TransactionRuntime::system();
+    check_retirement_pending(&context, &runtime)?;
     let kit_parent = match context.open_directory(KIT_PARENT_LOGICAL_PATH) {
         Ok(parent) => parent,
         Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
@@ -96,7 +102,6 @@ pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
         }
         Err(error) => return Err(error),
     };
-    let runtime = TransactionRuntime::system();
     let kit_path = context.project_root().join(KIT_LOGICAL_PATH);
     let kit_endpoint =
         DirectoryEndpoint::new(&kit_parent, Path::new(".transactions"), &kit, &kit_path);
@@ -260,6 +265,12 @@ fn recover_v2_step(
     runtime: &TransactionRuntime,
     barrier_certificate: Option<&RecoveryPassCertificate>,
 ) -> Result<RecoveryLoopStep, CodegenError> {
+    match recover_retirement_step(context, lock, runtime)? {
+        NamespaceRetirementStep::NotPresent => {}
+        NamespaceRetirementStep::DurableProgress => {
+            return Ok(RecoveryLoopStep::DurableProgress);
+        }
+    }
     let root = context.open_pinned_project_root()?;
     let root_metadata = root.dir_metadata().map_err(|source| CodegenError::Io {
         path: context.project_root().to_path_buf(),
@@ -460,6 +471,8 @@ fn recover_v2_step(
         JournalNamespace::Finalizing(loaded) => {
             lock.validate_context(context)?;
             recover_finalization_step(
+                context,
+                lock,
                 &store,
                 &loaded,
                 kit_endpoint,
@@ -741,6 +754,8 @@ fn require_active_reconciled(
 }
 
 fn recover_finalization_step(
+    context: &PlanningContext,
+    lock: &WriteLock,
     store: &JournalRecoveryStore<'_>,
     loaded: &LoadedFinalization,
     kit_endpoint: DirectoryEndpoint<'_>,
@@ -961,11 +976,11 @@ fn recover_finalization_step(
                             kit_path,
                         )
                     } else {
-                        require_removed(store.remove_finalization_record(latest, outcome), kit_path)
+                        arm_retirement_authority(context, lock, store.runtime(), latest)
                     }
                 }
                 FinalizationCleanupStage::RetiredPrefix => {
-                    require_removed(store.remove_finalization_record(latest, outcome), kit_path)
+                    arm_retirement_authority(context, lock, store.runtime(), latest)
                 }
             }
         }

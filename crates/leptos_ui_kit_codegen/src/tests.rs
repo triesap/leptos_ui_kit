@@ -5029,6 +5029,41 @@ fn semantic_crashes_recover_to_the_side_selected_by_commit_complete() {
 }
 
 #[test]
+fn terminal_namespace_retirement_recovers_at_every_semantic_boundary() {
+    for transition in [
+        FsOperation::ArmNamespaceRetirementAuthority { after: false },
+        FsOperation::ArmNamespaceRetirementAuthority { after: true },
+        FsOperation::MoveTransactionNamespaceToRetirement { after: false },
+        FsOperation::MoveTransactionNamespaceToRetirement { after: true },
+        FsOperation::RemoveInternalFinalizationLease { after: false },
+        FsOperation::RemoveInternalFinalizationLease { after: true },
+        FsOperation::RetireTransactionNamespace { after: false },
+        FsOperation::RetireTransactionNamespace { after: true },
+        FsOperation::RetireNamespaceRetirementAuthority { after: false },
+        FsOperation::RetireNamespaceRetirementAuthority { after: true },
+    ] {
+        let directory = tempfile::tempdir().expect("namespace-retirement crash tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update(root);
+        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+        let crash = std::panic::catch_unwind(|| {
+            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+        });
+        assert!(crash.is_err(), "{transition:?} did not terminate execution");
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
+        assert_two_file_cohort_state(root, true);
+        assert_no_transaction_namespace_lifecycle(root);
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("repeat recovery after {transition:?}: {error}"));
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+#[test]
 fn crash_after_stage_sync_before_progress_publication_is_recoverable() {
     let directory = tempfile::tempdir().expect("stage-progress crash tempdir");
     let root = directory.path();
@@ -5182,6 +5217,23 @@ fn transaction_workspace_paths(root: &Path) -> Vec<PathBuf> {
         })
         .map(|entry| entry.path())
         .collect()
+}
+
+fn assert_no_transaction_namespace_lifecycle(root: &Path) {
+    let kit = root.join("src/components/ui/_kit");
+    let names = fs::read_dir(&kit)
+        .expect("read coordination directory")
+        .map(|entry| entry.expect("coordination entry").file_name())
+        .filter(|name| {
+            name.to_str().is_some_and(|name| {
+                name == ".transactions" || name.starts_with(".transactions.retirement-v2-")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        names.is_empty(),
+        "transaction namespace lifecycle artifacts remain: {names:?}"
+    );
 }
 
 fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
