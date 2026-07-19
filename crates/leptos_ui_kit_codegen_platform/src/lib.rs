@@ -101,6 +101,49 @@ pub struct MovePolicy {
     source_before: ObjectInfo,
 }
 
+/// The exact regular-file state authorized for one hard-link alias creation.
+///
+/// The source must remain bound to `source_parent`, the destination must be
+/// absent, and the source link count must increase by exactly one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HardLinkPolicy {
+    source_before: ObjectInfo,
+}
+
+/// The exact two-link regular-file state authorized for alias retirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HardLinkRetirementPolicy {
+    linked_before: ObjectInfo,
+}
+
+impl HardLinkRetirementPolicy {
+    /// Declares the complete exact two-link state authorized for retirement.
+    #[must_use]
+    pub const fn new(linked_before: ObjectInfo) -> Self {
+        Self { linked_before }
+    }
+
+    /// Returns the complete authorized pre-retirement observation.
+    #[must_use]
+    pub const fn linked_before(self) -> ObjectInfo {
+        self.linked_before
+    }
+}
+
+impl HardLinkPolicy {
+    /// Declares the complete exact source state authorized for alias creation.
+    #[must_use]
+    pub const fn new(source_before: ObjectInfo) -> Self {
+        Self { source_before }
+    }
+
+    /// Returns the complete authorized source observation.
+    #[must_use]
+    pub const fn source_before(self) -> ObjectInfo {
+        self.source_before
+    }
+}
+
 impl MovePolicy {
     /// Declares the complete exact source state authorized for movement.
     #[must_use]
@@ -632,6 +675,38 @@ pub struct UnverifiedReplacementCapabilities {
     target: UnverifiedObjectCapability,
 }
 
+/// Verified owner and alias handles returned when alias retirement did not
+/// mutate the namespace.
+#[derive(Debug)]
+pub struct HardLinkAliasCapabilities {
+    owner: ObjectCapability,
+    alias: ObjectCapability,
+}
+
+impl HardLinkAliasCapabilities {
+    /// Consumes the payload and returns the surviving owner and alias.
+    #[must_use]
+    pub fn into_parts(self) -> (ObjectCapability, ObjectCapability) {
+        (self.owner, self.alias)
+    }
+}
+
+/// Retained exact owner and alias handles returned when alias retirement
+/// mutated but its postcondition could not be proven.
+#[derive(Debug)]
+#[must_use = "both exact recovery handles must be reconciled deliberately before they are dropped"]
+pub struct UnverifiedHardLinkAliasCapabilities {
+    owner: UnverifiedObjectCapability,
+    alias: UnverifiedObjectCapability,
+}
+
+impl UnverifiedHardLinkAliasCapabilities {
+    /// Consumes the payload and returns both retained recovery handles.
+    pub fn into_parts(self) -> (UnverifiedObjectCapability, UnverifiedObjectCapability) {
+        (self.owner, self.alias)
+    }
+}
+
 impl UnverifiedReplacementCapabilities {
     /// Consumes the payload and returns the retained source and target handles.
     pub fn into_parts(self) -> (UnverifiedObjectCapability, UnverifiedObjectCapability) {
@@ -859,6 +934,102 @@ pub fn create_directory_nofollow(
         Err(MutationFailure::NotMutated {
             error: unsupported("capability-relative directory creation"),
             capabilities: Box::new(()),
+        })
+    }
+}
+
+/// Atomically creates and durably populates one direct-child regular file.
+///
+/// The child is opened with mutation-grade, share-delete, no-follow rights.
+/// A successful result has exact identity, kind, length, link-count, and
+/// readonly observations, but still requires its parent durability barrier
+/// through [`sync_mutation_parents`].
+pub fn create_regular_file_nofollow(
+    parent: &DirectoryCapability,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<VerifiedMutation<ObjectCapability>, MutationFailure<(), UnverifiedObjectCapability>> {
+    if let Err(error) = validate_direct_name(name) {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(()),
+        });
+    }
+    #[cfg(windows)]
+    {
+        windows::create_regular_file_nofollow(parent, name, bytes)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (parent, bytes);
+        Err(MutationFailure::NotMutated {
+            error: unsupported("capability-relative regular-file creation"),
+            capabilities: Box::new(()),
+        })
+    }
+}
+
+/// Creates a no-replace hard-link alias for one exact regular file.
+///
+/// Both the source's original direct-child binding and the new alias are
+/// reverified against the complete post-link observation. The target parent
+/// must then be flushed through [`sync_mutation_parents`].
+pub fn create_hard_link_alias(
+    source: ObjectCapability,
+    source_parent: &DirectoryCapability,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+    policy: HardLinkPolicy,
+) -> Result<
+    VerifiedMutation<ObjectCapability>,
+    MutationFailure<ObjectCapability, UnverifiedObjectCapability>,
+> {
+    if let Err(error) = validate_direct_name(target_name) {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(source),
+        });
+    }
+    #[cfg(windows)]
+    {
+        windows::create_hard_link_alias(source, source_parent, target_parent, target_name, policy)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (source_parent, target_parent, policy);
+        Err(MutationFailure::NotMutated {
+            error: unsupported("capability-relative hard-link alias creation"),
+            capabilities: Box::new(source),
+        })
+    }
+}
+
+/// Retires one exact hard-link alias while preserving and reverifying its
+/// exact owner binding.
+///
+/// This is deliberately separate from [`delete_exact`], which rejects
+/// multi-link regular files. The precondition requires two mutation-grade
+/// capabilities for the same exact two-link object under distinct bindings.
+pub fn retire_hard_link_alias(
+    owner: ObjectCapability,
+    owner_parent: &DirectoryCapability,
+    alias: ObjectCapability,
+    alias_parent: &DirectoryCapability,
+    policy: HardLinkRetirementPolicy,
+) -> Result<
+    VerifiedMutation<ObjectCapability>,
+    MutationFailure<HardLinkAliasCapabilities, UnverifiedHardLinkAliasCapabilities>,
+> {
+    #[cfg(windows)]
+    {
+        windows::retire_hard_link_alias(owner, owner_parent, alias, alias_parent, policy)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner_parent, alias_parent, policy);
+        Err(MutationFailure::NotMutated {
+            error: unsupported("exact hard-link alias retirement"),
+            capabilities: Box::new(HardLinkAliasCapabilities { owner, alias }),
         })
     }
 }
@@ -1212,6 +1383,22 @@ mod tests {
             readonly: false,
         };
         assert_eq!(MovePolicy::new(source).source_before(), source);
+    }
+
+    #[test]
+    fn hard_link_policies_retain_the_complete_source_observation() {
+        let source = ObjectInfo {
+            identity: FileIdentity::new(7, [11; 16]),
+            kind: ObjectKind::RegularFile,
+            byte_len: 31,
+            link_count: 2,
+            readonly: false,
+        };
+        assert_eq!(HardLinkPolicy::new(source).source_before(), source);
+        assert_eq!(
+            HardLinkRetirementPolicy::new(source).linked_before(),
+            source
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::{
     ffi::{OsStr, c_void},
     fs::File,
-    io,
+    io::{self, Write},
     mem::{align_of, offset_of, size_of},
     os::windows::{
         ffi::OsStrExt,
@@ -18,8 +18,9 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
-            FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile, NtFlushBuffersFile,
+            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_LINK_INFORMATION, FILE_LINK_POSIX_SEMANTICS,
+            FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+            FileLinkInformationEx, NtCreateFile, NtFlushBuffersFile, NtSetInformationFile,
         },
     },
     Win32::{
@@ -53,8 +54,10 @@ use windows_sys::{
 use crate::{
     AdoptedRootDirectory, AdoptedRootInner, AdoptionError, CapabilityAccess, CapabilityInner,
     ChildBinding, DirectoryCapability, DurabilityFailure, DurableMutation, FileIdentity,
-    MovePolicy, MutationFailure, NamespacePostcondition, ObjectCapability, ObjectInfo, ObjectKind,
-    QualifiedVolume, ReplacementCapabilities, ReplacementPolicy, UnverifiedObjectCapability,
+    HardLinkAliasCapabilities, HardLinkPolicy, HardLinkRetirementPolicy, MovePolicy,
+    MutationFailure, NamespacePostcondition, ObjectCapability, ObjectInfo, ObjectKind,
+    QualifiedVolume, ReplacementCapabilities, ReplacementPolicy,
+    UnverifiedHardLinkAliasCapabilities, UnverifiedObjectCapability,
     UnverifiedReplacementCapabilities, VerifiedMutation, VolumeCapabilities, VolumeQualification,
     access_required, alias_rejected, binding_changed,
 };
@@ -272,6 +275,237 @@ pub(super) fn create_directory_nofollow(
     ))
 }
 
+pub(super) fn create_regular_file_nofollow(
+    parent: &DirectoryCapability,
+    name: &OsStr,
+    bytes: &[u8],
+) -> Result<VerifiedMutation<ObjectCapability>, MutationFailure<(), UnverifiedObjectCapability>> {
+    if let Err(error) = require_mutation_parent(parent, "regular-file creation") {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(()),
+        });
+    }
+    if let Err(error) = refresh_verified(&parent.0) {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(()),
+        });
+    }
+    match try_open_child_any(parent, name, CapabilityAccess::Inspect) {
+        Ok(Some(_)) => {
+            return Err(MutationFailure::NotMutated {
+                error: io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "the direct child already exists",
+                ),
+                capabilities: Box::new(()),
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(MutationFailure::NotMutated {
+                error,
+                capabilities: Box::new(()),
+            });
+        }
+    }
+
+    let binding = Some(ChildBinding {
+        parent_identity: parent.identity(),
+        name: name.to_os_string(),
+    });
+    let mut created = match create_object_handle(parent, name, ObjectKind::RegularFile) {
+        Ok(created) => created,
+        Err(CreateHandleFailure::NotMutated(error)) => {
+            return Err(MutationFailure::NotMutated {
+                error,
+                capabilities: Box::new(()),
+            });
+        }
+        Err(CreateHandleFailure::MutatedUnverified { handle, error }) => {
+            return Err(MutationFailure::MutatedUnverified {
+                error,
+                capabilities: Box::new(UnverifiedObjectCapability {
+                    file: handle,
+                    expected_kind: ObjectKind::RegularFile,
+                    access: CapabilityAccess::Mutation,
+                    binding,
+                    last_observation: None,
+                    qualification: Arc::clone(&parent.0.qualification),
+                }),
+            });
+        }
+    };
+    if let Err(error) = created
+        .write_all(bytes)
+        .and_then(|()| created.flush())
+        .and_then(|()| created.sync_all())
+    {
+        let last_observation = inspect_exact_file(&created, ObjectKind::RegularFile).ok();
+        return Err(MutationFailure::MutatedUnverified {
+            error,
+            capabilities: Box::new(UnverifiedObjectCapability {
+                file: created,
+                expected_kind: ObjectKind::RegularFile,
+                access: CapabilityAccess::Mutation,
+                binding,
+                last_observation,
+                qualification: Arc::clone(&parent.0.qualification),
+            }),
+        });
+    }
+    let created_info = match inspect_exact_file(&created, ObjectKind::RegularFile) {
+        Ok(info)
+            if info.byte_len == bytes.len() as u64 && info.link_count == 1 && !info.readonly =>
+        {
+            info
+        }
+        Ok(info) => {
+            return Err(MutationFailure::MutatedUnverified {
+                error: io::Error::other(
+                    "new regular file did not retain its exact populated single-link state",
+                ),
+                capabilities: Box::new(UnverifiedObjectCapability {
+                    file: created,
+                    expected_kind: ObjectKind::RegularFile,
+                    access: CapabilityAccess::Mutation,
+                    binding,
+                    last_observation: Some(info),
+                    qualification: Arc::clone(&parent.0.qualification),
+                }),
+            });
+        }
+        Err(error) => {
+            return Err(MutationFailure::MutatedUnverified {
+                error,
+                capabilities: Box::new(UnverifiedObjectCapability {
+                    file: created,
+                    expected_kind: ObjectKind::RegularFile,
+                    access: CapabilityAccess::Mutation,
+                    binding,
+                    last_observation: None,
+                    qualification: Arc::clone(&parent.0.qualification),
+                }),
+            });
+        }
+    };
+    let mut capability = ObjectCapability(CapabilityInner {
+        file: created,
+        info: created_info,
+        access: CapabilityAccess::Mutation,
+        binding,
+        qualification: Arc::clone(&parent.0.qualification),
+    });
+    let verification = (|| {
+        let rebound = open_child_any(parent, name, CapabilityAccess::Inspect)?;
+        require_exact_policy_observation(rebound.info(), created_info)?;
+        refresh_verified(&parent.0)?;
+        let current = inspect_exact_file(&capability.0.file, ObjectKind::RegularFile)?;
+        require_exact_policy_observation(current, created_info)?;
+        capability.0.info = current;
+        Ok(())
+    })();
+    if let Err(error) = verification {
+        return Err(MutationFailure::MutatedUnverified {
+            error,
+            capabilities: Box::new(capability.into_unverified()),
+        });
+    }
+
+    Ok(VerifiedMutation::new(
+        capability,
+        Arc::clone(&parent.0.qualification),
+        [parent.identity()],
+        [NamespacePostcondition::present(parent, name, created_info)],
+    ))
+}
+
+pub(super) fn create_hard_link_alias(
+    mut source: ObjectCapability,
+    source_parent: &DirectoryCapability,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+    policy: HardLinkPolicy,
+) -> Result<
+    VerifiedMutation<ObjectCapability>,
+    MutationFailure<ObjectCapability, UnverifiedObjectCapability>,
+> {
+    if let Err(error) =
+        preflight_hard_link(&source, source_parent, target_parent, target_name, policy)
+    {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(source),
+        });
+    }
+    let source_name = source
+        .name()
+        .expect("preflight requires a direct-child source binding")
+        .to_os_string();
+    let mut expected_after = policy.source_before();
+    expected_after.link_count = match expected_after.link_count.checked_add(1) {
+        Some(link_count) => link_count,
+        None => {
+            return Err(MutationFailure::NotMutated {
+                error: io::Error::other("hard-link count overflow"),
+                capabilities: Box::new(source),
+            });
+        }
+    };
+
+    if let Err(error) = link_by_handle(&source.0.file, target_parent, target_name) {
+        match reconcile_hard_link_failure(
+            &mut source,
+            source_parent,
+            &source_name,
+            target_parent,
+            target_name,
+            policy.source_before(),
+            expected_after,
+        ) {
+            Ok(HardLinkFailureDisposition::NotMutated) => {
+                return Err(MutationFailure::NotMutated {
+                    error,
+                    capabilities: Box::new(source),
+                });
+            }
+            Ok(HardLinkFailureDisposition::Linked) => {}
+            Err(reconcile_error) => {
+                return Err(MutationFailure::MutatedUnverified {
+                    error: io::Error::other(format!(
+                        "hard-link creation failed ({error}) and its exact namespace disposition \
+                         could not be reconciled ({reconcile_error})"
+                    )),
+                    capabilities: Box::new(source.into_unverified()),
+                });
+            }
+        }
+    } else if let Err(error) = verify_hard_link(
+        &mut source,
+        source_parent,
+        &source_name,
+        target_parent,
+        target_name,
+        expected_after,
+    ) {
+        return Err(MutationFailure::MutatedUnverified {
+            error,
+            capabilities: Box::new(source.into_unverified()),
+        });
+    }
+
+    Ok(VerifiedMutation::new(
+        source,
+        Arc::clone(&target_parent.0.qualification),
+        [target_parent.identity()],
+        [
+            NamespacePostcondition::present(source_parent, &source_name, expected_after),
+            NamespacePostcondition::present(target_parent, target_name, expected_after),
+        ],
+    ))
+}
+
 pub(super) fn move_noreplace(
     mut source: ObjectCapability,
     source_parent: &DirectoryCapability,
@@ -433,6 +667,111 @@ pub(super) fn replace_exact(
         [
             NamespacePostcondition::absent(source_parent, &source_name),
             NamespacePostcondition::present(target_parent, target_name, policy.source_before()),
+        ],
+    ))
+}
+
+pub(super) fn retire_hard_link_alias(
+    mut owner: ObjectCapability,
+    owner_parent: &DirectoryCapability,
+    mut alias: ObjectCapability,
+    alias_parent: &DirectoryCapability,
+    policy: HardLinkRetirementPolicy,
+) -> Result<
+    VerifiedMutation<ObjectCapability>,
+    MutationFailure<HardLinkAliasCapabilities, UnverifiedHardLinkAliasCapabilities>,
+> {
+    if let Err(error) =
+        preflight_alias_retirement(&owner, owner_parent, &alias, alias_parent, policy)
+    {
+        return Err(MutationFailure::NotMutated {
+            error,
+            capabilities: Box::new(HardLinkAliasCapabilities { owner, alias }),
+        });
+    }
+    let owner_name = owner
+        .name()
+        .expect("preflight requires a bound owner")
+        .to_os_string();
+    let alias_name = alias
+        .name()
+        .expect("preflight requires a bound alias")
+        .to_os_string();
+    let mut expected_after = policy.linked_before();
+    expected_after.link_count = 1;
+
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    // SAFETY: preflight proved a live mutation-grade exact alias handle and a
+    // two-link policy. The disposition value is correctly sized and borrowed
+    // only for this synchronous call.
+    let result = unsafe {
+        SetFileInformationByHandle(
+            raw_handle(&alias.0.file),
+            FileDispositionInfoEx,
+            ptr::from_ref(&disposition).cast::<c_void>(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if result == 0 {
+        let operation_error = map_disposition_error(io::Error::last_os_error());
+        match classify_alias_retirement(
+            &mut owner,
+            owner_parent,
+            &owner_name,
+            alias_parent,
+            &alias_name,
+            policy.linked_before(),
+            expected_after,
+        ) {
+            Ok(AliasRetirementDisposition::NotMutated) => {
+                return Err(MutationFailure::NotMutated {
+                    error: operation_error,
+                    capabilities: Box::new(HardLinkAliasCapabilities { owner, alias }),
+                });
+            }
+            Ok(AliasRetirementDisposition::Retired) => {}
+            Err(reconcile_error) => {
+                alias.0.binding = None;
+                return Err(MutationFailure::MutatedUnverified {
+                    error: io::Error::other(format!(
+                        "hard-link alias retirement failed ({operation_error}) and its exact \
+                         namespace disposition could not be reconciled ({reconcile_error})"
+                    )),
+                    capabilities: Box::new(UnverifiedHardLinkAliasCapabilities {
+                        owner: owner.into_unverified(),
+                        alias: alias.into_unverified(),
+                    }),
+                });
+            }
+        }
+    } else if let Err(error) = verify_alias_retirement(
+        &mut owner,
+        owner_parent,
+        &owner_name,
+        alias_parent,
+        &alias_name,
+        expected_after,
+    ) {
+        alias.0.binding = None;
+        return Err(MutationFailure::MutatedUnverified {
+            error,
+            capabilities: Box::new(UnverifiedHardLinkAliasCapabilities {
+                owner: owner.into_unverified(),
+                alias: alias.into_unverified(),
+            }),
+        });
+    }
+
+    drop(alias);
+    Ok(VerifiedMutation::new(
+        owner,
+        Arc::clone(&alias_parent.0.qualification),
+        [alias_parent.identity()],
+        [
+            NamespacePostcondition::present(owner_parent, &owner_name, expected_after),
+            NamespacePostcondition::absent(alias_parent, &alias_name),
         ],
     ))
 }
@@ -727,6 +1066,119 @@ fn preflight_move(
     )
 }
 
+fn preflight_hard_link(
+    source: &ObjectCapability,
+    source_parent: &DirectoryCapability,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+    policy: HardLinkPolicy,
+) -> io::Result<()> {
+    require_mutation_object(source, "hard-link alias creation")?;
+    require_mutation_parent(source_parent, "hard-link alias creation")?;
+    require_mutation_parent(target_parent, "hard-link alias creation")?;
+    require_shared_qualification(&source.0.qualification, &source_parent.0.qualification)?;
+    require_shared_qualification(
+        &source_parent.0.qualification,
+        &target_parent.0.qualification,
+    )?;
+    if source.kind() != ObjectKind::RegularFile {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hard-link alias creation requires a regular-file source",
+        ));
+    }
+    if policy.source_before() != source.info() || policy.source_before().link_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the hard-link policy does not match the certified source capability",
+        ));
+    }
+    let source_name = source.name().ok_or_else(binding_changed)?;
+    if !source.binding_matches(source_parent, source_name)
+        || (source_parent.identity() == target_parent.identity() && source_name == target_name)
+    {
+        return Err(binding_changed());
+    }
+    require_exact_policy_observation(refresh_verified(&source.0)?, policy.source_before())?;
+    refresh_verified(&source_parent.0)?;
+    refresh_verified(&target_parent.0)?;
+    ensure_same_volume(source.identity(), target_parent.identity())?;
+    let rebound = open_child_any(source_parent, source_name, CapabilityAccess::Inspect)?;
+    require_exact_policy_observation(rebound.info(), policy.source_before())?;
+    match try_open_child_any(target_parent, target_name, CapabilityAccess::Inspect)? {
+        None => Ok(()),
+        Some(target) if target.identity() == source.identity() => {
+            Err(alias_rejected("hard-link alias creation"))
+        }
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the hard-link alias destination already exists",
+        )),
+    }
+}
+
+enum HardLinkFailureDisposition {
+    NotMutated,
+    Linked,
+}
+
+fn reconcile_hard_link_failure(
+    source: &mut ObjectCapability,
+    source_parent: &DirectoryCapability,
+    source_name: &OsStr,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+    expected_before: ObjectInfo,
+    expected_after: ObjectInfo,
+) -> io::Result<HardLinkFailureDisposition> {
+    match try_open_child_any(target_parent, target_name, CapabilityAccess::Inspect)? {
+        None => {
+            let current = refresh_verified(&source.0)?;
+            require_exact_policy_observation(current, expected_before)?;
+            let rebound = open_child_any(source_parent, source_name, CapabilityAccess::Inspect)?;
+            require_exact_policy_observation(rebound.info(), expected_before)?;
+            source.0.info = current;
+            Ok(HardLinkFailureDisposition::NotMutated)
+        }
+        Some(alias) => {
+            require_identity(
+                &alias.0.info,
+                expected_before.identity,
+                ObjectKind::RegularFile,
+            )?;
+            verify_hard_link(
+                source,
+                source_parent,
+                source_name,
+                target_parent,
+                target_name,
+                expected_after,
+            )?;
+            Ok(HardLinkFailureDisposition::Linked)
+        }
+    }
+}
+
+fn verify_hard_link(
+    source: &mut ObjectCapability,
+    source_parent: &DirectoryCapability,
+    source_name: &OsStr,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+    expected_after: ObjectInfo,
+) -> io::Result<()> {
+    let current = refresh_verified(&source.0)?;
+    require_exact_policy_observation(current, expected_after)?;
+    let rebound = open_child_any(source_parent, source_name, CapabilityAccess::Inspect)?;
+    require_exact_policy_observation(rebound.info(), expected_after)?;
+    let alias = open_child_any(target_parent, target_name, CapabilityAccess::Inspect)?;
+    require_exact_policy_observation(alias.info(), expected_after)?;
+    refresh_verified(&source_parent.0)?;
+    refresh_verified(&target_parent.0)?;
+    source.0.info = current;
+    Ok(())
+}
+
 fn preflight_replace(
     source: &ObjectCapability,
     source_parent: &DirectoryCapability,
@@ -806,6 +1258,115 @@ fn preflight_replace(
     }
     require_identity(&rebound.0.info, target.identity(), target.kind())?;
     require_exact_policy_observation(rebound.info(), policy.target_before())?;
+    Ok(())
+}
+
+fn preflight_alias_retirement(
+    owner: &ObjectCapability,
+    owner_parent: &DirectoryCapability,
+    alias: &ObjectCapability,
+    alias_parent: &DirectoryCapability,
+    policy: HardLinkRetirementPolicy,
+) -> io::Result<()> {
+    require_mutation_object(owner, "hard-link alias retirement")?;
+    require_mutation_object(alias, "hard-link alias retirement")?;
+    require_mutation_parent(owner_parent, "hard-link alias retirement")?;
+    require_mutation_parent(alias_parent, "hard-link alias retirement")?;
+    require_shared_qualification(&owner.0.qualification, &owner_parent.0.qualification)?;
+    require_shared_qualification(&owner_parent.0.qualification, &alias_parent.0.qualification)?;
+    require_shared_qualification(&alias.0.qualification, &alias_parent.0.qualification)?;
+    if owner.kind() != ObjectKind::RegularFile
+        || alias.kind() != ObjectKind::RegularFile
+        || owner.identity() != alias.identity()
+        || owner.info() != alias.info()
+        || policy.linked_before() != owner.info()
+        || policy.linked_before().link_count != 2
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hard-link alias retirement requires two exact handles for one certified two-link \
+             regular file",
+        ));
+    }
+    let owner_name = owner.name().ok_or_else(binding_changed)?;
+    let alias_name = alias.name().ok_or_else(binding_changed)?;
+    if !owner.binding_matches(owner_parent, owner_name)
+        || !alias.binding_matches(alias_parent, alias_name)
+        || (owner_parent.identity() == alias_parent.identity() && owner_name == alias_name)
+    {
+        return Err(binding_changed());
+    }
+    require_exact_policy_observation(refresh_verified(&owner.0)?, policy.linked_before())?;
+    require_exact_policy_observation(refresh_verified(&alias.0)?, policy.linked_before())?;
+    require_exact_policy_observation(
+        open_child_any(owner_parent, owner_name, CapabilityAccess::Inspect)?.info(),
+        policy.linked_before(),
+    )?;
+    require_exact_policy_observation(
+        open_child_any(alias_parent, alias_name, CapabilityAccess::Inspect)?.info(),
+        policy.linked_before(),
+    )?;
+    refresh_verified(&owner_parent.0)?;
+    refresh_verified(&alias_parent.0)?;
+    Ok(())
+}
+
+enum AliasRetirementDisposition {
+    NotMutated,
+    Retired,
+}
+
+fn classify_alias_retirement(
+    owner: &mut ObjectCapability,
+    owner_parent: &DirectoryCapability,
+    owner_name: &OsStr,
+    alias_parent: &DirectoryCapability,
+    alias_name: &OsStr,
+    expected_before: ObjectInfo,
+    expected_after: ObjectInfo,
+) -> io::Result<AliasRetirementDisposition> {
+    match try_open_child_any(alias_parent, alias_name, CapabilityAccess::Inspect)? {
+        Some(alias) => {
+            require_exact_policy_observation(alias.info(), expected_before)?;
+            let current = refresh_verified(&owner.0)?;
+            require_exact_policy_observation(current, expected_before)?;
+            owner.0.info = current;
+            Ok(AliasRetirementDisposition::NotMutated)
+        }
+        None => {
+            verify_alias_retirement(
+                owner,
+                owner_parent,
+                owner_name,
+                alias_parent,
+                alias_name,
+                expected_after,
+            )?;
+            Ok(AliasRetirementDisposition::Retired)
+        }
+    }
+}
+
+fn verify_alias_retirement(
+    owner: &mut ObjectCapability,
+    owner_parent: &DirectoryCapability,
+    owner_name: &OsStr,
+    alias_parent: &DirectoryCapability,
+    alias_name: &OsStr,
+    expected_after: ObjectInfo,
+) -> io::Result<()> {
+    if try_open_child_any(alias_parent, alias_name, CapabilityAccess::Inspect)?.is_some() {
+        return Err(binding_changed());
+    }
+    let current = refresh_verified(&owner.0)?;
+    require_exact_policy_observation(current, expected_after)?;
+    require_exact_policy_observation(
+        open_child_any(owner_parent, owner_name, CapabilityAccess::Inspect)?.info(),
+        expected_after,
+    )?;
+    refresh_verified(&owner_parent.0)?;
+    refresh_verified(&alias_parent.0)?;
+    owner.0.info = current;
     Ok(())
 }
 
@@ -948,6 +1509,14 @@ fn create_directory_handle(
     parent: &DirectoryCapability,
     name: &OsStr,
 ) -> Result<File, CreateHandleFailure> {
+    create_object_handle(parent, name, ObjectKind::Directory)
+}
+
+fn create_object_handle(
+    parent: &DirectoryCapability,
+    name: &OsStr,
+    kind: ObjectKind,
+) -> Result<File, CreateHandleFailure> {
     let mut encoded = name.encode_wide().collect::<Vec<_>>();
     let byte_len = encoded
         .len()
@@ -974,6 +1543,11 @@ fn create_directory_handle(
     };
     let mut handle = INVALID_HANDLE_VALUE;
     let mut status_block = IO_STATUS_BLOCK::default();
+    let create_options = match kind {
+        ObjectKind::RegularFile => FILE_NON_DIRECTORY_FILE,
+        ObjectKind::Directory => FILE_DIRECTORY_FILE,
+    } | FILE_OPEN_REPARSE_POINT
+        | FILE_SYNCHRONOUS_IO_NONALERT;
     // SAFETY: all pointers refer to initialized repr(C) values that outlive the
     // synchronous call. The name is a validated direct component resolved only
     // relative to the exact parent handle. FILE_CREATE is atomic no-replace,
@@ -988,7 +1562,7 @@ fn create_directory_handle(
             FILE_ATTRIBUTE_NORMAL,
             SHARE_ALL,
             FILE_CREATE,
-            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            create_options,
             ptr::null(),
             0,
         )
@@ -1200,13 +1774,116 @@ fn rename_by_handle(
     }
 }
 
+fn link_by_handle(
+    source: &File,
+    target_parent: &DirectoryCapability,
+    target_name: &OsStr,
+) -> io::Result<()> {
+    let buffer = LinkBuffer::new(target_parent, target_name)?;
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: LinkBuffer owns an aligned initialized
+    // FILE_LINK_INFORMATION value and the complete UTF-16 direct-child name.
+    // Both exact handles remain live for the synchronous call.
+    let status = unsafe {
+        NtSetInformationFile(
+            raw_handle(source),
+            &mut status_block,
+            buffer.as_ptr(),
+            buffer.passed_len,
+            FileLinkInformationEx,
+        )
+    };
+    if status < 0 {
+        Err(map_link_error(ntstatus_to_io(status)))
+    } else {
+        Ok(())
+    }
+}
+
 const _: () = {
     assert!(align_of::<u64>() >= align_of::<FILE_RENAME_INFO>());
     assert!(
         size_of::<FILE_RENAME_INFO>() >= offset_of!(FILE_RENAME_INFO, FileName) + size_of::<u16>()
     );
     assert!(offset_of!(FILE_RENAME_INFO, FileName).is_multiple_of(align_of::<u16>()));
+    assert!(align_of::<u64>() >= align_of::<FILE_LINK_INFORMATION>());
+    assert!(
+        size_of::<FILE_LINK_INFORMATION>()
+            >= offset_of!(FILE_LINK_INFORMATION, FileName) + size_of::<u16>()
+    );
+    assert!(offset_of!(FILE_LINK_INFORMATION, FileName).is_multiple_of(align_of::<u16>()));
 };
+
+struct LinkBuffer {
+    storage: Vec<u64>,
+    passed_len: u32,
+}
+
+impl LinkBuffer {
+    fn new(target_parent: &DirectoryCapability, target_name: &OsStr) -> io::Result<Self> {
+        let encoded = target_name.encode_wide().collect::<Vec<_>>();
+        let name_bytes = encoded
+            .len()
+            .checked_mul(size_of::<u16>())
+            .ok_or_else(link_name_too_long)?;
+        let name_bytes_u32 = u32::try_from(name_bytes).map_err(|_| link_name_too_long())?;
+        let passed_len = size_of::<FILE_LINK_INFORMATION>()
+            .checked_add(name_bytes)
+            .ok_or_else(link_name_too_long)?;
+        let passed_len_u32 = u32::try_from(passed_len).map_err(|_| link_name_too_long())?;
+        let word_count = passed_len.div_ceil(size_of::<u64>());
+        let mut storage = vec![0_u64; word_count];
+        let info = storage.as_mut_ptr().cast::<FILE_LINK_INFORMATION>();
+        let file_name_offset = offset_of!(FILE_LINK_INFORMATION, FileName);
+
+        // SAFETY: Vec<u64> provides sufficient alignment; the generated
+        // structure layout and allocated length cover the complete fixed
+        // header plus every UTF-16 name byte.
+        unsafe {
+            (*info).Anonymous.Flags = FILE_LINK_POSIX_SEMANTICS;
+            (*info).RootDirectory = raw_handle(&target_parent.0.file);
+            (*info).FileNameLength = name_bytes_u32;
+            ptr::copy_nonoverlapping(
+                encoded.as_ptr(),
+                info.cast::<u8>().add(file_name_offset).cast::<u16>(),
+                encoded.len(),
+            );
+        }
+
+        Ok(Self {
+            storage,
+            passed_len: passed_len_u32,
+        })
+    }
+
+    fn as_ptr(&self) -> *const c_void {
+        self.storage.as_ptr().cast::<c_void>()
+    }
+
+    #[cfg(test)]
+    fn file_name_length(&self) -> u32 {
+        let info = self.storage.as_ptr().cast::<FILE_LINK_INFORMATION>();
+        // SAFETY: `storage` remains the aligned initialized link buffer.
+        unsafe { (*info).FileNameLength }
+    }
+
+    #[cfg(test)]
+    fn encoded_name(&self) -> Vec<u16> {
+        let info = self.storage.as_ptr().cast::<FILE_LINK_INFORMATION>();
+        let length = self.file_name_length() as usize / size_of::<u16>();
+        // SAFETY: `new` allocated and initialized FileNameLength bytes at the
+        // generated flexible-array offset.
+        unsafe {
+            std::slice::from_raw_parts(
+                info.cast::<u8>()
+                    .add(offset_of!(FILE_LINK_INFORMATION, FileName))
+                    .cast::<u16>(),
+                length,
+            )
+            .to_vec()
+        }
+    }
+}
 
 struct RenameBuffer {
     storage: Vec<u64>,
@@ -1378,6 +2055,13 @@ fn rename_name_too_long() -> io::Error {
     )
 }
 
+fn link_name_too_long() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "the direct child name exceeds the Windows hard-link API size limit",
+    )
+}
+
 fn ntstatus_to_io(status: i32) -> io::Error {
     // SAFETY: RtlNtStatusToDosError accepts every NTSTATUS and returns a Win32
     // error code without borrowing external memory.
@@ -1430,6 +2114,19 @@ fn map_create_error(error: io::Error) -> io::Error {
 }
 
 fn map_rename_error(error: io::Error) -> io::Error {
+    match error.raw_os_error().map(|code| code as u32) {
+        Some(ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS) => {
+            io::Error::new(io::ErrorKind::AlreadyExists, error)
+        }
+        Some(ERROR_NOT_SAME_DEVICE) => io::Error::new(io::ErrorKind::CrossesDevices, error),
+        Some(ERROR_CALL_NOT_IMPLEMENTED | ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED) => {
+            io::Error::new(io::ErrorKind::Unsupported, error)
+        }
+        _ => error,
+    }
+}
+
+fn map_link_error(error: io::Error) -> io::Error {
     match error.raw_os_error().map(|code| code as u32) {
         Some(ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS) => {
             io::Error::new(io::ErrorKind::AlreadyExists, error)
@@ -1590,6 +2287,23 @@ mod tests {
     }
 
     #[test]
+    fn link_buffer_uses_fixed_structure_plus_full_name_length() {
+        let directory = current_qualified_directory();
+        let name = OsStr::new("link-layout-λ");
+        let encoded = name.encode_wide().collect::<Vec<_>>();
+        let buffer = LinkBuffer::new(&directory, name).expect("link buffer");
+        assert_eq!(
+            buffer.passed_len as usize,
+            size_of::<FILE_LINK_INFORMATION>() + encoded.len() * size_of::<u16>()
+        );
+        assert_eq!(
+            buffer.file_name_length() as usize,
+            encoded.len() * size_of::<u16>()
+        );
+        assert_eq!(buffer.encoded_name(), encoded);
+    }
+
+    #[test]
     fn direct_name_validation_rejects_unpaired_utf16() {
         let name = OsString::from_wide(&[0xd800]);
         assert!(validate_direct_name(&name).is_err());
@@ -1639,6 +2353,63 @@ mod tests {
         delete_object(&destination_parent, child);
         delete_object(&root, source_parent.into_object());
         delete_object(&root, destination_parent.into_object());
+        drop(root);
+        fs::remove_dir(&root_path).expect("remove test root");
+    }
+
+    #[test]
+    fn native_regular_file_create_link_and_retire_round_trip() {
+        let root_path = unique_test_root("hard-link");
+        fs::create_dir(&root_path).expect("create test root");
+        let root = adopt_path(&root_path);
+
+        let created =
+            create_regular_file_nofollow(&root, OsStr::new("owner"), b"bootstrap authority\n")
+                .expect("create exact regular file");
+        let owner = sync_mutation_parents(created, &[&root])
+            .expect("sync regular-file parent")
+            .into_inner();
+        assert_eq!(owner.info().byte_len, 20);
+        assert_eq!(owner.info().link_count, 1);
+
+        let owner_before_link = owner.info();
+        let linked = create_hard_link_alias(
+            owner,
+            &root,
+            &root,
+            OsStr::new("alias"),
+            HardLinkPolicy::new(owner_before_link),
+        )
+        .expect("create exact hard-link alias");
+        let owner = sync_mutation_parents(linked, &[&root])
+            .expect("sync hard-link parent")
+            .into_inner();
+        assert_eq!(owner.info().link_count, 2);
+        let alias = open_child_nofollow(
+            &root,
+            OsStr::new("alias"),
+            ObjectKind::RegularFile,
+            CapabilityAccess::Mutation,
+        )
+        .expect("open exact alias");
+        assert_eq!(alias.info(), owner.info());
+
+        let linked_before_retirement = owner.info();
+        let retired = retire_hard_link_alias(
+            owner,
+            &root,
+            alias,
+            &root,
+            HardLinkRetirementPolicy::new(linked_before_retirement),
+        )
+        .expect("retire exact hard-link alias");
+        let owner = sync_mutation_parents(retired, &[&root])
+            .expect("sync alias-retirement parent")
+            .into_inner();
+        assert_eq!(owner.info().link_count, 1);
+        assert!(!root_path.join("alias").exists());
+
+        delete_object(&root, owner);
         drop(root);
         fs::remove_dir(&root_path).expect("remove test root");
     }
