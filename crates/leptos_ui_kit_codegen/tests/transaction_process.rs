@@ -495,6 +495,7 @@ fn setup_project(root: &Path) {
     fs::write(root.join("index.html"), INDEX_HTML).expect("write project index");
 }
 
+#[cfg(feature = "test-support")]
 fn transaction_workspace_paths(project: &Path) -> Vec<PathBuf> {
     let kit = project.join("src/components/ui/_kit/.transactions");
     let Ok(entries) = fs::read_dir(kit) else {
@@ -513,6 +514,7 @@ fn transaction_workspace_paths(project: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(feature = "test-support")]
 fn has_transaction_artifacts(project: &Path) -> bool {
     let kit = project.join("src/components/ui/_kit/.transactions");
     fs::read_dir(kit)
