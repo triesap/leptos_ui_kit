@@ -2410,7 +2410,7 @@ leptos_router = "0.9.0-alpha"
             &doctor,
             "transaction_recovery",
             DoctorCheckStatus::Fail,
-            "transaction journal",
+            "journal",
         );
         assert_eq!(fs::read(journal).expect("journal after doctor"), before);
     }
