@@ -31,10 +31,19 @@ struct ModuleDeclaration {
 }
 
 pub fn patch_components_mod(existing: Option<&str>) -> Result<String, CodegenError> {
+    patch_components_mod_at_path(existing, "src/components/mod.rs", "ui")
+}
+
+pub(crate) fn patch_components_mod_at_path(
+    existing: Option<&str>,
+    logical_path: &str,
+    ui_module_name: &str,
+) -> Result<String, CodegenError> {
+    validate_patch_identifier(ui_module_name, "UI module name", Path::new(logical_path))?;
     patch_module_file(
         existing.unwrap_or_default(),
-        "src/components/mod.rs",
-        &["ui"],
+        logical_path,
+        &[ui_module_name],
         &[],
     )
 }
@@ -43,7 +52,14 @@ pub fn patch_ui_mod(
     existing: Option<&str>,
     exports: &[UiModuleExport],
 ) -> Result<String, CodegenError> {
-    let logical_path = "src/components/ui/mod.rs";
+    patch_ui_mod_at_path(existing, exports, "src/components/ui/mod.rs")
+}
+
+pub(crate) fn patch_ui_mod_at_path(
+    existing: Option<&str>,
+    exports: &[UiModuleExport],
+    logical_path: &str,
+) -> Result<String, CodegenError> {
     for export in exports {
         validate_patch_identifier(&export.module, "UI module name", Path::new(logical_path))?;
         validate_module_path(&export.path, "UI export path", Path::new(logical_path))?;

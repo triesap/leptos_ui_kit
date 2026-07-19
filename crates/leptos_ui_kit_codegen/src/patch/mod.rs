@@ -10,6 +10,7 @@ pub use css::{
 };
 pub(crate) use html::plan_index_html;
 pub use module::{patch_components_mod, patch_ui_mod};
+pub(crate) use module::{patch_components_mod_at_path, patch_ui_mod_at_path};
 
 use std::path::PathBuf;
 

@@ -11,7 +11,7 @@ use leptos_ui_kit_registry::{
 };
 
 use super::{
-    KitConfigWriter, built_in_item_id, plan_init_with_context, plan_sync_from_config,
+    KitConfigWriter, built_in_item_id, plan_add_prerequisites_with_context, plan_sync_from_config,
     planned_or_existing_kit_config_content, prepare_kit_config_write, upsert_planned_file,
 };
 use crate::path_safety::PlanningContext;
@@ -45,7 +45,8 @@ pub(crate) fn plan_add_with_context(
     let item_id = built_in_item_id(&item.item.name);
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
-    let init_plan = plan_init_with_context(context, project_root, kit_config_to_canonical_json)?;
+    let init_plan =
+        plan_add_prerequisites_with_context(context, project_root, kit_config_to_canonical_json)?;
     let existing_config_content =
         planned_or_existing_kit_config_content(context, &init_plan.files)?;
     let config = parse_kit_json_str(&existing_config_content)?;

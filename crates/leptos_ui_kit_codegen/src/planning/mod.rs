@@ -9,6 +9,7 @@ pub use add::plan_add;
 pub(crate) use add::plan_add_with_config_writer;
 pub(crate) use add::plan_add_with_context;
 pub(crate) use files::*;
+pub(crate) use init::plan_add_prerequisites_with_context;
 pub use init::plan_init;
 #[cfg(test)]
 pub(crate) use init::plan_init_with_config_provider;

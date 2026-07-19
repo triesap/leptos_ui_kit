@@ -1224,13 +1224,27 @@ fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        DEFAULT_KIT_CONFIG_PATH | DEFAULT_KIT_LOCK_PATH | "index.html" | "src/components/mod.rs"
+        DEFAULT_KIT_CONFIG_PATH | DEFAULT_KIT_LOCK_PATH | "index.html"
     ) || is_allowed_stylesheet_path(path)
-        || path.starts_with("src/components/ui/")
+        || is_allowed_component_rust_path(path)
 }
 
 fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
+}
+
+fn is_allowed_component_rust_path(path: &str) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments.len() < 3
+        || segments.first() != Some(&"src")
+        || segments.contains(&"_kit")
+        || !segments
+            .last()
+            .is_some_and(|file_name| file_name.ends_with(".rs"))
+    {
+        return false;
+    }
+    segments.len() > 3 || segments.last() == Some(&"mod.rs")
 }
 
 #[cfg(test)]

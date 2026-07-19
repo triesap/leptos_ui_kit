@@ -386,6 +386,136 @@ fn add_plan_uses_configured_stylesheet_path() {
 }
 
 #[test]
+fn custom_components_root_add_and_sync_use_only_configured_source_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    let mut config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+    config.install.ui_dir = "src/widgets/kit_ui".to_owned();
+    config.install.ui_mod = "src/widgets/kit_ui/mod.rs".to_owned();
+    config.install.components_mod = "src/widgets/mod.rs".to_owned();
+    config.styles.css = "styles/custom.css".to_owned();
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize custom config"),
+    );
+
+    let added = apply_add(root, "button").expect("add button at custom root");
+
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/button.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/spinner.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/mod.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/mod.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .all(|file| !file.path.starts_with("src/components/") || file.path.contains("/_kit/"))
+    );
+    for path in ["src/widgets/mod.rs", "src/widgets/kit_ui/mod.rs"] {
+        assert_eq!(
+            added
+                .changes
+                .iter()
+                .find(|change| change.path == path)
+                .expect("module change")
+                .kind,
+            ChangeKind::CreateFile
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("src/widgets/mod.rs")).expect("read components module"),
+        "pub mod kit_ui;\n"
+    );
+    let ui_mod =
+        fs::read_to_string(root.join("src/widgets/kit_ui/mod.rs")).expect("read UI module");
+    assert!(ui_mod.contains("pub mod button;"));
+    assert!(ui_mod.contains("pub mod spinner;"));
+    assert_eq!(
+        added.lock.files_by_path.get("src/widgets/kit_ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+    let button_path = root.join("src/widgets/kit_ui/button.rs");
+    let button_before = fs::read(&button_path).expect("read custom button");
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut retained =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read custom config"))
+            .expect("parse custom config");
+    retained.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&retained).expect("serialize retained config"),
+    );
+    let synced = apply_sync(root).expect("sync custom root");
+
+    assert!(!synced.lock.items.contains_key("builtin:button"));
+    assert!(
+        !synced
+            .lock
+            .files_by_path
+            .contains_key("src/widgets/kit_ui/button.rs")
+    );
+    assert_eq!(
+        fs::read(&button_path).expect("read retained custom button"),
+        button_before
+    );
+    assert!(apply_sync(root).expect("idempotent custom sync").is_empty());
+    let readopt = plan_add(root, "button").expect("plan exact custom-source re-adoption");
+    assert!(
+        readopt
+            .files
+            .iter()
+            .all(|file| file.path != "src/widgets/kit_ui/button.rs")
+    );
+    assert_eq!(
+        readopt
+            .lock
+            .files_by_path
+            .get("src/widgets/kit_ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+
+    fs::write(
+        &button_path,
+        format!(
+            "{}\n// application customization\n",
+            String::from_utf8(button_before).expect("button source is UTF-8")
+        ),
+    )
+    .expect("customize retired button");
+    let before_conflict = snapshot_project_files(root);
+    let error = plan_add(root, "button").expect_err("modified custom source must conflict");
+    assert_sync_unsafe_patch_path(
+        "custom source re-adoption",
+        error,
+        "src/widgets/kit_ui/button.rs",
+    );
+    assert_eq!(snapshot_project_files(root), before_conflict);
+}
+
+#[test]
 fn item_planner_supports_nested_ui_targets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -445,7 +575,7 @@ fn item_planner_supports_nested_ui_targets() {
 }
 
 #[test]
-fn add_tokens_updates_only_css_config_and_lock() {
+fn fresh_add_tokens_creates_only_foundation_integration_and_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -454,10 +584,6 @@ fn add_tokens_updates_only_css_config_and_lock() {
         "<html><head></head><body></body></html>\n",
     )
     .expect("write index");
-    apply_init(root).expect("init");
-    let components_mod =
-        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod");
-    let ui_mod = fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod");
 
     let plan = plan_add(root, "tokens").expect("plan tokens");
     let paths = plan
@@ -469,21 +595,20 @@ fn add_tokens_updates_only_css_config_and_lock() {
     assert!(paths.contains(&DEFAULT_KIT_CONFIG_PATH));
     assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
     assert!(paths.contains(&"styles/kit.css"));
+    assert!(paths.contains(&"index.html"));
+    assert_eq!(paths.len(), 4);
     assert!(!paths.contains(&"src/components/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/tokens.rs"));
     assert!(plan.lock.items["builtin:tokens"].files.is_empty());
     assert_eq!(plan.lock.items["builtin:tokens"].style_blocks.len(), 1);
+    assert!(plan.lock.files_by_path.is_empty());
+    assert_eq!(plan.lock.style_blocks_by_id.len(), 1);
 
     apply_add(root, "tokens").expect("apply tokens");
-    assert_eq!(
-        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod"),
-        components_mod
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod"),
-        ui_mod
-    );
+    assert!(!root.join("src/components/mod.rs").exists());
+    assert!(!root.join("src/components/ui/mod.rs").exists());
+    assert!(!root.join("src/components/ui/tokens.rs").exists());
     assert!(
         fs::read_to_string(root.join("styles/kit.css"))
             .expect("read css")
@@ -769,10 +894,20 @@ fn public_sync_converges_to_exact_empty_state_without_deleting_source() {
     setup_empty_project(root);
     apply_init(root).expect("init");
     apply_add(root, "button").expect("add button");
-    let button_path = root.join("src/components/ui/button.rs");
-    let ui_mod_path = root.join("src/components/ui/mod.rs");
-    let button_before = fs::read(&button_path).expect("read button source");
-    let ui_mod_before = fs::read(&ui_mod_path).expect("read UI module");
+    let protected = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ]
+    .into_iter()
+    .map(|path| {
+        (
+            path.to_owned(),
+            fs::read(root.join(path)).expect("read app-owned source"),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
 
     let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
     let mut config =
@@ -789,14 +924,12 @@ fn public_sync_converges_to_exact_empty_state_without_deleting_source() {
     assert!(first.lock.items.is_empty());
     assert!(first.lock.files_by_path.is_empty());
     assert!(first.lock.style_blocks_by_id.is_empty());
-    assert_eq!(
-        fs::read(&button_path).expect("read retained button"),
-        button_before
-    );
-    assert_eq!(
-        fs::read(&ui_mod_path).expect("read retained UI module"),
-        ui_mod_before
-    );
+    for (path, expected) in protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read retained app-owned source"),
+            expected
+        );
+    }
     let css = fs::read_to_string(root.join("styles/kit.css")).expect("read empty stylesheet");
     assert!(!css.contains("leptos-ui-kit:start"));
     assert!(root.join("styles/kit.css").is_file());
@@ -851,6 +984,91 @@ fn public_sync_conflicts_are_atomic_for_retired_css_and_module_wiring() {
 
     assert_sync_unsafe_patch_path("private module", module_error, "src/components/ui/mod.rs");
     assert_eq!(snapshot_project_files(module_root), module_before);
+}
+
+#[test]
+fn independent_family_retention_and_multi_item_retirement_fault_are_atomic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    apply_add(root, "dialog").expect("add dialog");
+    let installed_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+    )
+    .expect("parse installed lock");
+    let dialog_item = installed_lock.items["builtin:dialog"].clone();
+    let dialog_files = dialog_item
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                fs::read(root.join(&file.path)).expect("read dialog source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let installed_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read installed stylesheet");
+    let dialog_css = extract_managed_css_block_at_path(&installed_css, "styles/kit.css", "dialog")
+        .expect("inspect dialog block")
+        .expect("dialog block");
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut retained =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    retained.items = vec![desired_builtin_dialog_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&retained).expect("serialize retained family config"),
+    );
+
+    let retained_plan = apply_sync(root).expect("retain independent dialog family");
+
+    assert!(!retained_plan.lock.items.contains_key("builtin:button"));
+    assert!(!retained_plan.lock.items.contains_key("builtin:spinner"));
+    assert_eq!(
+        retained_plan.lock.items["builtin:dialog"], dialog_item,
+        "retained family lock ownership must not drift"
+    );
+    for (path, expected) in dialog_files {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read retained dialog source"),
+            expected
+        );
+    }
+    let retained_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read retained stylesheet");
+    assert_eq!(
+        extract_managed_css_block_at_path(&retained_css, "styles/kit.css", "dialog")
+            .expect("inspect retained dialog")
+            .expect("retained dialog block"),
+        dialog_css
+    );
+
+    let mut empty =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read retained config"))
+            .expect("parse retained config");
+    empty.items.clear();
+    write_kit_config(
+        root,
+        kit_config_to_json(&empty).expect("serialize empty config"),
+    );
+    let plan = plan_sync(root).expect("plan multi-item retirement");
+    assert!(plan.lock.items.is_empty());
+    let before = snapshot_project_files(root);
+
+    apply_planned_files_with_snapshot(
+        root,
+        &plan.files,
+        &plan.changes,
+        &plan.snapshot,
+        Arc::new(FaultFs::fail_nth(FsOperation::ReplaceExisting, 1)),
+    )
+    .expect_err("retirement fault must roll back the complete cohort");
+
+    assert_eq!(snapshot_project_files(root), before);
 }
 
 #[test]
@@ -3090,6 +3308,9 @@ fn path_safety_accepts_mvp_paths() {
         "src/components/mod.rs".to_owned(),
         "src/components/ui/button.rs".to_owned(),
         "src/components/ui/nested/root.rs".to_owned(),
+        "src/widgets/mod.rs".to_owned(),
+        "src/widgets/kit_ui/mod.rs".to_owned(),
+        "src/widgets/kit_ui/button.rs".to_owned(),
         DEFAULT_KIT_LOCK_PATH.to_owned(),
     ];
 
@@ -3107,6 +3328,8 @@ fn path_safety_rejects_unsafe_paths() {
         "src/components/ui/../../evil.rs",
         "src/components/ui/Button Rs",
         "src/lib.rs",
+        "src/widgets/button.rs",
+        "src/widgets/_kit/button.rs",
     ] {
         assert!(validate_logical_write_path(path).is_err(), "{path}");
     }

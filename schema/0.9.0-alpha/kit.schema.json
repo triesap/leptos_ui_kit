@@ -114,13 +114,19 @@
       ],
       "properties": {
         "uiDir": {
-          "const": "src/components/ui"
+          "type": "string",
+          "default": "src/components/ui",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+[A-Za-z_][A-Za-z0-9_]*$"
         },
         "uiMod": {
-          "const": "src/components/ui/mod.rs"
+          "type": "string",
+          "default": "src/components/ui/mod.rs",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/){2,}mod\\.rs$"
         },
         "componentsMod": {
-          "const": "src/components/mod.rs"
+          "type": "string",
+          "default": "src/components/mod.rs",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+mod\\.rs$"
         }
       }
     },

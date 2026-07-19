@@ -126,6 +126,7 @@ impl KitConfig {
         self.leptos.validate()?;
         self.install.validate()?;
         self.styles.validate()?;
+        validate_distinct_file_targets(self)?;
         self.registry.validate()?;
         validate_desired_items(&self.items)?;
         Ok(())
@@ -223,13 +224,56 @@ pub struct InstallConfig {
 
 impl InstallConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        expect_path("install.uiDir", "src/components/ui", &self.ui_dir)?;
-        expect_path("install.uiMod", "src/components/ui/mod.rs", &self.ui_mod)?;
-        expect_path(
-            "install.componentsMod",
-            "src/components/mod.rs",
-            &self.components_mod,
-        )
+        validate_safe_rust_module_dir("install.uiDir", &self.ui_dir, 3)?;
+        validate_safe_relative_path("install.uiMod", &self.ui_mod)?;
+        let expected_ui_mod = format!("{}/mod.rs", self.ui_dir);
+        if self.ui_mod != expected_ui_mod {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiMod",
+                expected: "install.uiDir followed by /mod.rs",
+                actual: self.ui_mod.clone(),
+            });
+        }
+
+        validate_safe_relative_path("install.componentsMod", &self.components_mod)?;
+        let Some(components_root) = self.components_mod.strip_suffix("/mod.rs") else {
+            return Err(ConfigError::InvalidValue {
+                field: "install.componentsMod",
+                expected: "a components-root path under src/ followed by /mod.rs",
+                actual: self.components_mod.clone(),
+            });
+        };
+        validate_safe_rust_module_dir("install.componentsMod", components_root, 2)?;
+
+        let Some((ui_parent, _)) = self.ui_dir.rsplit_once('/') else {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiDir",
+                expected: "a direct child of the configured components root",
+                actual: self.ui_dir.clone(),
+            });
+        };
+        if ui_parent != components_root {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiDir",
+                expected: "a direct child of the configured components root",
+                actual: self.ui_dir.clone(),
+            });
+        }
+
+        let folded_ui_dir = self.ui_dir.to_ascii_lowercase();
+        let folded_kit_dir = DEFAULT_KIT_DIR.to_ascii_lowercase();
+        if folded_ui_dir == folded_kit_dir
+            || folded_ui_dir
+                .strip_prefix(&folded_kit_dir)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            return Err(ConfigError::PathOverlap {
+                field: "install.uiDir",
+                value: self.ui_dir.clone(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -727,6 +771,124 @@ fn validate_safe_relative_path(field: &'static str, value: &str) -> Result<(), C
     Ok(())
 }
 
+fn validate_safe_rust_module_dir(
+    field: &'static str,
+    value: &str,
+    minimum_segments: usize,
+) -> Result<(), ConfigError> {
+    validate_safe_relative_path(field, value)?;
+    let segments = value.split('/').collect::<Vec<_>>();
+    if segments.len() < minimum_segments || segments.first() != Some(&"src") {
+        return Err(ConfigError::InvalidValue {
+            field,
+            expected: "a safe Rust module directory under src/",
+            actual: value.to_owned(),
+        });
+    }
+    for segment in segments.iter().skip(1) {
+        if !is_rust_module_identifier(segment) || *segment == "_kit" {
+            return Err(ConfigError::UnsafePathSegment {
+                field,
+                value: value.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_rust_module_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return false;
+    }
+    !matches!(
+        value,
+        "Self"
+            | "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "box"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "union"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
+}
+
+fn validate_distinct_file_targets(config: &KitConfig) -> Result<(), ConfigError> {
+    const KIT_LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+    let targets = [
+        ("install.uiMod", config.install.ui_mod.as_str()),
+        (
+            "install.componentsMod",
+            config.install.components_mod.as_str(),
+        ),
+        ("styles.css", config.styles.css.as_str()),
+        ("project.indexHtml", config.project.index_html.as_str()),
+        ("kit.config", DEFAULT_KIT_CONFIG_PATH),
+        ("kit.lock", KIT_LOCK_PATH),
+    ];
+    let mut seen = BTreeSet::new();
+    for (field, value) in targets {
+        if !seen.insert(value.to_ascii_lowercase()) {
+            return Err(ConfigError::PathOverlap {
+                field,
+                value: value.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn join_checked(
     project_root: &Path,
     relative: &str,
@@ -1087,5 +1249,107 @@ mod tests {
             normalized.install_roots.css_file,
             PathBuf::from("/workspace/demo/styles/kit.css")
         );
+    }
+
+    #[test]
+    fn accepts_and_normalizes_a_coherent_custom_components_root() {
+        let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        config.install = InstallConfig {
+            ui_dir: "src/widgets/kit_ui".to_owned(),
+            ui_mod: "src/widgets/kit_ui/mod.rs".to_owned(),
+            components_mod: "src/widgets/mod.rs".to_owned(),
+        };
+        let serialized = kit_config_to_json(&config).expect("serialize custom root");
+        let parsed = parse_kit_json_str(&serialized).expect("parse custom root");
+        let normalized = normalize_single_crate_project(
+            &parsed,
+            &NormalizeOptions {
+                project_root: PathBuf::from("/workspace/demo"),
+            },
+        )
+        .expect("normalize custom root");
+
+        assert_eq!(
+            normalized.install_roots.components_mod,
+            PathBuf::from("/workspace/demo/src/widgets/mod.rs")
+        );
+        assert_eq!(
+            normalized.install_roots.ui_dir,
+            PathBuf::from("/workspace/demo/src/widgets/kit_ui")
+        );
+        assert_eq!(
+            normalized.install_roots.ui_mod,
+            PathBuf::from("/workspace/demo/src/widgets/kit_ui/mod.rs")
+        );
+    }
+
+    #[test]
+    fn rejects_incoherent_or_unsafe_custom_components_roots() {
+        let cases = [
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/kit_ui".to_owned(),
+                    ui_mod: "src/widgets/other/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiMod",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/Widgets/kit_ui".to_owned(),
+                    ui_mod: "src/widgets/kit_ui/mod.rs".to_owned(),
+                    components_mod: "src/Widgets/mod.rs".to_owned(),
+                },
+                "install.uiMod",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/other/kit_ui".to_owned(),
+                    ui_mod: "src/other/kit_ui/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/ui-kit".to_owned(),
+                    ui_mod: "src/widgets/ui-kit/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/type".to_owned(),
+                    ui_mod: "src/widgets/type/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/components/ui/_kit".to_owned(),
+                    ui_mod: "src/components/ui/_kit/mod.rs".to_owned(),
+                    components_mod: "src/components/ui/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+        ];
+
+        for (install, expected_field) in cases {
+            let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+            config.install = install;
+            let error = config.validate().expect_err("unsafe custom root must fail");
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::InvalidValue { field, .. }
+                        | ConfigError::UnsafePathSegment { field, .. }
+                        | ConfigError::PathOverlap { field, .. }
+                        if field == expected_field
+                ),
+                "unexpected error for {expected_field}: {error}"
+            );
+        }
     }
 }

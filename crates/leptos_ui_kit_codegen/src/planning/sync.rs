@@ -16,13 +16,15 @@ use super::{
     upsert_planned_install_lock, upsert_preloaded_planned_file,
 };
 use crate::digest::hash_bytes;
-use crate::patch::{ManagedCssRetirement, reconcile_managed_css_blocks_with_retirements_at_path};
+use crate::patch::{
+    ManagedCssRetirement, patch_components_mod_at_path, patch_ui_mod_at_path,
+    reconcile_managed_css_blocks_with_retirements_at_path,
+};
 use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, InstallLock, InstalledFile, InstalledItem,
     InstalledStyleBlock, ManagedCssBlockRole, ManagedCssDependency, ManagedCssOperation,
-    PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, patch_components_mod,
-    patch_ui_mod, validate_planned_write_paths,
+    PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, validate_planned_write_paths,
 };
 
 #[derive(Debug, Clone)]
@@ -417,7 +419,7 @@ pub(crate) fn plan_built_in_item(
 
     for ui_file in &item.targets.ui_files {
         let generated = read_built_in_registry_source(&ui_file.source)?;
-        let logical_path = format!("src/components/ui/{}", ui_file.path);
+        let logical_path = format!("{}/{}", config.install.ui_dir, ui_file.path);
         let generated_hash = hash_bytes(generated.as_bytes());
 
         plan_generated_source_file(
@@ -443,27 +445,53 @@ pub(crate) fn plan_built_in_item(
     }
 
     if !item.targets.ui_files.is_empty() {
-        let components_mod = planned_or_existing_content(files, context, "src/components/mod.rs")?;
-        let patched_components_mod = patch_components_mod(components_mod.as_deref())?;
+        let components_mod_path = config.install.components_mod.as_str();
+        let ui_mod_path = config.install.ui_mod.as_str();
+        let ui_module_name = config
+            .install
+            .ui_dir
+            .rsplit('/')
+            .next()
+            .expect("validated UI directory has a final segment");
+        let components_mod = planned_or_existing_content(files, context, components_mod_path)?;
+        let components_mod_change = if components_mod.is_some() {
+            ChangeKind::UpdateFile
+        } else {
+            ChangeKind::CreateFile
+        };
+        let patched_components_mod = patch_components_mod_at_path(
+            components_mod.as_deref(),
+            components_mod_path,
+            ui_module_name,
+        )?;
         upsert_planned_file(
             context,
             files,
             changes,
-            "src/components/mod.rs",
+            components_mod_path,
             patched_components_mod,
-            ChangeKind::UpdateFile,
+            components_mod_change,
             Some(&item_id),
         )?;
 
-        let ui_mod = planned_or_existing_content(files, context, "src/components/ui/mod.rs")?;
-        let patched_ui_mod = patch_ui_mod(ui_mod.as_deref(), &ui_exports_for_item(&item.item)?)?;
+        let ui_mod = planned_or_existing_content(files, context, ui_mod_path)?;
+        let ui_mod_change = if ui_mod.is_some() {
+            ChangeKind::UpdateFile
+        } else {
+            ChangeKind::CreateFile
+        };
+        let patched_ui_mod = patch_ui_mod_at_path(
+            ui_mod.as_deref(),
+            &ui_exports_for_item(&item.item)?,
+            ui_mod_path,
+        )?;
         upsert_planned_file(
             context,
             files,
             changes,
-            "src/components/ui/mod.rs",
+            ui_mod_path,
             patched_ui_mod,
-            ChangeKind::UpdateFile,
+            ui_mod_change,
             Some(&item_id),
         )?;
     }

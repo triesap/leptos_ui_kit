@@ -579,10 +579,14 @@ fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<
     }
 
     if plan.is_empty() {
-        return Ok(format!("add {}: no changes planned", plan.item_name));
+        return Ok(format!(
+            "add {}: {}",
+            plan.item_name,
+            unchanged_label(status)
+        ));
     }
 
-    let mut output = format!("add {} planned changes:", plan.item_name);
+    let mut output = format!("add {} {} changes:", plan.item_name, change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -601,10 +605,10 @@ fn render_sync_plan(plan: &SyncPlan, json: bool, status: CommandStatus) -> Resul
     }
 
     if plan.is_empty() {
-        return Ok("sync: no changes planned".to_owned());
+        return Ok(format!("sync: {}", unchanged_label(status)));
     }
 
-    let mut output = "sync planned changes:".to_owned();
+    let mut output = format!("sync {} changes:", change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -655,14 +659,34 @@ fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Resul
     }
 
     if plan.is_empty() {
-        return Ok("init: no changes planned".to_owned());
+        return Ok(format!("init: {}", unchanged_label(status)));
     }
 
-    let mut output = String::from("init planned changes:");
+    let mut output = format!("init {} changes:", change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
     Ok(output)
+}
+
+fn change_verb(status: CommandStatus) -> &'static str {
+    match status {
+        CommandStatus::Planned => "planned",
+        CommandStatus::Success => "applied",
+        CommandStatus::NoChange => "unchanged",
+        CommandStatus::Warning
+        | CommandStatus::Error
+        | CommandStatus::Conflict
+        | CommandStatus::Unsupported => "reported",
+    }
+}
+
+fn unchanged_label(status: CommandStatus) -> &'static str {
+    if status == CommandStatus::Planned {
+        "no changes planned"
+    } else {
+        "unchanged"
+    }
 }
 
 fn render_version_output(json: bool) -> Result<String, String> {
@@ -2019,7 +2043,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "add" => vec![
             "usage: leptos_ui_kit add <item> [--dry-run] [--json]",
             "",
-            "Adds a built-in registry item and updates src/components/ui/_kit/kit.json, src/components/ui/_kit/kit.lock.json, generated source, and CSS.",
+            "Adds a built-in item to desired state and creates only its required source and CSS.",
         ],
         "doctor" => vec![
             "usage: leptos_ui_kit doctor [--strict] [--check] [--trunk-build] [--json]",
@@ -2039,7 +2063,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "sync" => vec![
             "usage: leptos_ui_kit sync [--dry-run] [--json]",
             "",
-            "Reconciles installed source, CSS, and src/components/ui/_kit/kit.lock.json with src/components/ui/_kit/kit.json.",
+            "Reconciles lock metadata and managed CSS with desired items while retaining app-owned Rust and module files.",
         ],
         "view" => vec![
             "usage: leptos_ui_kit view <item> [--source] [--json]",
@@ -2442,6 +2466,43 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn sync_to_empty_retains_app_source_and_passes_strict_doctor() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let button_path = root.join("src/components/ui/button.rs");
+        let module_path = root.join("src/components/ui/mod.rs");
+        let button_before = fs::read(&button_path).expect("read button source");
+        let module_before = fs::read(&module_path).expect("read UI module");
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read config"))
+                .expect("parse config");
+        config.items.clear();
+        fs::write(
+            &config_path,
+            kit_config_to_json(&config).expect("serialize empty config"),
+        )
+        .expect("write empty config");
+
+        let first = apply_sync(root).expect("sync to empty");
+
+        assert!(first.lock.items.is_empty());
+        assert!(first.lock.files_by_path.is_empty());
+        assert!(first.lock.style_blocks_by_id.is_empty());
+        assert_eq!(
+            fs::read(&button_path).expect("read retained button"),
+            button_before
+        );
+        assert_eq!(
+            fs::read(&module_path).expect("read retained UI module"),
+            module_before
+        );
+        assert_strict_doctor_success(root);
+        assert!(apply_sync(root).expect("idempotent empty sync").is_empty());
+    }
+
+    #[test]
     fn doctor_surfaces_pending_or_invalid_transaction_recovery_state() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path();
@@ -2630,7 +2691,6 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
             "<html><head></head><body></body></html>\n",
         )
         .expect("write index");
-        run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("tokens")], root).expect("run add tokens");
 
         let doctor = build_doctor_output(root, true, false, false);
@@ -2641,6 +2701,74 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
         assert!(output.contains("built-in registry runtime health is valid"));
         assert!(!output.contains("\"name\": \"dependency.leptos_router\""));
         assert!(!output.contains("\"name\": \"dependency.registry."));
+        assert!(!root.join("src/components/mod.rs").exists());
+        assert!(!root.join("src/components/ui/mod.rs").exists());
+        assert!(!root.join("src/components/ui/tokens.rs").exists());
+    }
+
+    #[test]
+    fn custom_components_root_converges_and_passes_strict_doctor() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        let mut config = canonical_kit_config().expect("canonical config");
+        config.install.ui_dir = "src/widgets/kit_ui".to_owned();
+        config.install.ui_mod = "src/widgets/kit_ui/mod.rs".to_owned();
+        config.install.components_mod = "src/widgets/mod.rs".to_owned();
+        config.styles.css = "styles/custom.css".to_owned();
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        fs::write(
+            &config_path,
+            kit_config_to_json(&config).expect("serialize custom config"),
+        )
+        .expect("write custom config");
+
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run custom add");
+        assert!(root.join("src/widgets/kit_ui/button.rs").is_file());
+        assert!(root.join("src/widgets/kit_ui/spinner.rs").is_file());
+        assert!(root.join("src/widgets/kit_ui/mod.rs").is_file());
+        assert!(root.join("src/widgets/mod.rs").is_file());
+        assert!(!root.join("src/components/ui/button.rs").exists());
+        assert_strict_doctor_success(root);
+
+        let button_path = root.join("src/widgets/kit_ui/button.rs");
+        let button_before = fs::read(&button_path).expect("read custom button");
+        let mut retained =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read custom config"))
+                .expect("parse custom config");
+        retained.items = vec![desired_builtin_spinner_item()];
+        fs::write(
+            &config_path,
+            kit_config_to_json(&retained).expect("serialize retained config"),
+        )
+        .expect("write retained config");
+
+        run(vec![OsString::from("sync")], root).expect("run custom sync");
+        assert_eq!(
+            fs::read(&button_path).expect("read retained custom button"),
+            button_before
+        );
+        assert_strict_doctor_success(root);
+        assert!(apply_sync(root).expect("idempotent custom sync").is_empty());
     }
 
     #[test]
@@ -3555,6 +3683,17 @@ leptos_router = "0.9.0-alpha"
             12
         );
         assert_eq!(exit_code_for_error("failed to inspect project"), 1);
+    }
+
+    #[test]
+    fn human_change_wording_distinguishes_planned_applied_and_unchanged() {
+        assert_eq!(change_verb(CommandStatus::Planned), "planned");
+        assert_eq!(change_verb(CommandStatus::Success), "applied");
+        assert_eq!(
+            unchanged_label(CommandStatus::Planned),
+            "no changes planned"
+        );
+        assert_eq!(unchanged_label(CommandStatus::NoChange), "unchanged");
     }
 
     #[test]
