@@ -3551,6 +3551,78 @@ fn atomic_write_preserves_the_persistent_advisory_lock() {
 }
 
 #[test]
+fn successful_single_file_transaction_bounds_strict_exact_reads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let logical_path = "styles/kit.css";
+    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
+    let files = vec![PlannedFile {
+        path: logical_path.to_owned(),
+        action: PlannedFileAction::Create,
+        content: ":root {}\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::CreateFile,
+        logical_path,
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+        .expect("apply single-file transaction");
+
+    let events = fault_fs.events();
+    let exact_reads = events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
+        .count();
+    let exact_byte_reads = events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileBytesExact)
+        .count();
+    let journal_record_hash_reads = events
+        .iter()
+        .filter(|event| {
+            event.operation == FsOperation::ReadRegularFileExact
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("transaction-v2-")
+                            && (name.ends_with(".json") || name.ends_with(".json.partial"))
+                    })
+        })
+        .count();
+    let mut reads_by_path = BTreeMap::<PathBuf, usize>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
+    {
+        *reads_by_path.entry(event.path.clone()).or_default() += 1;
+    }
+    let mut reads_by_path = reads_by_path.into_iter().collect::<Vec<_>>();
+    reads_by_path.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    assert!(
+        journal_record_hash_reads <= 44,
+        "journal lineage hash-and-validate reads exceeded the bounded budget: \
+         {journal_record_hash_reads}"
+    );
+    assert!(
+        exact_reads <= 1_200,
+        "strict hash-and-validate reads exceeded the diagnostic ceiling: {exact_reads}; \
+         exact byte rereads: {exact_byte_reads}; hottest paths: {:?}",
+        &reads_by_path[..reads_by_path.len().min(20)]
+    );
+    assert!(
+        (1..=1_650).contains(&exact_byte_reads),
+        "cached exact byte revalidation count was outside its bounded budget: \
+         {exact_byte_reads}"
+    );
+}
+
+#[test]
 fn advisory_write_lock_uses_exact_format_and_preserves_debug_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

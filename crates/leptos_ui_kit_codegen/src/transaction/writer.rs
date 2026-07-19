@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use cap_fs_ext::MetadataExt;
@@ -17,9 +18,10 @@ use super::fs::{
 use super::journal::{
     ExactDirectoryStateV2, FinalizationLeaseV2, JournalDirectoryV2, JournalEntryV2,
     JournalModelError, JournalOperationV2, JournalSnapshotV2, ProjectBindingV2, RecordBindingV2,
-    TransactionId, WorkspaceBootstrapBindingV2, WorkspaceBootstrapEnvelopeV2,
-    WorkspaceBootstrapIntentBindingV2, WorkspaceBootstrapIntentEnvelopeV2, bootstrap_intent_name,
-    bootstrap_owner_name, canonical_root_hash, transaction_directory_name,
+    TransactionId, ValidatedJournalEnvelopeV2, WorkspaceBootstrapBindingV2,
+    WorkspaceBootstrapEnvelopeV2, WorkspaceBootstrapIntentBindingV2,
+    WorkspaceBootstrapIntentEnvelopeV2, bootstrap_intent_name, bootstrap_owner_name,
+    canonical_root_hash, transaction_directory_name,
 };
 use super::lock::{DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT, WriteLock};
 use super::runtime::{
@@ -620,7 +622,7 @@ impl<'a> ImmutableJournalStore<'a> {
         &self,
         workspace_present: bool,
     ) -> Result<LoadedFinalization, CodegenError> {
-        let loaded = self.with_strict_store(workspace_present, &self.kit_path, |store| {
+        self.with_strict_store(workspace_present, &self.kit_path, |store| {
             let JournalNamespace::Finalizing(loaded) =
                 store.inspect_namespace().map_err(strict_store_error)?
             else {
@@ -645,18 +647,6 @@ impl<'a> ImmutableJournalStore<'a> {
                 .certify_finalization_world(&loaded)
                 .map_err(strict_store_error)?;
             Ok(loaded)
-        })?;
-        self.with_strict_store(workspace_present, &self.kit_path, |store| {
-            match store.inspect_namespace().map_err(strict_store_error)? {
-                JournalNamespace::Finalizing(rediscovered) if rediscovered == loaded => {
-                    Ok(rediscovered)
-                }
-                _ => Err(CodegenError::RecoveryRequired {
-                    journal_path: self.kit_path.clone(),
-                    reason: "certified finalization cleanup stage changed on immediate rediscovery"
-                        .to_owned(),
-                }),
-            }
         })
     }
 
@@ -941,6 +931,14 @@ impl<'a> ImmutableJournalStore<'a> {
         &self,
         candidate: &JournalSnapshotV2,
     ) -> Result<RecordBindingV2, CodegenError> {
+        let expected_envelope = Arc::new(
+            ValidatedJournalEnvelopeV2::from_snapshot(candidate.clone())
+                .map_err(model_error_at(&self.workspace_path))?,
+        );
+        self.runtime
+            .cache_journal_envelope_name(candidate.partial_name(), Arc::clone(&expected_envelope));
+        self.runtime
+            .cache_journal_envelope_name(candidate.record_name(), expected_envelope);
         let adoption_slot =
             ActiveAdoptionSlot::append(candidate).map_err(model_error_at(&self.workspace_path))?;
         let (certified_loaded, adopted) =

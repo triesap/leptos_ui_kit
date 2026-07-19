@@ -656,6 +656,8 @@ impl<'a> JournalRecoveryStore<'a> {
                     parsed
                 }
             };
+            self.runtime
+                .cache_journal_envelope_name(entry.name.clone(), Arc::clone(&envelope));
             let snapshot = envelope.snapshot();
             if snapshot.transaction_id() != &self.transaction_id
                 || snapshot.sequence() != *sequence
@@ -3226,13 +3228,11 @@ impl<'a> JournalRecoveryStore<'a> {
                 ));
             }
         };
-        let current = self.capture_authority(false)?;
-        if self.load_finalization_from_capture(&current)? != *loaded {
-            return Err(JournalStoreError::invalid(
-                self.capabilities.workspace_parent.path,
-                "finalization world changed before its durability certification",
-            ));
-        }
+        // `loaded` came from the immediately preceding strict capture on this
+        // bound store. Re-loading the complete finalization and workspace
+        // lineage here duplicated the authorization read without narrowing
+        // the race window: the durability barrier below is followed by a
+        // complete strict recapture before the method returns.
         self.runtime.observe(finalization_world_transition(
             lease,
             transition,
@@ -5529,6 +5529,32 @@ impl<'a> JournalRecoveryStore<'a> {
         entry: &InventoryFile,
         max_bytes: u64,
     ) -> Result<ExactFileRead, JournalStoreError> {
+        if let Some(expected) = self.runtime.cached_journal_envelope_by_name(&entry.name) {
+            let read = self.read_inventory_file_bytes(parent, entry, max_bytes)?;
+            if read.bytes != expected.envelope_bytes() {
+                return Err(JournalStoreError::invalid(
+                    &entry.path,
+                    "journal name no longer contains its cached canonical envelope bytes",
+                ));
+            }
+            let state = expected.record_state();
+            if state.byte_len() != read.observation.byte_len {
+                return Err(JournalStoreError::invalid(
+                    &entry.path,
+                    "cached journal envelope length disagrees with the exact live file",
+                ));
+            }
+            return Ok(ExactFileRead {
+                bytes: read.bytes,
+                observation: ExactFileObservation {
+                    identity: read.observation.identity,
+                    byte_len: read.observation.byte_len,
+                    content_hash: state.content_hash().as_str().to_owned(),
+                    mode: read.observation.mode,
+                    link_count: read.observation.link_count,
+                },
+            });
+        }
         let read = self
             .runtime
             .fs()

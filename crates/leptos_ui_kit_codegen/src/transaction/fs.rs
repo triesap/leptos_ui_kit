@@ -2852,6 +2852,7 @@ pub(crate) enum FsOperation {
     ObserveRegularFileMetadata,
     ObserveCreatedFileExact,
     ReadRegularFileExact,
+    ReadRegularFileBytesExact,
     ObserveDirectory,
     OpenDirectoryExact,
     CreateDirectoryExact,
@@ -3873,9 +3874,9 @@ impl FsOps for FaultFs {
         path: &Path,
         max_bytes: u64,
     ) -> io::Result<ExactFileBytesRead> {
-        self.before(FsOperation::ReadRegularFileExact, path, None)?;
+        self.before(FsOperation::ReadRegularFileBytesExact, path, None)?;
         let read = SystemFs.read_regular_file_bytes_exact(parent, name, path, max_bytes)?;
-        self.after_success(FsOperation::ReadRegularFileExact, path)?;
+        self.after_success(FsOperation::ReadRegularFileBytesExact, path)?;
         Ok(read)
     }
 

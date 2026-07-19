@@ -263,6 +263,7 @@ pub(crate) struct TransactionRuntime {
     entropy: Arc<dyn EntropySource>,
     transition_observer: Arc<dyn TransitionObserver>,
     validated_journal_envelopes: Arc<Mutex<BTreeMap<String, Arc<ValidatedJournalEnvelopeV2>>>>,
+    validated_journal_names: Arc<Mutex<BTreeMap<String, Arc<ValidatedJournalEnvelopeV2>>>>,
 }
 
 impl TransactionRuntime {
@@ -284,6 +285,7 @@ impl TransactionRuntime {
             entropy,
             transition_observer,
             validated_journal_envelopes: Arc::new(Mutex::new(BTreeMap::new())),
+            validated_journal_names: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -345,6 +347,29 @@ impl TransactionRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(content_hash)
+            .or_insert(envelope);
+    }
+
+    pub(super) fn cached_journal_envelope_by_name(
+        &self,
+        name: &str,
+    ) -> Option<Arc<ValidatedJournalEnvelopeV2>> {
+        self.validated_journal_names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    pub(super) fn cache_journal_envelope_name(
+        &self,
+        name: String,
+        envelope: Arc<ValidatedJournalEnvelopeV2>,
+    ) {
+        self.validated_journal_names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(name)
             .or_insert(envelope);
     }
 }

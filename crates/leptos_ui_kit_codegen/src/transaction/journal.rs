@@ -2183,6 +2183,10 @@ impl ValidatedJournalEnvelopeV2 {
         &self.envelope_bytes
     }
 
+    pub(super) fn record_state(&self) -> &FileStateV2 {
+        &self.record_state
+    }
+
     /// Consumes the canonical envelope and binds it to the independently
     /// observed exact immutable record without recanonicalizing or rehashing
     /// the envelope. The supplied link count is retained so the same type can
