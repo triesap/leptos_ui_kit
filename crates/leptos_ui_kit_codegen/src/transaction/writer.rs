@@ -129,7 +129,7 @@ impl<'a> ImmutableJournalStore<'a> {
         ))?;
 
         let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
-        let kit = context.open_directory(KIT_LOGICAL_PATH)?;
+        let kit = lock.open_or_create_transaction_namespace(context, runtime.fs())?;
         let kit_path = context.project_root().join(KIT_LOGICAL_PATH);
         let kit_name = Path::new(".transactions");
         let kit_before_observation = runtime

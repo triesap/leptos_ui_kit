@@ -276,9 +276,6 @@ impl WriteLock {
             project_root: project_root.to_path_buf(),
             project_identity,
         };
-        let transaction_namespace =
-            lock.open_or_create_transaction_namespace(context, fs.as_ref())?;
-        drop(transaction_namespace);
         Ok(lock)
     }
 
@@ -3270,7 +3267,7 @@ mod held_lock_validation_tests {
     }
 
     #[test]
-    fn lock_acquisition_persists_the_empty_transaction_namespace() {
+    fn lock_acquisition_leaves_the_transaction_namespace_absent() {
         let directory = tempfile::tempdir().expect("temporary project");
         let (context, lock) = acquire(directory.path());
         let namespace_path = directory
@@ -3278,13 +3275,13 @@ mod held_lock_validation_tests {
             .join("src/components/ui/_kit/.transactions");
 
         assert!(
-            namespace_path.is_dir(),
-            "lock acquisition must persist the transaction namespace",
+            !namespace_path.exists(),
+            "lock acquisition must not create the transaction namespace",
         );
 
         let namespace = lock
             .open_or_create_transaction_namespace(&context, &SystemFs)
-            .expect("reopen the persistent transaction namespace");
+            .expect("create the transaction namespace on first transactional write");
         assert!(namespace_path.is_dir());
         drop(namespace);
     }

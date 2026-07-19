@@ -287,7 +287,13 @@ fn recover_v2_step(
     })?;
     let root_observation = directory_observation(&root_metadata);
     let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
-    let kit = context.open_directory(KIT_LOGICAL_PATH)?;
+    let kit = match context.open_directory(KIT_LOGICAL_PATH) {
+        Ok(kit) => kit,
+        Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(RecoveryLoopStep::Complete);
+        }
+        Err(error) => return Err(error),
+    };
     let kit_path = context.project_root().join(KIT_LOGICAL_PATH);
     let kit_endpoint =
         DirectoryEndpoint::new(&kit_parent, Path::new(".transactions"), &kit, &kit_path);
