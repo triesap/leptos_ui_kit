@@ -251,6 +251,7 @@ fn lock_rejects_malformed_hash_fields() {
         InstalledItem {
             id: "builtin:button".to_owned(),
             name: "button".to_owned(),
+            kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
             source: "builtin".to_owned(),
             version: SCHEMA_VERSION.to_owned(),
             content_hash: "missing-prefix".to_owned(),
@@ -262,8 +263,419 @@ fn lock_rejects_malformed_hash_fields() {
     let error = lock.validate().expect_err("content hash should fail");
 
     assert!(
-        matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains("items[].contentHash"))
+        matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains(".contentHash"))
     );
+}
+
+#[test]
+fn install_lock_validator_rejects_every_structural_consistency_fault() {
+    for (case, expected) in [
+        ("schema_version", "schemaVersion"),
+        ("kit_version", "kitVersion"),
+        ("crate_root", "project.crateRoot"),
+        ("project_kind", "project.kind"),
+        ("item_key", ".id must equal its map key"),
+        ("item_identity", ".id must be \"builtin:renamed\""),
+        ("item_name", ".name is invalid"),
+        ("item_keyword", ".name is invalid"),
+        (
+            "foundation_with_file",
+            ".files must be empty for a foundation",
+        ),
+        ("ui_style_identity", ".blockId must equal \"button\""),
+        (
+            "foundation_missing_style",
+            ".styleBlocks must contain at least one foundation style",
+        ),
+        (
+            "foundation_style_suffix",
+            ".blockId must begin with \"button-\"",
+        ),
+        ("item_source", ".source must be \"builtin\""),
+        ("item_version", ".version must be"),
+        (
+            "content_hash",
+            ".contentHash must be a lowercase sha256 hash",
+        ),
+        (
+            "unsafe_file_path",
+            ".path must be a safe writable project path",
+        ),
+        ("wrong_file_extension", ".path must end in .rs"),
+        ("wrong_file_kind", ".kind must be \"rust\""),
+        (
+            "generated_file_hash",
+            ".generatedHash must be a lowercase sha256 hash",
+        ),
+        (
+            "local_file_hash",
+            ".localHashAtInstall must be a lowercase sha256 hash",
+        ),
+        (
+            "duplicate_file",
+            ".path \"src/components/ui/button.rs\" duplicates",
+        ),
+        ("case_folded_file", "collides under ASCII case folding"),
+        (
+            "unsafe_css_path",
+            ".cssPath must be a safe writable project path",
+        ),
+        ("wrong_css_extension", ".cssPath must end in .css"),
+        (
+            "invalid_block_id",
+            ".blockId must be an ASCII lowercase kebab-case",
+        ),
+        (
+            "generated_style_hash",
+            ".generatedHash must be a lowercase sha256 hash",
+        ),
+        ("duplicate_style", ".blockId \"button\" duplicates"),
+        (
+            "missing_file_index",
+            "filesByPath[\"src/components/ui/button.rs\"] is missing",
+        ),
+        (
+            "extra_file_index",
+            "filesByPath[\"src/components/ui/extra.rs\"] is an extra",
+        ),
+        (
+            "misowned_file_index",
+            "filesByPath[\"src/components/ui/button.rs\"] is owned",
+        ),
+        (
+            "missing_style_index",
+            "styleBlocksById[\"button\"] is missing",
+        ),
+        (
+            "extra_style_index",
+            "styleBlocksById[\"extra\"] is an extra",
+        ),
+        (
+            "misowned_style_index",
+            "styleBlocksById[\"button\"] is owned",
+        ),
+    ] {
+        let mut lock = populated_install_lock_fixture();
+        match case {
+            "schema_version" => lock.schema_version = "old".to_owned(),
+            "kit_version" => lock.kit_version = "old".to_owned(),
+            "crate_root" => lock.project.crate_root = "nested".to_owned(),
+            "project_kind" => lock.project.kind = "workspace".to_owned(),
+            "item_key" => lock.items.get_mut("builtin:button").expect("item").id = "other".into(),
+            "item_identity" => {
+                lock.items.get_mut("builtin:button").expect("item").name = "renamed".into();
+            }
+            "item_name" => {
+                lock.items.get_mut("builtin:button").expect("item").name = "not--kebab".into();
+            }
+            "item_keyword" => {
+                let mut item = lock.items.remove("builtin:button").expect("item");
+                item.id = "builtin:async".into();
+                item.name = "async".into();
+                lock.items.insert(item.id.clone(), item);
+                lock.files_by_path
+                    .insert("src/components/ui/button.rs".into(), "builtin:async".into());
+                lock.style_blocks_by_id
+                    .insert("button".into(), "builtin:async".into());
+            }
+            "foundation_with_file" => {
+                lock.items.get_mut("builtin:button").expect("item").kind =
+                    leptos_ui_kit_registry::RegistryItemKind::Foundation;
+            }
+            "ui_style_identity" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.style_blocks[0].block_id = "other".into();
+                lock.style_blocks_by_id.clear();
+                lock.style_blocks_by_id
+                    .insert("other".into(), "builtin:button".into());
+            }
+            "foundation_missing_style" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.kind = leptos_ui_kit_registry::RegistryItemKind::Foundation;
+                item.files.clear();
+                item.style_blocks.clear();
+                lock.files_by_path.clear();
+                lock.style_blocks_by_id.clear();
+            }
+            "foundation_style_suffix" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.kind = leptos_ui_kit_registry::RegistryItemKind::Foundation;
+                item.files.clear();
+                item.style_blocks.push(InstalledStyleBlock {
+                    css_path: "styles/kit.css".into(),
+                    block_id: "other".into(),
+                    generated_hash: hash_bytes(b"second style"),
+                });
+                lock.files_by_path.clear();
+                lock.style_blocks_by_id
+                    .insert("other".into(), "builtin:button".into());
+            }
+            "item_source" => {
+                lock.items.get_mut("builtin:button").expect("item").source = "local".into();
+            }
+            "item_version" => {
+                lock.items.get_mut("builtin:button").expect("item").version = "old".into();
+            }
+            "content_hash" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .content_hash = format!("sha256:{}", "A".repeat(64));
+            }
+            "unsafe_file_path" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].path =
+                    "../button.rs".into();
+            }
+            "wrong_file_extension" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].path =
+                    "src/components/ui/button.css".into();
+            }
+            "wrong_file_kind" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].kind = "css".into();
+            }
+            "generated_file_hash" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].generated_hash =
+                    "bad".into();
+            }
+            "local_file_hash" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0]
+                    .local_hash_at_install = "bad".into();
+            }
+            "duplicate_file" => {
+                let duplicate = lock.items["builtin:button"].files[0].clone();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .files
+                    .push(duplicate);
+            }
+            "case_folded_file" => {
+                let mut duplicate = lock.items["builtin:button"].files[0].clone();
+                duplicate.path = "src/components/ui/Button.rs".into();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .files
+                    .push(duplicate);
+            }
+            "unsafe_css_path" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .css_path = "../kit.css".into();
+            }
+            "wrong_css_extension" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .css_path = "styles/kit.rs".into();
+            }
+            "invalid_block_id" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .block_id = "not--kebab".into();
+            }
+            "generated_style_hash" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .generated_hash = "bad".into();
+            }
+            "duplicate_style" => {
+                let duplicate = lock.items["builtin:button"].style_blocks[0].clone();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks
+                    .push(duplicate);
+            }
+            "missing_file_index" => lock.files_by_path.clear(),
+            "extra_file_index" => {
+                lock.files_by_path
+                    .insert("src/components/ui/extra.rs".into(), "builtin:button".into());
+            }
+            "misowned_file_index" => {
+                lock.files_by_path
+                    .insert("src/components/ui/button.rs".into(), "builtin:other".into());
+            }
+            "missing_style_index" => lock.style_blocks_by_id.clear(),
+            "extra_style_index" => {
+                lock.style_blocks_by_id
+                    .insert("extra".into(), "builtin:button".into());
+            }
+            "misowned_style_index" => {
+                lock.style_blocks_by_id
+                    .insert("button".into(), "builtin:other".into());
+            }
+            _ => unreachable!("complete install-lock mutation matrix"),
+        }
+
+        let error = match lock.validate() {
+            Ok(()) => panic!("{case} unexpectedly passed"),
+            Err(error) => error,
+        };
+        let CodegenError::InvalidLock { reason, .. } = error else {
+            panic!("{case} returned the wrong error: {error}");
+        };
+        assert!(
+            reason.contains(expected),
+            "{case} returned {reason:?}, expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn install_lock_parser_rejects_duplicate_object_keys() {
+    let lock = populated_install_lock_fixture();
+    let item = serde_json::to_string(&lock.items["builtin:button"]).expect("serialize item");
+    let files = serde_json::to_string(&lock.files_by_path).expect("serialize files index");
+    let styles = serde_json::to_string(&lock.style_blocks_by_id).expect("serialize styles index");
+    let input = format!(
+        r#"{{
+  "schemaVersion": "{version}",
+  "kitVersion": "{version}",
+  "project": {{"configHash":"{config_hash}","crateRoot":".","kind":"single-crate-trunk-csr"}},
+  "items": {{"builtin:button":{item},"builtin:button":{item}}},
+  "filesByPath": {files},
+  "styleBlocksById": {styles}
+}}"#,
+        version = SCHEMA_VERSION,
+        config_hash = lock.project.config_hash,
+    );
+
+    let error = parse_install_lock_str(&input).expect_err("duplicate item key must fail");
+    assert!(
+        matches!(error, CodegenError::LockParse { source, .. } if source.to_string().contains("duplicate object key"))
+    );
+
+    for kind in [None, Some("component")] {
+        let mut value = serde_json::to_value(&lock).expect("serialize lock value");
+        let item = value["items"]["builtin:button"]
+            .as_object_mut()
+            .expect("button item object");
+        match kind {
+            Some(kind) => {
+                item.insert(
+                    "kind".to_owned(),
+                    serde_json::Value::String(kind.to_owned()),
+                );
+            }
+            None => {
+                item.remove("kind");
+            }
+        }
+        assert!(matches!(
+            parse_install_lock_str(
+                &serde_json::to_string(&value).expect("serialize invalid lock value")
+            ),
+            Err(CodegenError::LockParse { .. })
+        ));
+    }
+}
+
+#[test]
+fn internally_valid_stale_lock_is_reconstructed_from_empty_desired_state() {
+    let stale = populated_install_lock_fixture();
+    stale
+        .validate()
+        .expect("stale preimage is internally valid");
+    let config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+
+    let projection = project_desired_state(&config, hash_bytes(b"current config"), &stale)
+        .expect("stale lock is accepted as a transaction preimage");
+
+    assert_eq!(
+        projection.retired_item_ids,
+        BTreeSet::from(["builtin:button".to_owned()])
+    );
+    assert!(projection.lock.items.is_empty());
+    assert!(projection.lock.files_by_path.is_empty());
+    assert!(projection.lock.style_blocks_by_id.is_empty());
+    assert_eq!(
+        projection.lock.project.config_hash,
+        hash_bytes(b"current config")
+    );
+}
+
+#[test]
+fn loading_an_internally_valid_lock_preserves_the_exact_preimage() {
+    let temporary = tempfile::tempdir().expect("temporary project");
+    let root = temporary.path();
+    let lock = populated_install_lock_fixture();
+    fs::create_dir_all(
+        root.join(DEFAULT_KIT_LOCK_PATH)
+            .parent()
+            .expect("lock parent"),
+    )
+    .expect("create lock parent");
+    fs::write(
+        root.join(DEFAULT_KIT_LOCK_PATH),
+        lock_to_json(&lock).expect("serialize lock"),
+    )
+    .expect("write lock");
+    let context = PlanningContext::open(root).expect("open planning context");
+
+    let loaded = load_or_empty_lock(&context, DEFAULT_KIT_LOCK_PATH, hash_bytes(b"new config"))
+        .expect("load preimage");
+
+    assert_eq!(loaded, lock);
+
+    drop(context);
+    let mut invalid = lock;
+    invalid.kit_version = "old".to_owned();
+    let mut invalid_json = serde_json::to_string_pretty(&invalid).expect("serialize invalid lock");
+    invalid_json.push('\n');
+    fs::write(root.join(DEFAULT_KIT_LOCK_PATH), invalid_json).expect("write invalid lock");
+    let context = PlanningContext::open(root).expect("reopen planning context");
+    assert!(matches!(
+        load_or_empty_lock(
+            &context,
+            DEFAULT_KIT_LOCK_PATH,
+            hash_bytes(b"new config"),
+        ),
+        Err(CodegenError::InvalidLock { path, .. })
+            if path == Path::new(DEFAULT_KIT_LOCK_PATH)
+    ));
+}
+
+fn populated_install_lock_fixture() -> InstallLock {
+    let mut lock = InstallLock::empty(hash_bytes(b"fixture config"));
+    let generated_file_hash = hash_bytes(b"generated Rust");
+    lock.items.insert(
+        "builtin:button".to_owned(),
+        InstalledItem {
+            id: "builtin:button".to_owned(),
+            name: "button".to_owned(),
+            kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
+            source: "builtin".to_owned(),
+            version: SCHEMA_VERSION.to_owned(),
+            content_hash: hash_bytes(b"registry item"),
+            files: vec![InstalledFile {
+                path: "src/components/ui/button.rs".to_owned(),
+                kind: "rust".to_owned(),
+                generated_hash: generated_file_hash.clone(),
+                local_hash_at_install: generated_file_hash,
+            }],
+            style_blocks: vec![InstalledStyleBlock {
+                css_path: "styles/kit.css".to_owned(),
+                block_id: "button".to_owned(),
+                generated_hash: hash_bytes(b"generated CSS"),
+            }],
+        },
+    );
+    lock.files_by_path.insert(
+        "src/components/ui/button.rs".to_owned(),
+        "builtin:button".to_owned(),
+    );
+    lock.style_blocks_by_id
+        .insert("button".to_owned(), "builtin:button".to_owned());
+    lock
 }
 
 #[test]
@@ -2206,6 +2618,7 @@ fn expected_install_lock(
             InstalledItem {
                 id: item_id,
                 name: item.item.name.clone(),
+                kind: item.item.kind,
                 source: "builtin".to_owned(),
                 version: item.item.version.clone(),
                 content_hash: item.content_hash.clone(),
@@ -2344,6 +2757,12 @@ fn tracked_css_lock(css_path: &str, blocks: &[(&ManagedCssOperation, &str)]) -> 
             .or_insert_with(|| InstalledItem {
                 id: operation.item_id.clone(),
                 name: operation.block_id.clone(),
+                kind: match operation.role {
+                    ManagedCssBlockRole::Foundation => {
+                        leptos_ui_kit_registry::RegistryItemKind::Foundation
+                    }
+                    ManagedCssBlockRole::Component => leptos_ui_kit_registry::RegistryItemKind::Ui,
+                },
                 source: "builtin".to_owned(),
                 version: SCHEMA_VERSION.to_owned(),
                 content_hash: hash_bytes(operation.item_id.as_bytes()),

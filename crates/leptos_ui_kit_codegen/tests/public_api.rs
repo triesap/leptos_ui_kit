@@ -307,6 +307,7 @@ fn project_lock_fields(
 
     let _: &String = &item.id;
     let _: &String = &item.name;
+    let _: leptos_ui_kit_registry::RegistryItemKind = item.kind;
     let _: &String = &item.source;
     let _: &String = &item.version;
     let _: &String = &item.content_hash;
@@ -548,6 +549,7 @@ fn public_plan_and_nested_lock_serialized_names_remain_stable() {
         &[
             "id",
             "name",
+            "kind",
             "source",
             "version",
             "contentHash",

@@ -1094,6 +1094,7 @@ fn build_doctor_registry_snapshot(
         let installed = InstalledItem {
             id: item_id.clone(),
             name: item.item.name,
+            kind: item.item.kind,
             source: "builtin".to_owned(),
             version: item.item.version,
             content_hash: item.content_hash,
@@ -1350,6 +1351,7 @@ fn lock_snapshot_checks(
         };
         if actual.id == expected.id
             && actual.name == expected.name
+            && actual.kind == expected.kind
             && actual.source == expected.source
             && actual.version == expected.version
             && actual.content_hash == expected.content_hash
@@ -2075,7 +2077,7 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, fs};
 
-    use leptos_ui_kit_codegen::{extract_managed_css_block, lock_to_json, plan_init};
+    use leptos_ui_kit_codegen::{extract_managed_css_block, plan_init};
     use leptos_ui_kit_registry::{
         canonical_kit_config, desired_builtin_button_item, desired_builtin_spinner_item,
         desired_builtin_tokens_item, kit_config_to_json, kit_config_with_desired_item,
@@ -3114,65 +3116,93 @@ leptos_router = "0.9.0-alpha"
 
             let doctor = build_doctor_output(root, true, false, false);
             assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-            if mutation == "misowned_file" {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_files_by_path",
-                    DoctorCheckStatus::Fail,
-                    "differs from registry target ownership",
-                );
-            } else if mutation.ends_with("_file") {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_file_targets",
-                    DoctorCheckStatus::Fail,
-                    "differ from the registry snapshot",
-                );
-            } else if mutation == "misowned_style" {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_style_blocks_by_id",
-                    DoctorCheckStatus::Fail,
-                    "differs from registry target ownership",
-                );
-            } else {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_style_targets",
-                    DoctorCheckStatus::Fail,
-                    "differ from the registry snapshot",
-                );
-            }
+            let (check, message) = match mutation {
+                "extra_file" => ("lock_file_targets", "differ from the registry snapshot"),
+                "duplicate_file" => ("lock", ".path \"src/components/ui/button.rs\" duplicates"),
+                "misowned_file" => (
+                    "lock",
+                    "filesByPath[\"src/components/ui/spinner.rs\"] is owned",
+                ),
+                "extra_style" => ("lock_style_targets", "differ from the registry snapshot"),
+                "duplicate_style" => ("lock", ".blockId \"button\" duplicates"),
+                "misowned_style" => ("lock", "styleBlocksById[\"spinner\"] is owned"),
+                _ => unreachable!(),
+            };
+            assert_doctor_check(&doctor, check, DoctorCheckStatus::Fail, message);
         }
     }
 
     #[test]
     fn doctor_rejects_stale_item_and_lock_metadata() {
+        for mutation in ["wrong_version", "stale_content", "stale_kind"] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, DEFAULT_CSS_PATH);
+            let mut lock = read_install_lock(root);
+            match mutation {
+                "wrong_version" => lock.kit_version = "0.8.0".to_owned(),
+                "stale_content" => {
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .content_hash = format!("sha256:{}", "2".repeat(64));
+                }
+                "stale_kind" => {
+                    lock.items
+                        .get_mut("builtin:tokens")
+                        .expect("tokens item")
+                        .kind = leptos_ui_kit_registry::RegistryItemKind::Ui;
+                }
+                _ => unreachable!(),
+            }
+            write_install_lock(root, &lock);
+
+            let doctor = build_doctor_output(root, true, false, false);
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+            match mutation {
+                "wrong_version" => assert_doctor_check(
+                    &doctor,
+                    "lock",
+                    DoctorCheckStatus::Fail,
+                    "kitVersion must be",
+                ),
+                "stale_content" => assert_doctor_check(
+                    &doctor,
+                    "lock_item_metadata",
+                    DoctorCheckStatus::Fail,
+                    "builtin:button differs",
+                ),
+                "stale_kind" => assert_doctor_check(
+                    &doctor,
+                    "lock_item_metadata",
+                    DoctorCheckStatus::Fail,
+                    "builtin:tokens differs",
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn codegen_and_doctor_use_the_same_install_lock_verdict() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         create_current_button_install(root, DEFAULT_CSS_PATH);
         let mut lock = read_install_lock(root);
-        lock.kit_version = "0.8.0".to_owned();
-        lock.items
-            .get_mut("builtin:button")
-            .expect("button item")
-            .content_hash = format!("sha256:{}", "2".repeat(64));
+        lock.files_by_path.remove("src/components/ui/button.rs");
+        let direct_reason = match lock
+            .validate()
+            .expect_err("missing reverse index must fail")
+        {
+            leptos_ui_kit_codegen::CodegenError::InvalidLock { reason, .. } => reason,
+            error => panic!("unexpected direct validator error: {error}"),
+        };
         write_install_lock(root, &lock);
 
         let doctor = build_doctor_output(root, true, false, false);
+
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert_doctor_check(
-            &doctor,
-            "lock_metadata",
-            DoctorCheckStatus::Fail,
-            "kitVersion 0.8.0",
-        );
-        assert_doctor_check(
-            &doctor,
-            "lock_item_metadata",
-            DoctorCheckStatus::Fail,
-            "builtin:button differs",
-        );
+        assert_doctor_check(&doctor, "lock", DoctorCheckStatus::Fail, &direct_reason);
     }
 
     #[test]
@@ -3252,6 +3282,7 @@ leptos_router = "0.9.0-alpha"
             InstalledItem {
                 id: "builtin:router-link".to_owned(),
                 name: "router-link".to_owned(),
+                kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
                 source: "builtin".to_owned(),
                 version: router.item.version,
                 content_hash: router.content_hash,
@@ -3426,6 +3457,7 @@ leptos_router = "0.9.0-alpha"
             InstalledItem {
                 id: "builtin:missing-item".to_owned(),
                 name: "missing-item".to_owned(),
+                kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
                 source: "builtin".to_owned(),
                 version: SCHEMA_VERSION.to_owned(),
                 content_hash: format!("sha256:{}", "3".repeat(64)),
@@ -3875,11 +3907,10 @@ leptos_router = "0.9.0-alpha"
     }
 
     fn write_install_lock(root: &Path, lock: &InstallLock) {
-        fs::write(
-            root.join(DEFAULT_KIT_LOCK_PATH),
-            lock_to_json(lock).expect("serialize install lock"),
-        )
-        .expect("write install lock");
+        let mut content =
+            serde_json::to_string_pretty(lock).expect("serialize install-lock fixture");
+        content.push('\n');
+        fs::write(root.join(DEFAULT_KIT_LOCK_PATH), content).expect("write install lock");
     }
 
     fn current_registry_style(block_id: &str) -> String {

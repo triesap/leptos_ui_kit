@@ -21,12 +21,12 @@ pub(crate) fn read_canonical_install_lock(
     let Some(input) = context.read_optional_string(lock_path)? else {
         return Ok(None);
     };
-    let path = context.project_root().join(lock_path);
-    let lock = parse_install_lock_str_at_path(&input, &path)?;
-    let canonical = lock_to_json_at_path(&lock, &path)?;
+    let path = Path::new(lock_path);
+    let lock = parse_install_lock_str_at_path(&input, path)?;
+    let canonical = lock_to_json_at_path(&lock, path)?;
     if input != canonical {
         return Err(CodegenError::InvalidLock {
-            path,
+            path: path.to_path_buf(),
             reason: "install lock must use its canonical JSON serialization".to_owned(),
         });
     }
@@ -39,8 +39,7 @@ pub(crate) fn load_or_empty_lock(
     lock_path: &str,
     config_hash: String,
 ) -> Result<InstallLock, CodegenError> {
-    if let Some((mut lock, _)) = read_canonical_install_lock(context, lock_path)? {
-        lock.project.config_hash = config_hash;
+    if let Some((lock, _)) = read_canonical_install_lock(context, lock_path)? {
         return Ok(lock);
     }
 

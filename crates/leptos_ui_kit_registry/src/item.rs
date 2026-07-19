@@ -386,7 +386,7 @@ impl RegistryRoot {
         let mut names = BTreeSet::new();
         let mut paths = BTreeSet::new();
         for item in &self.items {
-            validate_item_name(&item.name)?;
+            validate_registry_item_name(&item.name)?;
             validate_registry_source_path_with_extension("items[].path", &item.path, "json")?;
             if !names.insert(item.name.clone()) {
                 return Err(RegistryError::DuplicateTarget(format!(
@@ -441,7 +441,7 @@ impl RegistryItem {
     pub fn validate(&self) -> Result<(), RegistryError> {
         expect_string("$schema", REGISTRY_ITEM_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
-        validate_item_name(&self.name)?;
+        validate_registry_item_name(&self.name)?;
         expect_string("version", SCHEMA_VERSION, &self.version)?;
         validate_non_empty_string("title", &self.title)?;
         validate_non_empty_string("description", &self.description)?;
@@ -465,7 +465,7 @@ impl RegistryItem {
 
         let mut dependencies = BTreeSet::new();
         for dependency in &self.registry_dependencies {
-            validate_item_name(dependency)?;
+            validate_registry_item_name(dependency)?;
             if !dependencies.insert(dependency) {
                 return Err(RegistryError::InvalidValue {
                     field: "registryDependencies",
@@ -1567,7 +1567,7 @@ fn expect_string(field: &'static str, expected: &str, actual: &str) -> Result<()
     }
 }
 
-fn validate_item_name(value: &str) -> Result<(), RegistryError> {
+pub fn validate_registry_item_name(value: &str) -> Result<(), RegistryError> {
     validate_kebab_name("name", value)?;
     if is_rust_2024_keyword(value) {
         return Err(RegistryError::InvalidValue {
@@ -1762,7 +1762,7 @@ fn validate_rust_module_segment(field: &'static str, value: &str) -> Result<(), 
     Ok(())
 }
 
-fn is_rust_2024_keyword(value: &str) -> bool {
+pub(crate) fn is_rust_2024_keyword(value: &str) -> bool {
     matches!(
         value,
         "Self"

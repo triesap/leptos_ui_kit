@@ -46,7 +46,7 @@ pub use item::{
     load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
     normalize_cargo_plan, parse_registry_item_str, parse_registry_root_str,
     read_built_in_registry_source, resolve_built_in_registry_items, resolve_registry_targets,
-    validate_registry_graph,
+    validate_registry_graph, validate_registry_item_name,
 };
 pub use registry_health::{
     RegistryHealthError, RegistryHealthFileKind, validate_built_in_registry_health,

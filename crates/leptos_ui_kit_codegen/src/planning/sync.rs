@@ -161,6 +161,7 @@ fn project_desired_state_from_resolved(
             InstalledItem {
                 id: item_id,
                 name: item.item.name.clone(),
+                kind: item.item.kind,
                 source: "builtin".to_owned(),
                 version: item.item.version.clone(),
                 content_hash: item.content_hash.clone(),
@@ -517,6 +518,7 @@ pub(crate) fn plan_built_in_item(
         InstalledItem {
             id: item_id.clone(),
             name: item.item.name.clone(),
+            kind: item.item.kind,
             source: "builtin".to_owned(),
             version: item.item.version.clone(),
             content_hash: item.content_hash.clone(),

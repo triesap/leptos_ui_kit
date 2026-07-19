@@ -61,7 +61,7 @@ use patch::{ManagedCssRetirement, reconcile_managed_css_blocks_with_retirements_
 use path_safety::{PlanningContext, capture_plan_snapshot};
 #[cfg(test)]
 use planning::{
-    ManagedStylesheetProjection, built_in_item_id, desired_builtin_item,
+    ManagedStylesheetProjection, built_in_item_id, desired_builtin_item, load_or_empty_lock,
     plan_add_with_config_writer, plan_built_in_item, plan_desired_ownership_cohort,
     plan_init_with_config_provider, plan_managed_stylesheet_batch_with_retirements,
     plan_sync_with_config_writer, project_desired_state,
