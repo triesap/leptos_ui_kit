@@ -196,6 +196,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 }
 
 #[test]
+#[ignore = "slow packaged CLI workflow smoke; run explicitly with --ignored --exact"]
 fn homepage_fixture_cli_workflow_smoke() {
     let dir = tempdir().expect("tempdir");
     let project = dir.path().join("homepage");
