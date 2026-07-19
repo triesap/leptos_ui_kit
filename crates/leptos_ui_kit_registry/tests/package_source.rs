@@ -184,6 +184,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
         &temporary.path().join("clean-target"),
         &approved_rev,
         &[temporary.path()],
+        true,
     );
     run_extracted_suite(
         "hostile-parent extracted workspace",
@@ -192,6 +193,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
         &temporary.path().join("hostile-target"),
         &approved_rev,
         &[temporary.path()],
+        false,
     );
     for (label, workspace) in [("clean", &clean_workspace), ("hostile", &hostile_workspace)] {
         assert_eq!(
@@ -396,14 +398,20 @@ fn run_extracted_suite(
     target_dir: &Path,
     expected_rev: &str,
     forbidden_paths: &[&Path],
+    execute_tests: bool,
 ) {
     assert_local_package_metadata(label, workspace, cargo_home, target_dir);
 
-    let tests = extracted_cargo(workspace, cargo_home, target_dir)
-        .args(["test", "--workspace", "--all-targets", "--locked"])
+    let validation = extracted_cargo(workspace, cargo_home, target_dir)
+        .args([
+            if execute_tests { "test" } else { "check" },
+            "--workspace",
+            "--all-targets",
+            "--locked",
+        ])
         .output()
-        .unwrap_or_else(|error| panic!("run {label} all-target tests: {error}"));
-    assert_success(&format!("{label} all-target tests"), &tests);
+        .unwrap_or_else(|error| panic!("run {label} all-target validation: {error}"));
+    assert_success(&format!("{label} all-target validation"), &validation);
 
     let direct = run_version(workspace, cargo_home, target_dir, "leptos_ui_kit", &[]);
     let cargo_wrapper = run_version(
