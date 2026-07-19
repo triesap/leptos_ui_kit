@@ -195,10 +195,24 @@ pub fn reconcile_managed_css_blocks_at_path(
     operations: &[ManagedCssOperation],
     dependencies: &[ManagedCssDependency],
 ) -> Result<String, CodegenError> {
-    if operations.is_empty() {
-        return Ok(existing.to_owned());
-    }
+    reconcile_managed_css_blocks_with_retirements_at_path(
+        existing,
+        logical_path,
+        prior_lock,
+        operations,
+        dependencies,
+        &[],
+    )
+}
 
+pub(crate) fn reconcile_managed_css_blocks_with_retirements_at_path(
+    existing: &str,
+    logical_path: &str,
+    prior_lock: &InstallLock,
+    operations: &[ManagedCssOperation],
+    dependencies: &[ManagedCssDependency],
+    retirements: &[ManagedCssRetirement],
+) -> Result<String, CodegenError> {
     let mut prepared = BTreeMap::new();
     let mut foundation_id = None;
     for (order, operation) in operations.iter().enumerate() {
@@ -249,6 +263,45 @@ pub fn reconcile_managed_css_blocks_at_path(
         }
     }
 
+    let mut prepared_retirements = BTreeMap::new();
+    for retirement in retirements {
+        validate_css_block_id_at_path(&retirement.block_id, logical_path)?;
+        if retirement.item_id.trim().is_empty() {
+            return unsafe_patch(
+                logical_path,
+                "managed CSS retirement has an empty item owner",
+            );
+        }
+        if prepared.contains_key(&retirement.block_id) {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "managed CSS block {} cannot be retained and retired together",
+                    retirement.block_id
+                ),
+            );
+        }
+        let current_generated = retirement
+            .current_generated
+            .as_deref()
+            .map(|generated| {
+                normalize_managed_css_block_at_path(&retirement.block_id, generated, logical_path)
+            })
+            .transpose()?;
+        if prepared_retirements
+            .insert(retirement.block_id.clone(), (retirement, current_generated))
+            .is_some()
+        {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "duplicate managed CSS retirement for {}",
+                    retirement.block_id
+                ),
+            );
+        }
+    }
+
     let mut unique_dependencies = BTreeSet::new();
     for dependency in dependencies {
         if dependency.dependency_block_id == dependency.dependent_block_id {
@@ -290,10 +343,17 @@ pub fn reconcile_managed_css_blocks_at_path(
             );
         };
         let current = &existing[range.start..range.end];
-        let generated_matches = prepared
+        let retained_generated_matches = prepared
             .get(block_id)
             .is_some_and(|(_, _, replacement)| current == replacement);
-        if !generated_matches && hash_bytes(current.as_bytes()) != tracked_block.generated_hash {
+        let retired_generated_matches = prepared_retirements
+            .get(block_id)
+            .and_then(|(_, generated)| generated.as_deref())
+            .is_some_and(|generated| current == generated);
+        if !retained_generated_matches
+            && !retired_generated_matches
+            && hash_bytes(current.as_bytes()) != tracked_block.generated_hash
+        {
             return unsafe_patch(
                 logical_path,
                 format!("managed CSS block {block_id} has local edits"),
@@ -310,13 +370,32 @@ pub fn reconcile_managed_css_blocks_at_path(
                 ),
             );
         }
+        if let Some((retirement, _)) = prepared_retirements.get(block_id)
+            && retirement.item_id != tracked_block.item_id
+        {
+            return unsafe_patch(
+                logical_path,
+                format!(
+                    "retired managed CSS block {block_id} is tracked by {} instead of {}",
+                    tracked_block.item_id, retirement.item_id
+                ),
+            );
+        }
     }
 
     for block_id in tracked.keys() {
-        if !ranges.contains_key(block_id) {
+        if !ranges.contains_key(block_id) && !prepared_retirements.contains_key(block_id) {
             return unsafe_patch(
                 logical_path,
                 format!("tracked managed CSS block {block_id} is missing"),
+            );
+        }
+    }
+    for block_id in prepared_retirements.keys() {
+        if !tracked.contains_key(block_id) {
+            return unsafe_patch(
+                logical_path,
+                format!("retired managed CSS block {block_id} is not tracked"),
             );
         }
     }
@@ -345,13 +424,23 @@ pub fn reconcile_managed_css_blocks_at_path(
             .filter(|(block_id, _)| prepared.contains_key(*block_id))
             .map(|(_, range)| CssEdit::replacement(range.start, range.end, String::new()))
             .collect::<Vec<_>>();
+        edits.extend(
+            prepared_retirements
+                .keys()
+                .filter_map(|block_id| ranges.get(block_id))
+                .map(|range| CssEdit::replacement(range.start, range.end, String::new())),
+        );
         edits.push(CssEdit::insertion(anchor, ordered));
         let output = apply_css_edits(existing, logical_path, edits)?;
         validate_reconciled_css_order(&output, logical_path, &unique_dependencies)?;
         return Ok(output);
     }
 
-    let mut edits = Vec::new();
+    let mut edits = prepared_retirements
+        .keys()
+        .filter_map(|block_id| ranges.get(block_id))
+        .map(|range| CssEdit::replacement(range.start, range.end, String::new()))
+        .collect::<Vec<_>>();
     let mut missing_components = Vec::new();
     let mut foundation_insertion = None;
     let mut relocating_foundation = None;
@@ -423,6 +512,13 @@ pub fn reconcile_managed_css_blocks_at_path(
 
     validate_reconciled_css_order(&output, logical_path, &unique_dependencies)?;
     Ok(output)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedCssRetirement {
+    pub(crate) item_id: String,
+    pub(crate) block_id: String,
+    pub(crate) current_generated: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

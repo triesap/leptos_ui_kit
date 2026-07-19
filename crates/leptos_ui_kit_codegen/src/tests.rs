@@ -704,6 +704,86 @@ fn desired_projection_checkpoint_does_not_enable_public_retirement() {
 }
 
 #[test]
+fn internal_retirement_seam_is_atomic_on_default_and_custom_stylesheets() {
+    for css_path in ["styles/kit.css", "styles/custom.css"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        setup_sync_project(root, css_path);
+        apply_add(root, "button").expect("add button");
+
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+                .expect("parse installed config");
+        config.items = vec![desired_builtin_spinner_item()];
+        let config_content = kit_config_to_json(&config).expect("serialize retained config");
+        fs::write(&config_path, &config_content).expect("write retained config");
+        let prior_lock = parse_install_lock_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+        )
+        .expect("parse installed lock");
+        let projection =
+            project_desired_state(&config, hash_bytes(config_content.as_bytes()), &prior_lock)
+                .expect("project retirement");
+        let context = PlanningContext::open(root).expect("open planning context");
+        let mut files = Vec::new();
+        let mut changes = Vec::new();
+        plan_managed_stylesheet_batch_with_retirements(
+            &context,
+            &mut files,
+            &mut changes,
+            &prior_lock,
+            &config,
+            ManagedStylesheetProjection {
+                operations: &projection.css_operations,
+                dependencies: &projection.css_dependencies,
+                retirements: &projection.css_retirements,
+            },
+        )
+        .expect("plan retirement stylesheet");
+        let snapshot = context.finish_snapshot();
+        let planned_css = files
+            .iter()
+            .find(|file| file.path == css_path)
+            .expect("planned stylesheet");
+        assert!(
+            !planned_css
+                .content
+                .contains("/* leptos-ui-kit:start button */")
+        );
+        assert!(
+            planned_css
+                .content
+                .contains("/* leptos-ui-kit:start spinner */")
+        );
+        assert!(
+            planned_css
+                .content
+                .contains("/* leptos-ui-kit:start tokens */")
+        );
+
+        let before = snapshot_project_files(root);
+        let fault = Arc::new(FaultFs::fail_nth(FsOperation::ReplaceExisting, 1));
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault)
+            .expect_err("replacement fault must roll back retirement");
+        assert_eq!(snapshot_project_files(root), before);
+
+        apply_planned_files_with_snapshot(
+            root,
+            &files,
+            &changes,
+            &snapshot,
+            Arc::new(FaultFs::passthrough()),
+        )
+        .expect("apply retirement stylesheet");
+        assert_eq!(
+            fs::read_to_string(root.join(css_path)).expect("read retired stylesheet"),
+            planned_css.content
+        );
+    }
+}
+
+#[test]
 fn sync_write_is_idempotent_when_declared_button_is_current() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -1711,6 +1791,17 @@ fn managed_css_dependency(dependency: &str, dependent: &str) -> ManagedCssDepend
     }
 }
 
+fn managed_css_retirement(
+    operation: &ManagedCssOperation,
+    current_generated: Option<String>,
+) -> ManagedCssRetirement {
+    ManagedCssRetirement {
+        item_id: operation.item_id.clone(),
+        block_id: operation.block_id.clone(),
+        current_generated,
+    }
+}
+
 fn tracked_css_lock(css_path: &str, blocks: &[(&ManagedCssOperation, &str)]) -> InstallLock {
     let mut lock = InstallLock::empty(hash_bytes(b"config"));
     for (operation, baseline) in blocks {
@@ -2097,6 +2188,99 @@ fn css_batch_prevalidates_duplicate_and_unknown_operations_and_dependencies() {
         )
         .expect_err("invalid batch metadata should fail before output");
         assert_unsafe_patch_path(error, "styles/custom.css");
+    }
+}
+
+#[test]
+fn css_batch_retires_current_tracked_and_missing_blocks_without_touching_app_bytes() {
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let old_button = managed_css_block("button", "display: block;");
+    let retirement = managed_css_retirement(&button, Some(button.generated.clone()));
+    let unmanaged_prefix = "/* application prefix */\n.app { color: rebeccapurple; }\n";
+    let unmanaged_suffix = "\n/* application suffix */\n";
+
+    for (case, existing, baseline) in [
+        (
+            "current",
+            format!("{unmanaged_prefix}{}{unmanaged_suffix}", button.generated),
+            old_button.as_str(),
+        ),
+        (
+            "tracked-baseline",
+            format!("{unmanaged_prefix}{old_button}{unmanaged_suffix}"),
+            old_button.as_str(),
+        ),
+        (
+            "already-missing",
+            format!("{unmanaged_prefix}{unmanaged_suffix}"),
+            old_button.as_str(),
+        ),
+    ] {
+        let lock = tracked_css_lock("styles/custom.css", &[(&button, baseline)]);
+        let reconciled = reconcile_managed_css_blocks_with_retirements_at_path(
+            &existing,
+            "styles/custom.css",
+            &lock,
+            &[],
+            &[],
+            std::slice::from_ref(&retirement),
+        )
+        .unwrap_or_else(|error| panic!("{case}: retire safe block: {error}"));
+
+        assert_eq!(
+            reconciled,
+            format!("{unmanaged_prefix}{unmanaged_suffix}"),
+            "{case}: unmanaged bytes changed"
+        );
+    }
+}
+
+#[test]
+fn css_batch_rejects_unsafe_retirements_before_producing_output() {
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let retirement = managed_css_retirement(&button, Some(button.generated.clone()));
+    let edited = managed_css_block("button", "display: grid;");
+    let lock = tracked_css_lock("styles/custom.css", &[(&button, &button.generated)]);
+
+    for (case, existing, lock, retirements) in [
+        (
+            "edited",
+            edited.as_str(),
+            lock.clone(),
+            vec![retirement.clone()],
+        ),
+        (
+            "untracked",
+            button.generated.as_str(),
+            InstallLock::empty(hash_bytes(b"config")),
+            vec![retirement.clone()],
+        ),
+        (
+            "duplicate",
+            button.generated.as_str(),
+            lock.clone(),
+            vec![retirement.clone(), retirement.clone()],
+        ),
+    ] {
+        let error = reconcile_managed_css_blocks_with_retirements_at_path(
+            existing,
+            "styles/custom.css",
+            &lock,
+            &[],
+            &[],
+            &retirements,
+        )
+        .expect_err("unsafe retirement must conflict");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+        assert!(!case.is_empty());
     }
 }
 

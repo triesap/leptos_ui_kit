@@ -2,6 +2,7 @@ mod css;
 mod html;
 mod module;
 
+pub(crate) use css::{ManagedCssRetirement, reconcile_managed_css_blocks_with_retirements_at_path};
 pub use css::{
     extract_managed_css_block, extract_managed_css_block_at_path,
     inspect_managed_css_blocks_at_path, patch_css_block, patch_css_block_at_path,

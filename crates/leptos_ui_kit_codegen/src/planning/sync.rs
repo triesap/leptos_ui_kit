@@ -4,9 +4,9 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH, DesiredItemConfig, KitConfig, ResolvedRegistryItem,
-    kit_config_for_write, kit_config_to_json, parse_kit_json_str, read_built_in_registry_source,
-    resolve_built_in_registry_items,
+    CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH, DesiredItemConfig, KitConfig, RegistryError,
+    ResolvedRegistryItem, kit_config_for_write, kit_config_to_json, load_built_in_registry_item,
+    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
 };
 
 use super::{
@@ -16,12 +16,13 @@ use super::{
     upsert_planned_install_lock, upsert_preloaded_planned_file,
 };
 use crate::digest::hash_bytes;
+use crate::patch::{ManagedCssRetirement, reconcile_managed_css_blocks_with_retirements_at_path};
 use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, InstallLock, InstalledFile, InstalledItem,
     InstalledStyleBlock, ManagedCssBlockRole, ManagedCssDependency, ManagedCssOperation,
     PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, patch_components_mod,
-    patch_ui_mod, reconcile_managed_css_blocks_at_path, validate_planned_write_paths,
+    patch_ui_mod, validate_planned_write_paths,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ pub(crate) struct DesiredStateProjection {
     pub(crate) cargo_plan: Vec<CargoPlanEntry>,
     pub(crate) css_operations: Vec<ManagedCssOperation>,
     pub(crate) css_dependencies: Vec<ManagedCssDependency>,
+    pub(crate) css_retirements: Vec<ManagedCssRetirement>,
 }
 
 pub(crate) fn project_desired_state(
@@ -67,17 +69,44 @@ fn project_desired_state_from_resolved(
         .collect::<Vec<_>>();
     let desired_item_ids = item_ids.iter().cloned().collect::<BTreeSet<_>>();
     let prior_item_ids = prior_lock.items.keys().cloned().collect::<BTreeSet<_>>();
-    let retained_item_ids = desired_item_ids
+    let retained_item_ids: BTreeSet<String> = desired_item_ids
         .intersection(&prior_item_ids)
         .cloned()
         .collect();
-    let retired_item_ids = prior_item_ids
+    let retired_item_ids: BTreeSet<String> = prior_item_ids
         .difference(&desired_item_ids)
         .cloned()
         .collect();
     let mut lock = InstallLock::empty(config_hash);
     let mut cargo_plan = Vec::new();
     let mut css_operations = Vec::new();
+    let mut css_retirements = Vec::new();
+
+    for item_id in &retired_item_ids {
+        let prior_item = &prior_lock.items[item_id];
+        let current_item = match load_built_in_registry_item(&prior_item.name) {
+            Ok(item) => Some(item),
+            Err(RegistryError::BuiltInNotFound(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        for block in &prior_item.style_blocks {
+            let current_generated = current_item
+                .as_ref()
+                .and_then(|item| {
+                    item.targets
+                        .style_blocks
+                        .iter()
+                        .find(|style| style.id == block.block_id)
+                })
+                .map(|style| read_built_in_registry_source(&style.source))
+                .transpose()?;
+            css_retirements.push(ManagedCssRetirement {
+                item_id: item_id.clone(),
+                block_id: block.block_id.clone(),
+                current_generated,
+            });
+        }
+    }
 
     for item in &resolved_items {
         let item_id = built_in_item_id(&item.item.name);
@@ -146,6 +175,7 @@ fn project_desired_state_from_resolved(
         cargo_plan,
         css_operations,
         css_dependencies,
+        css_retirements,
     })
 }
 
@@ -235,6 +265,14 @@ pub(crate) fn plan_sync_from_config(
         prior_lock.items.len()
     );
     debug_assert_eq!(desired_projection.lock.project.config_hash, config_hash);
+    debug_assert_eq!(
+        desired_projection.css_retirements.len(),
+        desired_projection
+            .retired_item_ids
+            .iter()
+            .map(|item_id| prior_lock.items[item_id].style_blocks.len())
+            .sum::<usize>()
+    );
     lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
     let cargo_plan = desired_projection.cargo_plan.clone();
@@ -466,18 +504,47 @@ fn plan_managed_stylesheet_batch(
     operations: &[ManagedCssOperation],
     dependencies: &[ManagedCssDependency],
 ) -> Result<(), CodegenError> {
-    if operations.is_empty() {
+    plan_managed_stylesheet_batch_with_retirements(
+        context,
+        files,
+        changes,
+        prior_lock,
+        config,
+        ManagedStylesheetProjection {
+            operations,
+            dependencies,
+            retirements: &[],
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ManagedStylesheetProjection<'a> {
+    pub(crate) operations: &'a [ManagedCssOperation],
+    pub(crate) dependencies: &'a [ManagedCssDependency],
+    pub(crate) retirements: &'a [ManagedCssRetirement],
+}
+
+pub(crate) fn plan_managed_stylesheet_batch_with_retirements(
+    context: &PlanningContext,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    prior_lock: &InstallLock,
+    config: &KitConfig,
+    projection: ManagedStylesheetProjection<'_>,
+) -> Result<(), CodegenError> {
+    if projection.operations.is_empty() && projection.retirements.is_empty() {
         return Ok(());
     }
-
     let css_path = config.styles.css.as_str();
     let existing = planned_or_existing_content(files, context, css_path)?.unwrap_or_default();
-    let reconciled = reconcile_managed_css_blocks_at_path(
+    let reconciled = reconcile_managed_css_blocks_with_retirements_at_path(
         &existing,
         css_path,
         prior_lock,
-        operations,
-        dependencies,
+        projection.operations,
+        projection.dependencies,
+        projection.retirements,
     )?;
 
     upsert_preloaded_planned_file(
