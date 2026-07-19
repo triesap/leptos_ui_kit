@@ -678,14 +678,27 @@ fn desired_projection_is_exact_for_empty_retained_and_retired_closures() {
 }
 
 #[test]
-fn desired_projection_checkpoint_does_not_enable_public_retirement() {
+fn public_sync_prunes_lock_and_css_while_preserving_app_owned_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     setup_empty_project(root);
     apply_init(root).expect("init");
     apply_add(root, "button").expect("add button");
-    let original_css =
-        fs::read_to_string(root.join("styles/kit.css")).expect("read original stylesheet");
+    let protected_paths = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ];
+    let protected = protected_paths
+        .iter()
+        .map(|path| {
+            (
+                (*path).to_owned(),
+                fs::read(root.join(path)).expect("read protected source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut config = parse_kit_json_str(
         &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
@@ -697,16 +710,147 @@ fn desired_projection_checkpoint_does_not_enable_public_retirement() {
         kit_config_to_json(&config).expect("serialize retained config"),
     );
 
-    let plan = plan_sync(root).expect("plan non-destructive sync");
+    let plan = plan_sync(root).expect("plan desired-state sync");
 
-    assert!(plan.lock.items.contains_key("builtin:button"));
+    assert!(!plan.lock.items.contains_key("builtin:button"));
+    assert!(plan.lock.items.contains_key("builtin:tokens"));
+    assert!(plan.lock.items.contains_key("builtin:spinner"));
+    assert!(
+        plan.files
+            .iter()
+            .find(|file| file.path == "styles/kit.css")
+            .expect("planned stylesheet")
+            .content
+            .contains("leptos-ui-kit:start spinner")
+    );
     assert!(
         !plan
             .files
             .iter()
-            .any(|file| file.path == "styles/kit.css" && file.content != original_css)
+            .find(|file| file.path == "styles/kit.css")
+            .expect("planned stylesheet")
+            .content
+            .contains("leptos-ui-kit:start button")
     );
-    assert!(root.join("src/components/ui/button.rs").is_file());
+    assert!(
+        plan.files
+            .iter()
+            .all(|file| !protected_paths.contains(&file.path.as_str()))
+    );
+
+    apply_sync(root).expect("apply desired-state sync");
+    for (path, expected) in protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read protected source"),
+            expected
+        );
+    }
+    let applied_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read applied lock"),
+    )
+    .expect("parse applied lock");
+    assert_eq!(applied_lock, plan.lock);
+    assert!(!applied_lock.items.contains_key("builtin:button"));
+    let applied_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read applied stylesheet");
+    assert!(!applied_css.contains("leptos-ui-kit:start button"));
+    assert!(applied_css.contains("leptos-ui-kit:start spinner"));
+    assert!(
+        apply_sync(root)
+            .expect("idempotent desired-state sync")
+            .is_empty()
+    );
+}
+
+#[test]
+fn public_sync_converges_to_exact_empty_state_without_deleting_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let button_path = root.join("src/components/ui/button.rs");
+    let ui_mod_path = root.join("src/components/ui/mod.rs");
+    let button_before = fs::read(&button_path).expect("read button source");
+    let ui_mod_before = fs::read(&ui_mod_path).expect("read UI module");
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    config.items.clear();
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize empty desired config"),
+    );
+
+    let first = apply_sync(root).expect("converge to empty desired state");
+
+    assert!(first.lock.items.is_empty());
+    assert!(first.lock.files_by_path.is_empty());
+    assert!(first.lock.style_blocks_by_id.is_empty());
+    assert_eq!(
+        fs::read(&button_path).expect("read retained button"),
+        button_before
+    );
+    assert_eq!(
+        fs::read(&ui_mod_path).expect("read retained UI module"),
+        ui_mod_before
+    );
+    let css = fs::read_to_string(root.join("styles/kit.css")).expect("read empty stylesheet");
+    assert!(!css.contains("leptos-ui-kit:start"));
+    assert!(root.join("styles/kit.css").is_file());
+    assert!(apply_sync(root).expect("idempotent empty sync").is_empty());
+}
+
+#[test]
+fn public_sync_conflicts_are_atomic_for_retired_css_and_module_wiring() {
+    let css_dir = tempfile::tempdir().expect("CSS tempdir");
+    let css_root = css_dir.path();
+    setup_empty_project(css_root);
+    apply_init(css_root).expect("init CSS project");
+    apply_add(css_root, "button").expect("add button");
+    let config_path = css_root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read CSS config"))
+            .expect("parse CSS config");
+    config.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        css_root,
+        kit_config_to_json(&config).expect("serialize retired config"),
+    );
+    let css_path = css_root.join("styles/kit.css");
+    let css = fs::read_to_string(&css_path).expect("read CSS");
+    let button_block = extract_managed_css_block_at_path(&css, "styles/kit.css", "button")
+        .expect("inspect button block")
+        .expect("button block");
+    let edited_button = button_block.replacen("display: inline-flex;", "display: grid;", 1);
+    assert_ne!(edited_button, button_block);
+    fs::write(&css_path, css.replacen(&button_block, &edited_button, 1))
+        .expect("edit retired block");
+    let css_before = snapshot_project_files(css_root);
+
+    let css_error = apply_sync(css_root).expect_err("edited retired CSS must conflict");
+
+    assert_sync_unsafe_patch_path("retired CSS", css_error, "styles/kit.css");
+    assert_eq!(snapshot_project_files(css_root), css_before);
+
+    let module_dir = tempfile::tempdir().expect("module tempdir");
+    let module_root = module_dir.path();
+    setup_empty_project(module_root);
+    apply_init(module_root).expect("init module project");
+    write_desired_button_config(module_root);
+    fs::write(
+        module_root.join("src/components/ui/mod.rs"),
+        "mod spinner;\n",
+    )
+    .expect("write private module conflict");
+    let module_before = snapshot_project_files(module_root);
+
+    let module_error = apply_sync(module_root).expect_err("private module must conflict");
+
+    assert_sync_unsafe_patch_path("private module", module_error, "src/components/ui/mod.rs");
+    assert_eq!(snapshot_project_files(module_root), module_before);
 }
 
 #[test]
@@ -2761,7 +2905,7 @@ fn ui_module_patcher_accepts_formatted_grouped_exports() {
 }
 
 #[test]
-fn ui_module_patcher_consolidates_stale_grouped_exports() {
+fn ui_module_patcher_preserves_multiple_grouped_exports() {
     let existing = "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectIcon,\n    TextArea, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\npub use field::{FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField, SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType};\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2784,16 +2928,13 @@ fn ui_module_patcher_consolidates_stale_grouped_exports() {
             ],
         )],
     )
-    .expect("stale grouped export should be consolidated");
+    .expect("symbols across grouped exports should satisfy the surface");
 
-    assert_eq!(
-        patched,
-        "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField,\n    SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
-    );
+    assert_eq!(patched, existing);
 }
 
 #[test]
-fn ui_module_patcher_consolidates_stale_single_exports() {
+fn ui_module_patcher_preserves_single_export_and_appends_only_missing_symbol() {
     let existing = "pub mod spinner;\npub use spinner::Spinner;\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2802,16 +2943,16 @@ fn ui_module_patcher_consolidates_stale_single_exports() {
             vec!["Spinner".to_owned(), "SpinnerMode".to_owned()],
         )],
     )
-    .expect("stale single export should be consolidated");
+    .expect("missing export should be appended");
 
     assert_eq!(
         patched,
-        "pub mod spinner;\npub use spinner::{Spinner, SpinnerMode};\n"
+        "pub mod spinner;\npub use spinner::Spinner;\npub use spinner::SpinnerMode;\n"
     );
 }
 
 #[test]
-fn ui_module_patcher_removes_obsolete_grouped_exports() {
+fn ui_module_patcher_preserves_obsolete_grouped_exports() {
     let existing = "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField, SelectFieldSlot};\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2825,12 +2966,90 @@ fn ui_module_patcher_removes_obsolete_grouped_exports() {
             ],
         )],
     )
-    .expect("obsolete grouped export should be removed");
+    .expect("obsolete grouped export should remain app-owned");
+
+    assert_eq!(patched, existing);
+}
+
+#[test]
+fn ui_module_patcher_preserves_aliases_comments_attributes_and_group_order() {
+    let existing = "#[allow(clippy::module_name_repetitions)]\npub mod button;\n// application alias\npub use button::{Button as AppButton, ButtonSize};\n#[doc = \"kept\"]\npub use button::{ButtonVariant};\n";
+    let patched = patch_ui_mod(
+        Some(existing),
+        &[UiModuleExport::new(
+            "button",
+            vec![
+                "Button".to_owned(),
+                "ButtonSize".to_owned(),
+                "ButtonType".to_owned(),
+                "ButtonVariant".to_owned(),
+            ],
+        )],
+    )
+    .expect("compatible groups should be inspected additively");
 
     assert_eq!(
         patched,
-        "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField};\n"
+        format!("{existing}pub use button::{{Button, ButtonType}};\n")
     );
+    assert_eq!(
+        patch_ui_mod(
+            Some(&patched),
+            &[UiModuleExport::new(
+                "button",
+                vec![
+                    "Button".to_owned(),
+                    "ButtonSize".to_owned(),
+                    "ButtonType".to_owned(),
+                    "ButtonVariant".to_owned(),
+                ],
+            )],
+        )
+        .expect("additive patch should be idempotent"),
+        patched
+    );
+}
+
+#[test]
+fn module_patcher_uses_the_minimum_separator_without_rewriting_input() {
+    let existing = "// application module without a trailing newline";
+    let patched = patch_components_mod(Some(existing)).expect("append public module");
+
+    assert_eq!(patched, format!("{existing}\npub mod ui;\n"));
+}
+
+#[test]
+fn ui_module_patcher_rejects_private_or_incompatible_surface_conflicts() {
+    for existing in [
+        "mod spinner;\n",
+        "pub(crate) mod spinner;\n",
+        "pub mod spinner {}\n",
+        "pub mod spinner;\nuse spinner::Spinner;\n",
+        "pub mod spinner;\npub use application::Spinner;\n",
+    ] {
+        let error = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new("spinner", vec!["Spinner".to_owned()])],
+        )
+        .expect_err("incompatible public surface must conflict");
+
+        assert!(
+            matches!(error, CodegenError::UnsafePatch { .. }),
+            "unexpected conflict for {existing:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn module_patcher_rejects_malformed_or_unbounded_source() {
+    let malformed = patch_components_mod(Some("pub mod ui {\n"))
+        .expect_err("malformed source must not be appended");
+    assert!(matches!(malformed, CodegenError::UnsafePatch { .. }));
+
+    let oversized = " ".repeat(1024 * 1024 + 1);
+    let unbounded =
+        patch_components_mod(Some(&oversized)).expect_err("oversized source must be bounded");
+    assert!(matches!(unbounded, CodegenError::UnsafePatch { .. }));
 }
 
 #[test]

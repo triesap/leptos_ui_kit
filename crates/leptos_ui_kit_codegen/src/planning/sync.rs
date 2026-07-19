@@ -244,8 +244,7 @@ pub(crate) fn plan_sync_from_config(
     let diagnostics = Vec::new();
     let original_config_hash = hash_bytes(config_content.as_bytes());
     let lock_path = install_lock_path(&config);
-    let mut lock = load_or_empty_lock(context, &lock_path, original_config_hash.clone())?;
-    let prior_lock = lock.clone();
+    let prior_lock = load_or_empty_lock(context, &lock_path, original_config_hash.clone())?;
     let mut desired_projection = project_desired_state(&config, original_config_hash, &prior_lock)?;
 
     if config.items != desired_projection.desired_items {
@@ -278,7 +277,7 @@ pub(crate) fn plan_sync_from_config(
             .map(|item_id| prior_lock.items[item_id].style_blocks.len())
             .sum::<usize>()
     );
-    lock.project.config_hash = config_hash;
+    let mut lock = desired_projection.lock.clone();
     let mut item_ids = Vec::new();
     let cargo_plan = desired_projection.cargo_plan.clone();
     let mut css_operations = Vec::new();
@@ -302,14 +301,17 @@ pub(crate) fn plan_sync_from_config(
     debug_assert_eq!(item_ids, desired_projection.item_ids);
     debug_assert_eq!(css_operations, desired_projection.css_operations);
 
-    plan_managed_stylesheet_batch(
+    plan_managed_stylesheet_batch_with_retirements(
         context,
         &mut files,
         &mut changes,
         &prior_lock,
         &config,
-        &css_operations,
-        &css_dependencies,
+        ManagedStylesheetProjection {
+            operations: &css_operations,
+            dependencies: &css_dependencies,
+            retirements: &desired_projection.css_retirements,
+        },
     )?;
 
     lock.validate_at_path(Path::new(&lock_path))?;
@@ -506,29 +508,6 @@ pub(crate) fn plan_built_in_item(
         },
     );
     Ok(item_id)
-}
-
-fn plan_managed_stylesheet_batch(
-    context: &PlanningContext,
-    files: &mut Vec<PlannedFile>,
-    changes: &mut Vec<ChangeRecord>,
-    prior_lock: &InstallLock,
-    config: &KitConfig,
-    operations: &[ManagedCssOperation],
-    dependencies: &[ManagedCssDependency],
-) -> Result<(), CodegenError> {
-    plan_managed_stylesheet_batch_with_retirements(
-        context,
-        files,
-        changes,
-        prior_lock,
-        config,
-        ManagedStylesheetProjection {
-            operations,
-            dependencies,
-            retirements: &[],
-        },
-    )
 }
 
 #[derive(Debug, Clone, Copy)]
