@@ -276,7 +276,7 @@ fn write_synthetic_manifest(workspace: &Path) {
     fs::write(
         workspace.join("Cargo.toml"),
         format!(
-            "[workspace]\nresolver = \"2\"\nmembers = [\n{members}\n]\n\n[patch.crates-io]\n{patches}\n"
+            "[workspace]\nresolver = \"2\"\nmembers = [\n{members}\n]\n\n[patch.crates-io]\n{patches}\n\n[profile.test.package.sha2]\nopt-level = 3\n"
         ),
     )
     .expect("write synthetic package workspace manifest");
