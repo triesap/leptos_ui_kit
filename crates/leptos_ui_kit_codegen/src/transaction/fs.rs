@@ -2489,30 +2489,10 @@ fn remove_empty_directory_exact_impl<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let initial = inventory_directory_exact_bounded_impl(endpoint, expected, 0)
-        .map_err(ExactRemovalError::not_mutated)?;
-    if !initial.entries.is_empty() {
-        return Err(ExactRemovalError::not_mutated(io::Error::new(
-            io::ErrorKind::DirectoryNotEmpty,
-            format!(
-                "{} is not an exact empty directory",
-                endpoint.path.display()
-            ),
-        )));
-    }
+    require_exact_empty_directory(endpoint, expected).map_err(ExactRemovalError::not_mutated)?;
 
     before_unlink().map_err(ExactRemovalError::not_mutated)?;
-    let final_inventory = inventory_directory_exact_bounded_impl(endpoint, expected, 0)
-        .map_err(ExactRemovalError::not_mutated)?;
-    if !final_inventory.entries.is_empty() {
-        return Err(ExactRemovalError::not_mutated(io::Error::new(
-            io::ErrorKind::DirectoryNotEmpty,
-            format!(
-                "{} gained children at the exact removal boundary",
-                endpoint.path.display()
-            ),
-        )));
-    }
+    require_exact_empty_directory(endpoint, expected).map_err(ExactRemovalError::not_mutated)?;
     endpoint
         .parent
         .remove_dir(endpoint.name)
@@ -2563,6 +2543,31 @@ where
             error,
         )),
     }
+}
+
+fn require_exact_empty_directory(
+    endpoint: DirectoryEndpoint<'_>,
+    expected: &ExactDirectoryObservation,
+) -> io::Result<()> {
+    require_exact_directory_state(endpoint, expected)?;
+    let mut entries = endpoint.directory.entries()?;
+    if entries.next().transpose()?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::DirectoryNotEmpty,
+            format!(
+                "{} is not an exact empty directory",
+                endpoint.path.display()
+            ),
+        ));
+    }
+    let after = observe_directory_exact(endpoint)?;
+    if after != *expected {
+        return Err(changed_during_observation(
+            endpoint.path,
+            "empty directory changed during exact observation",
+        ));
+    }
+    Ok(())
 }
 
 fn create_new_file_impl(

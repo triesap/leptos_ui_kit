@@ -36,6 +36,7 @@ use super::runtime::TransactionRuntime;
 use super::store::{exact_directory, exact_file};
 
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 16_384;
+const TRANSACTION_NAMESPACE_LOGICAL_PATH: &str = "src/components/ui/_kit/.transactions";
 
 /// Produces the stable exact world consumed by recovery policy.
 ///
@@ -836,6 +837,9 @@ fn validate_parent_coverage(
         }
     }
     for directory in snapshot.directories() {
+        if directory.logical_path() == TRANSACTION_NAMESPACE_LOGICAL_PATH {
+            continue;
+        }
         let parent = immediate_parent(directory.logical_path());
         if !parent.is_empty() && !directories.contains(parent) {
             return Err(recovery_blocked(

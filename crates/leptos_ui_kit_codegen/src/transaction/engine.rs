@@ -689,6 +689,20 @@ fn preparation_parent_namespace(
             DirectoryParentV2::ProjectRoot => {
                 return Ok(snapshot.project().root_current().identity().namespace());
             }
+            DirectoryParentV2::CoordinationParent => {
+                return Ok(snapshot
+                    .project()
+                    .coordination_parent()
+                    .identity()
+                    .namespace());
+            }
+            DirectoryParentV2::TransactionNamespace => {
+                return Ok(snapshot
+                    .project()
+                    .workspace_parent_current()
+                    .identity()
+                    .namespace());
+            }
             DirectoryParentV2::TransactionWorkspace => {
                 return Ok(snapshot
                     .project()
@@ -4634,6 +4648,12 @@ fn directory_parent(
     if parent_path.is_empty() {
         return Ok(DirectoryParentV2::ProjectRoot);
     }
+    if parent_path == "src/components/ui/_kit" {
+        return Ok(DirectoryParentV2::CoordinationParent);
+    }
+    if parent_path == TRANSACTION_NAMESPACE_LOGICAL_PATH {
+        return Ok(DirectoryParentV2::TransactionNamespace);
+    }
     snapshot
         .directories()
         .iter()
@@ -4653,6 +4673,10 @@ fn model_parent_current(
 ) -> Result<&super::journal::ExactDirectoryStateV2, CodegenError> {
     match parent {
         DirectoryParentV2::ProjectRoot => Ok(snapshot.project().root_current()),
+        DirectoryParentV2::CoordinationParent => Ok(snapshot.project().coordination_parent()),
+        DirectoryParentV2::TransactionNamespace => {
+            Ok(snapshot.project().workspace_parent_current())
+        }
         DirectoryParentV2::TransactionWorkspace => Ok(snapshot.project().workspace().exact()),
         DirectoryParentV2::Cohort { ordinal } => snapshot
             .directories()

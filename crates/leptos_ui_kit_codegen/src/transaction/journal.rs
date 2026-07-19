@@ -32,6 +32,7 @@ const BOOTSTRAP_INTENT_MAGIC: &str = "leptos-ui-kit-workspace-bootstrap-intent-v
 const BOOTSTRAP_INTENT_PREFIX: &str = "bootstrap-intent-v2-";
 const DIRECTORY_CANDIDATE_PREFIX: &str = ".leptos-ui-kit-directory-v2-";
 const WORKSPACE_PARENT_LOGICAL_PATH: &str = "src/components/ui/_kit/.transactions";
+const COORDINATION_PARENT_LOGICAL_PATH: &str = "src/components/ui/_kit";
 const CANONICAL_ROOT_HASH_DOMAIN: &[u8] = b"leptos-ui-kit:canonical-root:v2\0";
 const WORKSPACE_OWNER_DOMAIN: &[u8] = b"leptos-ui-kit:workspace-owner:v2\0";
 
@@ -588,6 +589,7 @@ pub(super) struct ProjectBindingV2 {
     root_preimage: ExactDirectoryStateV2,
     root_current: ExactDirectoryStateV2,
     write_lock: ExactFileStateV2,
+    coordination_parent: ExactDirectoryStateV2,
     workspace_parent_preimage: ExactDirectoryStateV2,
     workspace_parent_after_workspace: ExactDirectoryStateV2,
     workspace_parent_current: ExactDirectoryStateV2,
@@ -600,6 +602,7 @@ impl ProjectBindingV2 {
         canonical_root_hash: Sha256Digest,
         root: ExactDirectoryStateV2,
         write_lock: ExactFileStateV2,
+        coordination_parent: ExactDirectoryStateV2,
         workspace_parent_preimage: ExactDirectoryStateV2,
         workspace_parent_after_workspace: ExactDirectoryStateV2,
         workspace: ExactDirectoryStateV2,
@@ -619,6 +622,7 @@ impl ProjectBindingV2 {
             root_preimage: root.clone(),
             root_current: root,
             write_lock,
+            coordination_parent,
             workspace_parent_preimage,
             workspace_parent_current: workspace_parent_after_workspace.clone(),
             workspace_parent_after_workspace,
@@ -641,6 +645,10 @@ impl ProjectBindingV2 {
 
     pub(super) fn write_lock(&self) -> &ExactFileStateV2 {
         &self.write_lock
+    }
+
+    pub(super) fn coordination_parent(&self) -> &ExactDirectoryStateV2 {
+        &self.coordination_parent
     }
 
     pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
@@ -677,6 +685,7 @@ impl ProjectBindingV2 {
                 "persistent write lock must be independently linked with no unowned alias",
             ));
         }
+        self.coordination_parent.validate()?;
         self.workspace_parent_preimage.validate()?;
         self.workspace_parent_after_workspace.validate()?;
         self.workspace_parent_current.validate()?;
@@ -699,12 +708,13 @@ impl ProjectBindingV2 {
         let identities = [
             self.root_current.identity,
             self.write_lock.identity,
+            self.coordination_parent.identity,
             self.workspace_parent_current.identity,
             self.workspace.exact.identity,
         ];
         if identities.iter().copied().collect::<BTreeSet<_>>().len() != identities.len() {
             return Err(JournalModelError::new(
-                "project root, write lock, workspace parent, and transaction workspace must have distinct identities",
+                "project root, write lock, coordination parent, workspace parent, and transaction workspace must have distinct identities",
             ));
         }
         Ok(())
@@ -1102,6 +1112,8 @@ impl JournalDirectoryV2 {
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "camelCase")]
 pub(super) enum DirectoryParentV2 {
     ProjectRoot,
+    CoordinationParent,
+    TransactionNamespace,
     TransactionWorkspace,
     Cohort { ordinal: ArtifactOrdinal },
 }
@@ -3376,6 +3388,7 @@ impl JournalSnapshotV2 {
         let protected = [
             self.project.root_current.identity,
             self.project.write_lock.identity,
+            self.project.coordination_parent.identity,
             self.project.workspace_parent_current.identity,
             self.project.workspace.exact.identity,
             self.bootstrap.intent.exact.identity,
@@ -3605,6 +3618,12 @@ impl JournalSnapshotV2 {
         let Some(parent) = immediate_parent(logical_path) else {
             return Ok(DirectoryParentV2::ProjectRoot);
         };
+        if parent == COORDINATION_PARENT_LOGICAL_PATH {
+            return Ok(DirectoryParentV2::CoordinationParent);
+        }
+        if parent == WORKSPACE_PARENT_LOGICAL_PATH {
+            return Ok(DirectoryParentV2::TransactionNamespace);
+        }
         let parent_index = self
             .directories
             .iter()
@@ -4066,6 +4085,12 @@ impl JournalSnapshotV2 {
         let Some((parent, _)) = path.rsplit_once('/') else {
             return Ok(DirectoryParentV2::ProjectRoot);
         };
+        if parent == COORDINATION_PARENT_LOGICAL_PATH {
+            return Ok(DirectoryParentV2::CoordinationParent);
+        }
+        if parent == WORKSPACE_PARENT_LOGICAL_PATH {
+            return Ok(DirectoryParentV2::TransactionNamespace);
+        }
         let parent_index = self
             .directories
             .iter()
@@ -4082,6 +4107,8 @@ impl JournalSnapshotV2 {
     ) -> Result<&ExactDirectoryStateV2, JournalModelError> {
         match parent {
             DirectoryParentV2::ProjectRoot => Ok(&self.project.root_current),
+            DirectoryParentV2::CoordinationParent => Ok(&self.project.coordination_parent),
+            DirectoryParentV2::TransactionNamespace => Ok(&self.project.workspace_parent_current),
             DirectoryParentV2::TransactionWorkspace => Ok(self.project.workspace().exact()),
             DirectoryParentV2::Cohort { ordinal } => self.directories
                 [index_of(ordinal, self.directories.len())?]
@@ -4098,6 +4125,16 @@ impl JournalSnapshotV2 {
     ) -> Result<(), JournalModelError> {
         match parent {
             DirectoryParentV2::ProjectRoot => self.project.root_current = exact,
+            DirectoryParentV2::CoordinationParent => {
+                if exact != self.project.coordination_parent {
+                    return Err(JournalModelError::new(
+                        "coordination-parent identity/mode cannot change within a transaction",
+                    ));
+                }
+            }
+            DirectoryParentV2::TransactionNamespace => {
+                self.project.workspace_parent_current = exact;
+            }
             DirectoryParentV2::TransactionWorkspace => {
                 if &exact != self.project.workspace().exact() {
                     return Err(JournalModelError::new(
@@ -4739,6 +4776,7 @@ impl JournalSnapshotV2 {
         for identity in [
             self.project.root_current.identity,
             self.project.write_lock.identity,
+            self.project.coordination_parent.identity,
             self.project.workspace_parent_current.identity,
             self.project.workspace.exact.identity,
             self.bootstrap.intent.exact.identity,
@@ -4759,8 +4797,10 @@ impl JournalSnapshotV2 {
         }
         for directory in &self.directories {
             if let PresenceV2::Present(current) = &directory.current {
-                if directory.logical_path == WORKSPACE_PARENT_LOGICAL_PATH
-                    && current == &self.project.workspace_parent_current
+                if (directory.logical_path == WORKSPACE_PARENT_LOGICAL_PATH
+                    && current == &self.project.workspace_parent_current)
+                    || (directory.logical_path == COORDINATION_PARENT_LOGICAL_PATH
+                        && current == &self.project.coordination_parent)
                 {
                     continue;
                 }
@@ -5301,6 +5341,7 @@ impl JournalSnapshotV2 {
 
     fn runtime_equals(&self, other: &Self) -> bool {
         self.project.root_current == other.project.root_current
+            && self.project.coordination_parent == other.project.coordination_parent
             && self.project.workspace_parent_current == other.project.workspace_parent_current
             && self.entries == other.entries
             && self.directories == other.directories
@@ -7143,6 +7184,7 @@ mod tests {
         let root_hash = canonical_root_hash(b"/canonical/project");
         let root = exact_directory(1, 1, 0o755, 20);
         let write_lock = exact_file(1, 2, b"lock-v2\n", 0o600, 1);
+        let coordination_parent = exact_directory(1, 20, 0o755, 10);
         let workspace_parent_preimage = exact_directory(1, 3, 0o755, 10);
         let workspace_parent_after = exact_directory(1, 3, 0o755, 11);
         let workspace = exact_directory(1, 4, 0o700, 2);
@@ -7163,6 +7205,7 @@ mod tests {
             root_hash,
             root,
             write_lock,
+            coordination_parent,
             workspace_parent_preimage,
             workspace_parent_after.clone(),
             workspace,
@@ -7569,8 +7612,11 @@ mod tests {
         let binding = record(&snapshot, 107);
         records.push(binding.clone());
         snapshot = snapshot.complete_cleanup(binding, None).unwrap();
+        let binding = record(&snapshot, 108);
+        records.push(binding.clone());
+        snapshot = snapshot.advance_cleanup_noop(binding).unwrap();
         assert!(snapshot.ready_for_finalization());
-        records.push(record(&snapshot, 108));
+        records.push(record(&snapshot, 109));
 
         let lease = FinalizationLeaseV2::arm(&snapshot, records, None).unwrap();
         let parent_after = exact_directory(1, 3, 0o755, 10);
@@ -7605,9 +7651,16 @@ mod tests {
     #[test]
     fn directory_candidate_publish_world_and_rollback_cleanup_are_exact() {
         let mut snapshot = build_snapshot(true);
-        let directory_ordinal = ArtifactOrdinal::new(4).unwrap();
+        let (directory_index, directory_ordinal) = snapshot
+            .directories
+            .iter()
+            .enumerate()
+            .find(|(_, directory)| directory.disposition == DirectoryDispositionV2::Create)
+            .map(|(index, directory)| (index, directory.ordinal))
+            .expect("created directory");
+        let directory_parent = snapshot.directory_parent(directory_index).unwrap();
         let candidate = exact_directory(7, 20, 0o755, 2);
-        let parent_after_candidate = exact_directory(1, 3, 0o755, 12);
+        let parent_after_candidate = snapshot.parent_current(directory_parent).unwrap().clone();
         let workspace_after_candidate = snapshot.project.workspace.exact.clone();
 
         snapshot = snapshot
@@ -7623,9 +7676,7 @@ mod tests {
             directory_ordinal,
             directory_candidate_name(snapshot.transaction_id(), directory_ordinal),
             candidate.clone(),
-            DirectoryParentV2::Cohort {
-                ordinal: ArtifactOrdinal::new(3).unwrap(),
-            },
+            directory_parent,
             parent_after_candidate.clone(),
         );
         assert_eq!(
@@ -7745,18 +7796,13 @@ mod tests {
                         ordinal: directory_ordinal,
                     },
                     expected: candidate,
-                    parent: DirectoryParentV2::Cohort {
-                        ordinal: ArtifactOrdinal::new(3).unwrap(),
-                    },
-                    parent_before: parent_after_candidate,
+                    parent: directory_parent,
+                    parent_before: parent_after_candidate.clone(),
                 },
             )
             .unwrap();
         snapshot = snapshot
-            .complete_cleanup(
-                record(&snapshot, 215),
-                Some(exact_directory(1, 3, 0o755, 11)),
-            )
+            .complete_cleanup(record(&snapshot, 215), Some(parent_after_candidate))
             .unwrap();
         assert!(snapshot.ready_for_finalization());
     }

@@ -35,6 +35,7 @@ use super::store::{
 
 const KIT_LOGICAL_PATH: &str = "src/components/ui/_kit/.transactions";
 const KIT_PARENT_LOGICAL_PATH: &str = "src/components/ui/_kit";
+const KIT_GRANDPARENT_LOGICAL_PATH: &str = "src/components/ui";
 
 pub(super) struct ImmutableJournalStore<'a> {
     context: &'a PlanningContext,
@@ -289,11 +290,31 @@ impl<'a> ImmutableJournalStore<'a> {
             window: TransitionWindow::After,
         });
 
+        let kit_grandparent = context.open_directory(KIT_GRANDPARENT_LOGICAL_PATH)?;
+        let coordination_parent_path = context.project_root().join(KIT_PARENT_LOGICAL_PATH);
+        let coordination_parent = runtime
+            .fs()
+            .observe_directory(DirectoryEndpoint::new(
+                &kit_grandparent,
+                Path::new("_kit"),
+                &kit_parent,
+                &coordination_parent_path,
+            ))
+            .map_err(|source| {
+                transaction_io(
+                    "inspect directory",
+                    KIT_PARENT_LOGICAL_PATH,
+                    &coordination_parent_path,
+                    source,
+                )
+            })?;
         let project = ProjectBindingV2::new(
             &transaction_id,
             root_hash,
             root_exact,
             lock_exact,
+            exact_directory(&coordination_parent)
+                .map_err(model_error_at(&coordination_parent_path))?,
             kit_after_intent,
             kit_after.clone(),
             exact_directory(&workspace_handle.observation)
