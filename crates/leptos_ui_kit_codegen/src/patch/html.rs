@@ -51,6 +51,13 @@ pub struct HtmlInspection {
     pub links: Vec<HtmlLinkInspection>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum HtmlStylesheetState {
+    Present { link: HtmlSpan },
+    Missing { insertion_at: usize },
+}
+
 impl HtmlInspection {
     pub fn matching_stylesheet_links(
         &self,
@@ -211,6 +218,120 @@ pub fn inspect_html(input: &str) -> Result<HtmlInspection, HtmlInspectionError> 
     }
     let head = head.ok_or(HtmlInspectionError::MissingHead)?;
     Ok(HtmlInspection { head, links })
+}
+
+pub fn inspect_html_stylesheet(
+    input: &str,
+    stylesheet_path: &str,
+) -> Result<HtmlStylesheetState, HtmlInspectionError> {
+    let inspection = inspect_html(input)?;
+    stylesheet_state(&inspection, stylesheet_path)
+}
+
+fn stylesheet_state(
+    inspection: &HtmlInspection,
+    stylesheet_path: &str,
+) -> Result<HtmlStylesheetState, HtmlInspectionError> {
+    let matching = inspection
+        .links
+        .iter()
+        .filter(|link| link.is_active_trunk_css() && link.href.as_deref() == Some(stylesheet_path))
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [link] if link.inside_head => {
+            return Ok(HtmlStylesheetState::Present { link: link.tag });
+        }
+        [link] => {
+            return malformed(
+                link.tag.start,
+                format!("Trunk CSS link for {stylesheet_path} is outside the head element"),
+            );
+        }
+        [] => {}
+        links => {
+            return malformed(
+                links[1].tag.start,
+                format!("multiple Trunk CSS links target {stylesheet_path}"),
+            );
+        }
+    }
+
+    let insertion_at = inspection
+        .first_head_trunk_css_link()
+        .map(|link| link.tag.start)
+        .unwrap_or(inspection.head.end_tag.start);
+    Ok(HtmlStylesheetState::Missing { insertion_at })
+}
+
+pub fn patch_html_stylesheet_link(
+    input: &str,
+    stylesheet_path: &str,
+) -> Result<Option<String>, HtmlInspectionError> {
+    let inspection = inspect_html(input)?;
+    let insertion_at = match stylesheet_state(&inspection, stylesheet_path)? {
+        HtmlStylesheetState::Present { .. } => return Ok(None),
+        HtmlStylesheetState::Missing { insertion_at } => insertion_at,
+    };
+
+    let escaped_path = escape_html_attribute(stylesheet_path);
+    let link = format!("<link data-trunk rel=\"css\" href=\"{escaped_path}\" />");
+    let (offset, insertion) = stylesheet_insertion(input, &inspection, insertion_at, &link);
+    let mut patched = String::with_capacity(input.len() + insertion.len());
+    patched.push_str(&input[..offset]);
+    patched.push_str(&insertion);
+    patched.push_str(&input[offset..]);
+    Ok(Some(patched))
+}
+
+fn stylesheet_insertion(
+    input: &str,
+    inspection: &HtmlInspection,
+    insertion_at: usize,
+    link: &str,
+) -> (usize, String) {
+    if !input.contains('\n') && !input.contains('\r') {
+        return (insertion_at, link.to_owned());
+    }
+
+    let newline = if input.contains("\r\n") { "\r\n" } else { "\n" };
+    let line_start = input[..insertion_at]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_prefix = &input[line_start..insertion_at];
+    if !line_prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+        return (insertion_at, link.to_owned());
+    }
+
+    let indent = if insertion_at == inspection.head.end_tag.start {
+        first_content_indent(input, inspection).unwrap_or_else(|| format!("{line_prefix}  "))
+    } else {
+        line_prefix.to_owned()
+    };
+    (line_start, format!("{indent}{link}{newline}"))
+}
+
+fn first_content_indent(input: &str, inspection: &HtmlInspection) -> Option<String> {
+    let content = &input[inspection.head.content.start..inspection.head.content.end];
+    content.lines().find_map(|line| {
+        let indent_len = line
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        (indent_len < line.len()).then(|| line[..indent_len].to_owned())
+    })
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '<' => escaped.push_str("&lt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn inspect_link(
@@ -473,30 +594,14 @@ pub(crate) fn plan_index_html(
     let path = context.project_root().join("index.html");
     let html = context.read_string("index.html")?;
     let css_path = config.styles.css.as_str();
-    if contains_trunk_css_link(&html, css_path) {
+    let Some(patched) =
+        patch_html_stylesheet_link(&html, css_path).map_err(|error| CodegenError::UnsafePatch {
+            path,
+            reason: error.to_string(),
+        })?
+    else {
         return Ok(());
-    }
-
-    let Some(head_end) = html.find("</head>") else {
-        return Err(CodegenError::UnsafePatch {
-            path,
-            reason: "missing </head> marker".to_owned(),
-        });
     };
-
-    if html.matches("<head").count() != 1 || html.matches("</head>").count() != 1 {
-        return Err(CodegenError::UnsafePatch {
-            path,
-            reason: "ambiguous head element".to_owned(),
-        });
-    }
-
-    let insert_at = first_head_trunk_css_link_index(&html, head_end).unwrap_or(head_end);
-    let indent = line_indent_at(&html, insert_at).unwrap_or("    ");
-    let link = format!("{indent}<link data-trunk rel=\"css\" href=\"{css_path}\" />\n");
-
-    let mut patched = html;
-    patched.insert_str(insert_at, &link);
 
     push_file_plan(
         files,
@@ -507,37 +612,6 @@ pub(crate) fn plan_index_html(
         ChangeKind::UpdateFile,
     );
     Ok(())
-}
-
-fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
-    html.lines().any(|line| {
-        line.contains("data-trunk")
-            && line.contains("rel=\"css\"")
-            && line.contains(&format!("href=\"{css_path}\""))
-    })
-}
-
-fn first_head_trunk_css_link_index(html: &str, head_end: usize) -> Option<usize> {
-    let mut offset = 0;
-    for line in html.split_inclusive('\n') {
-        if offset >= head_end {
-            return None;
-        }
-        if line.contains("data-trunk") && line.contains("rel=\"css\"") {
-            return Some(offset);
-        }
-        offset += line.len();
-    }
-    None
-}
-
-fn line_indent_at(html: &str, index: usize) -> Option<&str> {
-    let line = html.get(index..)?.lines().next()?;
-    let indent_len = line
-        .bytes()
-        .take_while(|byte| matches!(byte, b' ' | b'\t'))
-        .count();
-    line.get(..indent_len)
 }
 
 #[cfg(test)]
@@ -693,5 +767,72 @@ mod tests {
         let inspection = inspect_html(&html).expect("bounded scan");
 
         assert_eq!(inspection.head.content.start, inspection.head.content.end);
+    }
+
+    #[test]
+    fn stylesheet_patch_inserts_before_first_active_head_css_link() {
+        let html = "<html>\n  <head>\n    <meta charset=\"utf-8\">\n    <link data-trunk rel=\"css preload\" href=\"styles/app.css\">\n  </head>\n</html>\n";
+
+        let patched = patch_html_stylesheet_link(html, "styles/kit.css")
+            .expect("patch")
+            .expect("missing link");
+
+        assert_eq!(
+            patched,
+            "<html>\n  <head>\n    <meta charset=\"utf-8\">\n    <link data-trunk rel=\"css\" href=\"styles/kit.css\" />\n    <link data-trunk rel=\"css preload\" href=\"styles/app.css\">\n  </head>\n</html>\n"
+        );
+        assert_eq!(
+            patch_html_stylesheet_link(&patched, "styles/kit.css").expect("repeat"),
+            None
+        );
+    }
+
+    #[test]
+    fn stylesheet_patch_preserves_one_line_and_crlf_conventions() {
+        let one_line = "<html><head></head><body></body></html>";
+        assert_eq!(
+            patch_html_stylesheet_link(one_line, "styles/kit.css")
+                .unwrap()
+                .unwrap(),
+            "<html><head><link data-trunk rel=\"css\" href=\"styles/kit.css\" /></head><body></body></html>"
+        );
+
+        let crlf = "<html>\r\n  <head>\r\n  </head>\r\n</html>\r\n";
+        assert_eq!(
+            patch_html_stylesheet_link(crlf, "styles/kit.css")
+                .unwrap()
+                .unwrap(),
+            "<html>\r\n  <head>\r\n    <link data-trunk rel=\"css\" href=\"styles/kit.css\" />\r\n  </head>\r\n</html>\r\n"
+        );
+    }
+
+    #[test]
+    fn stylesheet_authority_rejects_body_only_and_duplicate_matches() {
+        let body_only = "<html><head></head><body><link data-trunk rel=\"css\" href=\"styles/kit.css\"></body></html>";
+        assert!(matches!(
+            inspect_html_stylesheet(body_only, "styles/kit.css"),
+            Err(HtmlInspectionError::Malformed { ref reason, .. })
+                if reason.contains("outside the head")
+        ));
+
+        let duplicate = "<html><head><link data-trunk rel=\"css\" href=\"styles/kit.css\"><link data-trunk rel=\"stylesheet css\" href=\"styles/kit.css\"></head></html>";
+        assert!(matches!(
+            patch_html_stylesheet_link(duplicate, "styles/kit.css"),
+            Err(HtmlInspectionError::Malformed { ref reason, .. })
+                if reason.contains("multiple")
+        ));
+    }
+
+    #[test]
+    fn stylesheet_authority_reports_the_exact_missing_insertion_span() {
+        let html = "<head>\n  <meta charset=\"utf-8\">\n</head>";
+        let state = inspect_html_stylesheet(html, "styles/kit.css").expect("inspect");
+
+        assert_eq!(
+            state,
+            HtmlStylesheetState::Missing {
+                insertion_at: html.find("</head>").unwrap(),
+            }
+        );
     }
 }

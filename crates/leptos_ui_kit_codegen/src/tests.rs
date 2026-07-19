@@ -179,6 +179,71 @@ fn init_plan_uses_configured_stylesheet_path() {
 }
 
 #[test]
+fn init_html_planning_uses_the_lossless_stylesheet_authority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    write_kit_config(root, canonical_kit_json().expect("canonical config"));
+    let html = "<html>\r\n  <head>\r\n    <!-- fake <link data-trunk rel=\"css\" href=\"styles/kit.css\"> -->\r\n    <link data-trunk rel=\"css\" href=\"styles/app.css\">\r\n  </head>\r\n</html>\r\n";
+    fs::write(root.join("index.html"), html).expect("write index");
+
+    let plan = plan_init(root).expect("plan init");
+    let index = plan
+        .files
+        .iter()
+        .find(|file| file.path == "index.html")
+        .expect("planned index");
+
+    assert_eq!(
+        index.content,
+        "<html>\r\n  <head>\r\n    <!-- fake <link data-trunk rel=\"css\" href=\"styles/kit.css\"> -->\r\n    <link data-trunk rel=\"css\" href=\"styles/kit.css\" />\r\n    <link data-trunk rel=\"css\" href=\"styles/app.css\">\r\n  </head>\r\n</html>\r\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("index.html")).unwrap(),
+        html,
+        "planning is write-free"
+    );
+}
+
+#[test]
+fn init_html_planning_accepts_decoded_mixed_case_link_idempotently() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    write_kit_config(root, canonical_kit_json().expect("canonical config"));
+    let html =
+        "<HTML><HeAd><LiNk HREF='styles/kit&#46;css' REL='preload CSS' DATA-TRUNK></HeAd></HTML>";
+    fs::write(root.join("index.html"), html).expect("write index");
+
+    let plan = plan_init(root).expect("plan init");
+
+    assert!(!plan.files.iter().any(|file| file.path == "index.html"));
+}
+
+#[test]
+fn init_html_planning_rejects_ambiguous_or_outside_head_links_before_writes() {
+    for html in [
+        "<html><head></head><body><link data-trunk rel=\"css\" href=\"styles/kit.css\"></body></html>",
+        "<head><link data-trunk rel=\"css\" href=\"styles/kit.css\"><link data-trunk rel=\"css\" href=\"styles/kit.css\"></head>",
+        "<head><link data-trunk rel=\"css\" href=\"styles/kit.css></head>",
+        "<head></head><head></head>",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        write_kit_config(root, canonical_kit_json().expect("canonical config"));
+        fs::write(root.join("index.html"), html).expect("write index");
+
+        let error = plan_init(root).expect_err("unsafe HTML must fail");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }), "{html}");
+        assert_eq!(fs::read_to_string(root.join("index.html")).unwrap(), html);
+        assert!(!root.join("styles/kit.css").exists());
+        assert!(!root.join(DEFAULT_KIT_LOCK_PATH).exists());
+    }
+}
+
+#[test]
 fn init_write_creates_expected_files_and_persistent_coordination() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

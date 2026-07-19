@@ -11,10 +11,10 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
-    InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add,
-    apply_init, apply_sync, check_pending_recovery, hash_content_bytes,
-    inspect_managed_css_blocks_at_path, install_lock_path, parse_install_lock_str_at_path,
-    plan_add, plan_init, plan_sync,
+    HtmlStylesheetState, InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock,
+    SyncPlan, apply_add, apply_init, apply_sync, check_pending_recovery, hash_content_bytes,
+    inspect_html_stylesheet, inspect_managed_css_blocks_at_path, install_lock_path,
+    parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
@@ -1784,23 +1784,31 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
     }
 
     match fs::read_to_string(&info.detected.index_html_path) {
-        Ok(html) if contains_trunk_css_link(&html, css_logical_path) => {
-            checks.push(
+        Ok(html) => match inspect_html_stylesheet(&html, css_logical_path) {
+            Ok(HtmlStylesheetState::Present { .. }) => checks.push(
                 DoctorCheck::pass(
                     "stylesheet_link",
                     format!("index.html links {css_logical_path} for Trunk"),
                 )
                 .with_path(info.detected.index_html_path.display().to_string()),
-            );
-        }
-        Ok(_) => checks.push(
-            strict_check(
-                strict,
-                "stylesheet_link",
-                format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
-            )
-            .with_path(info.detected.index_html_path.display().to_string()),
-        ),
+            ),
+            Ok(HtmlStylesheetState::Missing { .. }) => checks.push(
+                strict_check(
+                    strict,
+                    "stylesheet_link",
+                    format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
+                )
+                .with_path(info.detected.index_html_path.display().to_string()),
+            ),
+            Err(error) => checks.push(
+                strict_check(
+                    strict,
+                    "stylesheet_link",
+                    format!("index.html cannot be inspected safely: {error}"),
+                )
+                .with_path(info.detected.index_html_path.display().to_string()),
+            ),
+        },
         Err(error) => checks.push(
             strict_check(
                 strict,
@@ -1812,14 +1820,6 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
     }
 
     checks
-}
-
-fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
-    html.lines().any(|line| {
-        line.contains("data-trunk")
-            && line.contains("rel=\"css\"")
-            && line.contains(&format!("href=\"{css_path}\""))
-    })
 }
 
 fn registry_dependency_checks(
@@ -3625,6 +3625,95 @@ leptos_router = "0.9.0-alpha"
                 || check.name == "managed_css_closure"
                 || check.name == "managed_css_order"
         }));
+    }
+
+    #[test]
+    fn init_and_doctor_share_the_exact_html_stylesheet_verdict() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let cases = [
+            (
+                "present",
+                "<HTML><HeAd><LiNk DATA-TRUNK REL='preload CSS' HREF='styles/kit&#46;css'></HeAd></HTML>",
+                "present",
+            ),
+            (
+                "missing",
+                "<html><head></head><body></body></html>",
+                "missing",
+            ),
+            (
+                "body-only",
+                "<html><head></head><body><link data-trunk rel=\"css\" href=\"styles/kit.css\"></body></html>",
+                "unsafe",
+            ),
+            (
+                "duplicate",
+                "<head><link data-trunk rel=\"css\" href=\"styles/kit.css\"><link data-trunk rel=\"css\" href=\"styles/kit.css\"></head>",
+                "unsafe",
+            ),
+            (
+                "malformed",
+                "<head><link data-trunk rel=\"css\" href=\"styles/kit.css></head>",
+                "unsafe",
+            ),
+        ];
+
+        for (name, html, expected) in cases {
+            fs::write(root.join("index.html"), html).expect("write index");
+            let plan = plan_init(root);
+            let doctor = build_doctor_output(root, true, false, false);
+            match expected {
+                "present" => {
+                    assert!(
+                        !plan
+                            .expect("present link plan")
+                            .files
+                            .iter()
+                            .any(|file| file.path == "index.html"),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Pass,
+                        "links",
+                    );
+                }
+                "missing" => {
+                    assert!(
+                        plan.expect("missing link is patchable")
+                            .files
+                            .iter()
+                            .any(|file| file.path == "index.html"),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Fail,
+                        "missing",
+                    );
+                }
+                "unsafe" => {
+                    assert!(
+                        matches!(
+                            plan,
+                            Err(leptos_ui_kit_codegen::CodegenError::UnsafePatch { .. })
+                        ),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Fail,
+                        "cannot be inspected safely",
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

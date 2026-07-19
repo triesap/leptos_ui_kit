@@ -11,7 +11,7 @@ pub use css::{
 pub(crate) use html::plan_index_html;
 pub use html::{
     HtmlHeadInspection, HtmlInspection, HtmlInspectionError, HtmlLinkInspection, HtmlSpan,
-    inspect_html,
+    HtmlStylesheetState, inspect_html, inspect_html_stylesheet, patch_html_stylesheet_link,
 };
 pub use module::{patch_components_mod, patch_ui_mod};
 pub(crate) use module::{patch_components_mod_at_path, patch_ui_mod_at_path};

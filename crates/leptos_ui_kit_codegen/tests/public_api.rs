@@ -138,6 +138,10 @@ fn root_symbols_and_function_signatures_remain_available_downstream() {
     let _: fn(&str, &str) -> Result<BTreeMap<String, ManagedCssBlockRange>, CodegenError> =
         inspect_managed_css_blocks_at_path;
     let _: fn(&str) -> Result<HtmlInspection, HtmlInspectionError> = inspect_html;
+    let _: fn(&str, &str) -> Result<HtmlStylesheetState, HtmlInspectionError> =
+        inspect_html_stylesheet;
+    let _: fn(&str, &str) -> Result<Option<String>, HtmlInspectionError> =
+        patch_html_stylesheet_link;
     let _: fn(
         &str,
         &str,
@@ -193,6 +197,7 @@ fn public_traits_associated_methods_and_fields_remain_available() {
     assert_serde_owned_traits::<HtmlHeadInspection>();
     assert_serde_owned_traits::<HtmlLinkInspection>();
     assert_serde_owned_traits::<HtmlInspection>();
+    assert_serde_owned_traits::<HtmlStylesheetState>();
     assert_owned_traits::<HtmlInspectionError>();
     assert_display::<HtmlInspectionError>();
     assert_error::<HtmlInspectionError>();
