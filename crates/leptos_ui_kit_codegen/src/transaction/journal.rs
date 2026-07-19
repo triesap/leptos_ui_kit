@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
+
+use crate::DEFAULT_KIT_LOCK_PATH;
 
 pub(super) const JOURNAL_VERSION: u32 = 2;
 pub(super) const TRANSACTION_ID_HEX_LEN: usize = 32;
@@ -20,13 +23,15 @@ const JOURNAL_SUFFIX: &str = ".json";
 const PARTIAL_SUFFIX: &str = ".json.partial";
 const STAGE_PREFIX: &str = ".leptos-ui-kit-stage-v2-";
 const BACKUP_PREFIX: &str = ".leptos-ui-kit-backup-v2-";
+const STAGE_OWNER_PREFIX: &str = ".leptos-ui-kit-owner-stage-v2-";
+const BACKUP_OWNER_PREFIX: &str = ".leptos-ui-kit-owner-backup-v2-";
 const PARTIAL_MAGIC: &str = "leptos-ui-kit-journal-partial-v2";
 const BOOTSTRAP_MAGIC: &str = "leptos-ui-kit-workspace-bootstrap-v2";
 const BOOTSTRAP_PREFIX: &str = "bootstrap-v2-";
 const BOOTSTRAP_INTENT_MAGIC: &str = "leptos-ui-kit-workspace-bootstrap-intent-v2";
 const BOOTSTRAP_INTENT_PREFIX: &str = "bootstrap-intent-v2-";
 const DIRECTORY_CANDIDATE_PREFIX: &str = ".leptos-ui-kit-directory-v2-";
-const WORKSPACE_PARENT_LOGICAL_PATH: &str = "src/components/ui/_kit";
+const WORKSPACE_PARENT_LOGICAL_PATH: &str = "src/components/ui/_kit/.transactions";
 const CANONICAL_ROOT_HASH_DOMAIN: &[u8] = b"leptos-ui-kit:canonical-root:v2\0";
 const WORKSPACE_OWNER_DOMAIN: &[u8] = b"leptos-ui-kit:workspace-owner:v2\0";
 
@@ -747,23 +752,38 @@ impl PreimageV2 {
             Self::Regular { exact } => PresenceV2::Present(exact.clone()),
         }
     }
+
+    pub(super) const fn as_exact(&self) -> Option<&ExactFileStateV2> {
+        match self {
+            Self::Absent => None,
+            Self::Regular { exact } => Some(exact),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct ArtifactV2 {
+    owner_name: String,
     name: String,
     prepared: Option<ExactFileStateV2>,
+    owner_current: PresenceV2<ExactFileStateV2>,
     current: PresenceV2<ExactFileStateV2>,
 }
 
 impl ArtifactV2 {
-    fn missing(name: String) -> Self {
+    fn missing(owner_name: String, name: String) -> Self {
         Self {
+            owner_name,
             name,
             prepared: None,
+            owner_current: PresenceV2::Missing,
             current: PresenceV2::Missing,
         }
+    }
+
+    pub(super) fn owner_name(&self) -> &str {
+        &self.owner_name
     }
 
     pub(super) fn name(&self) -> &str {
@@ -772,6 +792,10 @@ impl ArtifactV2 {
 
     pub(super) fn current(&self) -> &PresenceV2<ExactFileStateV2> {
         &self.current
+    }
+
+    pub(super) fn owner_current(&self) -> &PresenceV2<ExactFileStateV2> {
+        &self.owner_current
     }
 
     pub(super) fn prepared(&self) -> Option<&ExactFileStateV2> {
@@ -812,9 +836,16 @@ impl JournalEntryV2 {
             preimage,
             planned,
             current_target,
-            stage: ArtifactV2::missing(stage_name(transaction_id, ordinal)),
-            backup: (action == EntryActionV2::Replace)
-                .then(|| ArtifactV2::missing(backup_name(transaction_id, ordinal))),
+            stage: ArtifactV2::missing(
+                stage_owner_name(transaction_id, ordinal),
+                stage_name(transaction_id, ordinal),
+            ),
+            backup: (action == EntryActionV2::Replace).then(|| {
+                ArtifactV2::missing(
+                    backup_owner_name(transaction_id, ordinal),
+                    backup_name(transaction_id, ordinal),
+                )
+            }),
         };
         entry.validate_static(transaction_id)?;
         Ok(entry)
@@ -869,6 +900,12 @@ impl JournalEntryV2 {
                 self.logical_path
             )));
         }
+        if self.stage.owner_name != stage_owner_name(transaction_id, self.ordinal) {
+            return Err(JournalModelError::new(format!(
+                "entry {} has a non-deterministic stage owner name",
+                self.logical_path
+            )));
+        }
         match (&self.action, &self.preimage, &self.backup) {
             (EntryActionV2::Create, PreimageV2::Absent, None) => {}
             (EntryActionV2::Replace, PreimageV2::Regular { exact }, Some(backup)) => {
@@ -888,6 +925,12 @@ impl JournalEntryV2 {
                 if backup.name != backup_name(transaction_id, self.ordinal) {
                     return Err(JournalModelError::new(format!(
                         "entry {} has a non-deterministic backup name",
+                        self.logical_path
+                    )));
+                }
+                if backup.owner_name != backup_owner_name(transaction_id, self.ordinal) {
+                    return Err(JournalModelError::new(format!(
+                        "entry {} has a non-deterministic backup owner name",
                         self.logical_path
                     )));
                 }
@@ -1059,6 +1102,7 @@ impl JournalDirectoryV2 {
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "camelCase")]
 pub(super) enum DirectoryParentV2 {
     ProjectRoot,
+    TransactionWorkspace,
     Cohort { ordinal: ArtifactOrdinal },
 }
 
@@ -1074,6 +1118,255 @@ pub(super) enum PreparationObservationV2 {
     Backup {
         exact: ExactFileStateV2,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum FileArtifactKindV2 {
+    Stage,
+    Backup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum OwnerArtifactKindV2 {
+    Directory,
+    Stage,
+    Backup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "camelCase")]
+pub(super) enum OwnerCreationPolicyV2 {
+    Directory {
+        final_mode: DirectoryModeV2,
+    },
+    File {
+        max_byte_len: u64,
+        final_readonly: bool,
+        final_posix_mode: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct OwnerCreationIntentV2 {
+    ordinal: ArtifactOrdinal,
+    artifact: OwnerArtifactKindV2,
+    owner_name: String,
+    policy: OwnerCreationPolicyV2,
+}
+
+impl OwnerCreationIntentV2 {
+    pub(super) const fn ordinal(&self) -> ArtifactOrdinal {
+        self.ordinal
+    }
+
+    pub(super) const fn artifact(&self) -> OwnerArtifactKindV2 {
+        self.artifact
+    }
+
+    pub(super) fn owner_name(&self) -> &str {
+        &self.owner_name
+    }
+
+    pub(super) fn policy(&self) -> &OwnerCreationPolicyV2 {
+        &self.policy
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct ExactFileMetadataV2 {
+    identity: ObjectIdentityV2,
+    byte_len: u64,
+    readonly: bool,
+    posix_mode: Option<u32>,
+    link_count: u64,
+}
+
+impl ExactFileMetadataV2 {
+    pub(super) fn new(
+        identity: ObjectIdentityV2,
+        byte_len: u64,
+        readonly: bool,
+        posix_mode: Option<u32>,
+        link_count: u64,
+    ) -> Result<Self, JournalModelError> {
+        validate_posix_mode(posix_mode)?;
+        if link_count == 0 {
+            return Err(JournalModelError::new(
+                "owned residual regular-file metadata must have a positive link count",
+            ));
+        }
+        Ok(Self {
+            identity,
+            byte_len,
+            readonly,
+            posix_mode,
+            link_count,
+        })
+    }
+
+    pub(super) const fn identity(&self) -> ObjectIdentityV2 {
+        self.identity
+    }
+
+    pub(super) const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    pub(super) const fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub(super) const fn posix_mode(&self) -> Option<u32> {
+        self.posix_mode
+    }
+
+    pub(super) const fn link_count(&self) -> u64 {
+        self.link_count
+    }
+
+    fn validate(&self) -> Result<(), JournalModelError> {
+        Self::new(
+            self.identity,
+            self.byte_len,
+            self.readonly,
+            self.posix_mode,
+            self.link_count,
+        )
+        .map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct ExactDirectoryMetadataV2 {
+    exact: ExactDirectoryStateV2,
+    link_count: u64,
+}
+
+impl ExactDirectoryMetadataV2 {
+    pub(super) fn new(
+        exact: ExactDirectoryStateV2,
+        link_count: u64,
+    ) -> Result<Self, JournalModelError> {
+        exact.validate()?;
+        if link_count == 0 {
+            return Err(JournalModelError::new(
+                "owned residual directory metadata must have a positive link count",
+            ));
+        }
+        Ok(Self { exact, link_count })
+    }
+
+    pub(super) fn exact(&self) -> &ExactDirectoryStateV2 {
+        &self.exact
+    }
+
+    pub(super) const fn link_count(&self) -> u64 {
+        self.link_count
+    }
+
+    fn validate(&self) -> Result<(), JournalModelError> {
+        Self::new(self.exact.clone(), self.link_count).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "kind",
+    content = "exact",
+    rename_all = "camelCase"
+)]
+pub(super) enum OwnedResidualObjectV2 {
+    File(ExactFileMetadataV2),
+    Directory(ExactDirectoryMetadataV2),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct OwnedResidualDeleteBindingV2 {
+    owner: OwnerCreationIntentV2,
+    object: OwnedResidualObjectV2,
+}
+
+impl OwnedResidualDeleteBindingV2 {
+    pub(super) const fn new(owner: OwnerCreationIntentV2, object: OwnedResidualObjectV2) -> Self {
+        Self { owner, object }
+    }
+
+    pub(super) fn owner(&self) -> &OwnerCreationIntentV2 {
+        &self.owner
+    }
+
+    pub(super) fn object(&self) -> &OwnedResidualObjectV2 {
+        &self.object
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct FilePlacementIntentV2 {
+    ordinal: ArtifactOrdinal,
+    artifact: FileArtifactKindV2,
+    owner_name: String,
+    placed_name: String,
+    expected_owner: ExactFileStateV2,
+    parent: DirectoryParentV2,
+    parent_before: ExactDirectoryStateV2,
+}
+
+impl FilePlacementIntentV2 {
+    pub(super) fn new(
+        ordinal: ArtifactOrdinal,
+        artifact: FileArtifactKindV2,
+        owner_name: impl Into<String>,
+        placed_name: impl Into<String>,
+        expected_owner: ExactFileStateV2,
+        parent: DirectoryParentV2,
+        parent_before: ExactDirectoryStateV2,
+    ) -> Self {
+        Self {
+            ordinal,
+            artifact,
+            owner_name: owner_name.into(),
+            placed_name: placed_name.into(),
+            expected_owner,
+            parent,
+            parent_before,
+        }
+    }
+
+    pub(super) const fn ordinal(&self) -> ArtifactOrdinal {
+        self.ordinal
+    }
+
+    pub(super) const fn artifact(&self) -> FileArtifactKindV2 {
+        self.artifact
+    }
+
+    pub(super) fn owner_name(&self) -> &str {
+        &self.owner_name
+    }
+
+    pub(super) fn placed_name(&self) -> &str {
+        &self.placed_name
+    }
+
+    pub(super) fn expected_owner(&self) -> &ExactFileStateV2 {
+        &self.expected_owner
+    }
+
+    pub(super) const fn parent(&self) -> DirectoryParentV2 {
+        self.parent
+    }
+
+    pub(super) fn parent_before(&self) -> &ExactDirectoryStateV2 {
+        &self.parent_before
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1106,6 +1399,56 @@ impl DirectoryPublishIntentV2 {
     pub(super) const fn ordinal(&self) -> ArtifactOrdinal {
         self.ordinal
     }
+
+    pub(super) fn owner_name(&self) -> &str {
+        &self.candidate_name
+    }
+
+    pub(super) fn expected_owner(&self) -> &ExactDirectoryStateV2 {
+        &self.expected_candidate
+    }
+
+    pub(super) const fn parent(&self) -> DirectoryParentV2 {
+        self.parent
+    }
+
+    pub(super) fn parent_before(&self) -> &ExactDirectoryStateV2 {
+        &self.parent_before
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "kind",
+    content = "intent",
+    rename_all = "camelCase"
+)]
+pub(super) enum PreparationPlacementIntentV2 {
+    Directory(DirectoryPublishIntentV2),
+    File(FilePlacementIntentV2),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "kind",
+    content = "intent",
+    rename_all = "camelCase"
+)]
+pub(super) enum PreparationPendingIntentV2 {
+    CreateOwner(OwnerCreationIntentV2),
+    DiscardOwner(OwnedResidualDeleteBindingV2),
+    PlaceOwner(PreparationPlacementIntentV2),
+}
+
+impl PreparationPlacementIntentV2 {
+    pub(super) const fn ordinal(&self) -> ArtifactOrdinal {
+        match self {
+            Self::Directory(intent) => intent.ordinal,
+            Self::File(intent) => intent.ordinal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1113,6 +1456,39 @@ pub(super) struct DirectoryPublicationObservationV2 {
     target: ExactDirectoryStateV2,
     candidate: PresenceV2<ExactDirectoryStateV2>,
     parent_after: ExactDirectoryStateV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FilePlacementObservationV2 {
+    placed: ExactFileStateV2,
+    owner: PresenceV2<ExactFileStateV2>,
+    parent_after: ExactDirectoryStateV2,
+}
+
+impl FilePlacementObservationV2 {
+    pub(super) const fn new(
+        placed: ExactFileStateV2,
+        owner: PresenceV2<ExactFileStateV2>,
+        parent_after: ExactDirectoryStateV2,
+    ) -> Self {
+        Self {
+            placed,
+            owner,
+            parent_after,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PreparationPlacementObservationV2 {
+    Directory(DirectoryPublicationObservationV2),
+    File(FilePlacementObservationV2),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreparationPlacementWorldV2 {
+    Before,
+    After,
 }
 
 impl DirectoryPublicationObservationV2 {
@@ -1131,9 +1507,8 @@ impl DirectoryPublicationObservationV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DirectoryPublicationWorldV2 {
-    CandidatePrivate,
-    CandidateReady,
-    Published,
+    Before,
+    After,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,10 +1526,12 @@ impl ReplacementObservationV2 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "camelCase")]
 pub(super) enum CleanupTargetV2 {
-    Stage { ordinal: ArtifactOrdinal },
-    Backup { ordinal: ArtifactOrdinal },
+    OwnedStage { ordinal: ArtifactOrdinal },
+    PlacedStage { ordinal: ArtifactOrdinal },
+    OwnedBackup { ordinal: ArtifactOrdinal },
+    PlacedBackup { ordinal: ArtifactOrdinal },
     CreatedDirectory { ordinal: ArtifactOrdinal },
-    DirectoryCandidate { ordinal: ArtifactOrdinal },
+    OwnedDirectory { ordinal: ArtifactOrdinal },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1226,7 +1603,7 @@ impl CleanupIntentV2 {
 pub(super) enum JournalPhaseV2 {
     Preparing {
         completed: u32,
-        pending_directory: Option<DirectoryPublishIntentV2>,
+        pending: Option<PreparationPendingIntentV2>,
     },
     Prepared,
     Replacing {
@@ -1355,6 +1732,22 @@ impl WorkspaceBootstrapIntentEnvelopeV2 {
         })?;
         bytes.push(b'\n');
         Ok(bytes)
+    }
+
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) fn canonical_root_hash(&self) -> &Sha256Digest {
+        &self.canonical_root_hash
+    }
+
+    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_preimage
+    }
+
+    pub(super) fn workspace_name(&self) -> &str {
+        &self.workspace_name
     }
 
     fn validate(&self) -> Result<(), JournalModelError> {
@@ -1492,6 +1885,34 @@ impl WorkspaceBootstrapEnvelopeV2 {
         Ok(bytes)
     }
 
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) fn canonical_root_hash(&self) -> &Sha256Digest {
+        &self.canonical_root_hash
+    }
+
+    pub(super) fn owner_tag(&self) -> &Sha256Digest {
+        &self.owner_tag
+    }
+
+    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_preimage
+    }
+
+    pub(super) fn workspace_parent_after_workspace(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_after_workspace
+    }
+
+    pub(super) fn workspace_name(&self) -> &str {
+        &self.workspace_name
+    }
+
+    pub(super) fn workspace_exact(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_exact
+    }
+
     fn validate(&self) -> Result<(), JournalModelError> {
         if self.magic != BOOTSTRAP_MAGIC || self.version != JOURNAL_VERSION {
             return Err(JournalModelError::new(
@@ -1544,6 +1965,46 @@ impl WorkspaceBootstrapBindingV2 {
             envelope: WorkspaceBootstrapEnvelopeV2::for_project(transaction_id, project),
         };
         binding.validate_for(transaction_id, project)?;
+        Ok(binding)
+    }
+
+    pub(super) fn from_exact_envelopes(
+        intent: WorkspaceBootstrapIntentBindingV2,
+        envelope: WorkspaceBootstrapEnvelopeV2,
+        exact: ExactFileStateV2,
+    ) -> Result<Self, JournalModelError> {
+        if intent.envelope.transaction_id != envelope.transaction_id
+            || intent.envelope.canonical_root_hash != envelope.canonical_root_hash
+            || intent.envelope.workspace_name != envelope.workspace_name
+        {
+            return Err(JournalModelError::new(
+                "bootstrap owner does not continue its exact intent lineage",
+            ));
+        }
+        validate_parent_stable_growth(
+            &intent.envelope.workspace_parent_preimage,
+            &envelope.workspace_parent_preimage,
+        )?;
+        let mut identities = BTreeSet::new();
+        for identity in [
+            envelope.workspace_parent_after_workspace.identity,
+            envelope.workspace_exact.identity,
+            intent.exact.identity,
+            exact.identity,
+        ] {
+            if !identities.insert(identity) {
+                return Err(JournalModelError::new(
+                    "bootstrap ownership envelopes alias their parent, workspace, or one another",
+                ));
+            }
+        }
+        let binding = Self {
+            intent,
+            name: bootstrap_owner_name(&envelope.transaction_id),
+            exact,
+            envelope,
+        };
+        binding.validate_exact_file()?;
         Ok(binding)
     }
 
@@ -1660,6 +2121,131 @@ impl<'de> Deserialize<'de> for JournalSnapshotV2 {
     }
 }
 
+/// A journal snapshot whose model invariants and canonical record-envelope
+/// bytes have been established together.  The cached file state is derived
+/// from those bytes exactly once and is the only source used when this value
+/// is bound to a published record identity.
+#[derive(Debug)]
+pub(super) struct ValidatedJournalEnvelopeV2 {
+    snapshot: JournalSnapshotV2,
+    envelope_bytes: Vec<u8>,
+    record_state: FileStateV2,
+}
+
+impl ValidatedJournalEnvelopeV2 {
+    /// Validates an in-memory snapshot once, emits its one canonical envelope,
+    /// and caches the exact state of that envelope for later identity binding.
+    pub(super) fn from_snapshot(snapshot: JournalSnapshotV2) -> Result<Self, JournalModelError> {
+        snapshot.validate()?;
+        let envelope_bytes = snapshot.record_envelope_bytes_after_validation()?;
+        Self::from_validated_envelope(snapshot, envelope_bytes)
+    }
+
+    /// Parses and validates a complete record envelope once.  The payload is
+    /// serialized once after validation solely to prove that the supplied
+    /// bytes are canonical; subsequent binding and adjacency checks use the
+    /// cached bytes and state without parsing, serializing, or hashing again.
+    pub(super) fn from_record_envelope_slice(bytes: &[u8]) -> Result<Self, JournalModelError> {
+        let (header, payload) = PartialEnvelopeHeaderV2::parse_prefix(bytes)?;
+        let snapshot = JournalSnapshotV2::from_json_slice(payload)?;
+        header.validate_binding(
+            &snapshot.transaction_id,
+            &snapshot.project,
+            snapshot.sequence,
+        )?;
+        let canonical_payload = snapshot.to_json_bytes_after_validation()?;
+        if payload != canonical_payload {
+            return Err(JournalModelError::new(
+                "journal record payload bytes are not canonical",
+            ));
+        }
+        header.validate_payload_prefix(payload, &canonical_payload)?;
+        Self::from_validated_envelope(snapshot, bytes.to_vec())
+    }
+
+    pub(super) fn snapshot(&self) -> &JournalSnapshotV2 {
+        &self.snapshot
+    }
+
+    pub(super) fn envelope_bytes(&self) -> &[u8] {
+        &self.envelope_bytes
+    }
+
+    /// Consumes the canonical envelope and binds it to the independently
+    /// observed exact immutable record without recanonicalizing or rehashing
+    /// the envelope. The supplied link count is retained so the same type can
+    /// represent both stable records and the newest linked-publication overlap.
+    pub(super) fn bind_exact(
+        self: Arc<Self>,
+        exact: ExactFileStateV2,
+    ) -> Result<ValidatedJournalRecordV2, JournalModelError> {
+        if exact.state() != &self.record_state {
+            return Err(JournalModelError::new(
+                "published record exact state does not match its canonical envelope bytes",
+            ));
+        }
+        let binding =
+            RecordBindingV2::new(self.snapshot.sequence, self.snapshot.record_name(), exact)?;
+        Ok(ValidatedJournalRecordV2 {
+            envelope: self,
+            binding,
+        })
+    }
+
+    fn from_validated_envelope(
+        snapshot: JournalSnapshotV2,
+        envelope_bytes: Vec<u8>,
+    ) -> Result<Self, JournalModelError> {
+        let byte_len = u64::try_from(envelope_bytes.len())
+            .map_err(|_| JournalModelError::new("journal record envelope exceeds u64"))?;
+        let record_state = FileStateV2::new(
+            content_hash(&envelope_bytes),
+            byte_len,
+            false,
+            private_posix_mode(0o600),
+        )?;
+        Ok(Self {
+            snapshot,
+            envelope_bytes,
+            record_state,
+        })
+    }
+}
+
+/// A validated canonical envelope paired with the exact immutable filesystem
+/// identity that stores it.  Private fields make the binding inseparable from
+/// the cached bytes used to derive it.
+#[derive(Debug)]
+pub(super) struct ValidatedJournalRecordV2 {
+    envelope: Arc<ValidatedJournalEnvelopeV2>,
+    binding: RecordBindingV2,
+}
+
+impl ValidatedJournalRecordV2 {
+    pub(super) fn snapshot(&self) -> &JournalSnapshotV2 {
+        self.envelope.snapshot()
+    }
+
+    pub(super) fn envelope_bytes(&self) -> &[u8] {
+        self.envelope.envelope_bytes()
+    }
+
+    pub(super) fn binding(&self) -> &RecordBindingV2 {
+        &self.binding
+    }
+
+    /// Checks exact predecessor binding plus the closed successor transition
+    /// between two already-validated canonical records.  No model-wide
+    /// validation, serialization, or hashing occurs on this path.
+    pub(super) fn validate_successor(
+        &self,
+        next: &ValidatedJournalRecordV2,
+    ) -> Result<(), JournalModelError> {
+        self.snapshot()
+            .validate_successor_after_validation(self.binding(), next.snapshot())
+    }
+}
+
 impl JournalSnapshotV2 {
     pub(super) fn new(
         transaction_id: TransactionId,
@@ -1681,7 +2267,7 @@ impl JournalSnapshotV2 {
             previous_record: None,
             phase: JournalPhaseV2::Preparing {
                 completed: 0,
-                pending_directory: None,
+                pending: None,
             },
             entries,
             directories,
@@ -1710,6 +2296,10 @@ impl JournalSnapshotV2 {
 
     pub(super) fn to_json_bytes(&self) -> Result<Vec<u8>, JournalModelError> {
         self.validate()?;
+        self.to_json_bytes_after_validation()
+    }
+
+    fn to_json_bytes_after_validation(&self) -> Result<Vec<u8>, JournalModelError> {
         let mut bytes = serde_json::to_vec_pretty(self).map_err(|error| {
             JournalModelError::new(format!("could not serialize journal snapshot: {error}"))
         })?;
@@ -1718,7 +2308,12 @@ impl JournalSnapshotV2 {
     }
 
     pub(super) fn record_envelope_bytes(&self) -> Result<Vec<u8>, JournalModelError> {
-        let payload = self.to_json_bytes()?;
+        self.validate()?;
+        self.record_envelope_bytes_after_validation()
+    }
+
+    fn record_envelope_bytes_after_validation(&self) -> Result<Vec<u8>, JournalModelError> {
+        let payload = self.to_json_bytes_after_validation()?;
         let header = PartialEnvelopeHeaderV2::for_payload(
             self.transaction_id.clone(),
             &self.project,
@@ -1786,7 +2381,15 @@ impl JournalSnapshotV2 {
         &self,
         identity: ObjectIdentityV2,
     ) -> Result<RecordBindingV2, JournalModelError> {
-        let bytes = self.record_envelope_bytes()?;
+        self.validate()?;
+        self.expected_record_binding_after_validation(identity)
+    }
+
+    fn expected_record_binding_after_validation(
+        &self,
+        identity: ObjectIdentityV2,
+    ) -> Result<RecordBindingV2, JournalModelError> {
+        let bytes = self.record_envelope_bytes_after_validation()?;
         let state = FileStateV2::new(
             content_hash(&bytes),
             bytes.len() as u64,
@@ -1804,7 +2407,15 @@ impl JournalSnapshotV2 {
         &self,
         binding: &RecordBindingV2,
     ) -> Result<(), JournalModelError> {
-        let expected = self.expected_record_binding(binding.exact.identity)?;
+        self.validate()?;
+        self.validate_record_binding_after_validation(binding)
+    }
+
+    fn validate_record_binding_after_validation(
+        &self,
+        binding: &RecordBindingV2,
+    ) -> Result<(), JournalModelError> {
+        let expected = self.expected_record_binding_after_validation(binding.exact.identity)?;
         if binding != &expected {
             return Err(JournalModelError::new(
                 "record binding does not match the snapshot's canonical bytes, name, and sequence",
@@ -1819,22 +2430,38 @@ impl JournalSnapshotV2 {
             .filter(|directory| directory.disposition == DirectoryDispositionV2::Create)
             .count()
             * 2
-            + self.entries.len()
+            + self.entries.len() * 2
             + self
                 .entries
                 .iter()
                 .filter(|entry| entry.backup.is_some())
                 .count()
+                * 2
     }
 
-    pub(super) fn adopt_next_preparation(
+    pub(super) fn next_preparation_slot(&self) -> Result<PreparationSlot, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: None | Some(PreparationPendingIntentV2::CreateOwner(_)),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "next preparation slot requires an unarmed or CreateOwner Preparing phase",
+            ));
+        };
+        self.preparation_slot(
+            usize::try_from(*completed)
+                .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?,
+        )
+    }
+
+    pub(super) fn arm_owner_creation(
         &self,
         current_record: RecordBindingV2,
-        observation: PreparationObservationV2,
     ) -> Result<Self, JournalModelError> {
         let JournalPhaseV2::Preparing {
             completed,
-            pending_directory: None,
+            pending: None,
         } = &self.phase
         else {
             return Err(JournalModelError::new(
@@ -1843,18 +2470,138 @@ impl JournalSnapshotV2 {
         };
         let index = usize::try_from(*completed)
             .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?;
-        if index >= self.preparation_step_count() {
+        let intent = self.owner_creation_intent(index)?;
+        let mut next = self.next_base(current_record)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: *completed,
+            pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
+        };
+        self.finish_named_successor(next)
+    }
+
+    pub(super) fn complete_owner_creation(
+        &self,
+        current_record: RecordBindingV2,
+        observation: PreparationObservationV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
+        } = &self.phase
+        else {
             return Err(JournalModelError::new(
-                "all preparation observations are already recorded",
+                "owner creation completion requires its durable CreateOwner intent",
             ));
-        }
+        };
+        let index = usize::try_from(*completed)
+            .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?;
+        self.validate_owner_completion(index, intent, &observation)?;
         let mut next = self.next_base(current_record)?;
         next.apply_preparation(index, observation)?;
         next.phase = JournalPhaseV2::Preparing {
             completed: completed
                 .checked_add(1)
                 .ok_or_else(|| JournalModelError::new("preparation counter overflow"))?,
-            pending_directory: None,
+            pending: None,
+        };
+        self.finish_named_successor(next)
+    }
+
+    #[cfg(test)]
+    fn adopt_next_preparation(
+        &self,
+        current_record: RecordBindingV2,
+        observation: PreparationObservationV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: None,
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "test preparation adoption requires an unarmed Preparing phase",
+            ));
+        };
+        let index = usize::try_from(*completed)
+            .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?;
+        let mut next = self.next_base(current_record)?;
+        next.apply_preparation(index, observation)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: completed
+                .checked_add(1)
+                .ok_or_else(|| JournalModelError::new("preparation counter overflow"))?,
+            pending: None,
+        };
+        next.validate()?;
+        Ok(next)
+    }
+
+    pub(super) fn arm_owner_discard(
+        &self,
+        current_record: RecordBindingV2,
+        binding: OwnedResidualDeleteBindingV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "owner residual discard requires a durable CreateOwner intent",
+            ));
+        };
+        if binding.owner() != intent {
+            return Err(JournalModelError::new(
+                "owner residual discard does not bind the pending CreateOwner intent",
+            ));
+        }
+        self.validate_owner_residual(*completed as usize, &binding)?;
+        let mut next = self.next_base(current_record)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: *completed,
+            pending: Some(PreparationPendingIntentV2::DiscardOwner(binding)),
+        };
+        self.finish_named_successor(next)
+    }
+
+    pub(super) fn complete_owner_discard(
+        &self,
+        current_record: RecordBindingV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: Some(PreparationPendingIntentV2::DiscardOwner(_)),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "owner residual discard completion requires its durable DiscardOwner intent",
+            ));
+        };
+        let mut next = self.next_base(current_record)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: *completed,
+            pending: None,
+        };
+        self.finish_named_successor(next)
+    }
+
+    pub(super) fn cancel_owner_creation(
+        &self,
+        current_record: RecordBindingV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: Some(PreparationPendingIntentV2::CreateOwner(_)),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "owner creation cancellation requires a durable CreateOwner intent",
+            ));
+        };
+        let mut next = self.next_base(current_record)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: *completed,
+            pending: None,
         };
         self.finish_named_successor(next)
     }
@@ -1864,33 +2611,41 @@ impl JournalSnapshotV2 {
         current_record: RecordBindingV2,
         intent: DirectoryPublishIntentV2,
     ) -> Result<Self, JournalModelError> {
+        self.arm_preparation_placement(
+            current_record,
+            PreparationPlacementIntentV2::Directory(intent),
+        )
+    }
+
+    pub(super) fn arm_file_placement(
+        &self,
+        current_record: RecordBindingV2,
+        intent: FilePlacementIntentV2,
+    ) -> Result<Self, JournalModelError> {
+        self.arm_preparation_placement(current_record, PreparationPlacementIntentV2::File(intent))
+    }
+
+    fn arm_preparation_placement(
+        &self,
+        current_record: RecordBindingV2,
+        intent: PreparationPlacementIntentV2,
+    ) -> Result<Self, JournalModelError> {
         let JournalPhaseV2::Preparing {
             completed,
-            pending_directory: None,
+            pending: None,
         } = &self.phase
         else {
             return Err(JournalModelError::new(
-                "directory publication requires an unarmed Preparing phase",
+                "artifact placement requires an unarmed Preparing phase",
             ));
         };
         let index = usize::try_from(*completed)
             .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?;
-        let PreparationSlot::DirectoryPublish(directory_index) = self.preparation_slot(index)?
-        else {
-            return Err(JournalModelError::new(
-                "directory publication intent does not match the next preparation slot",
-            ));
-        };
-        if self.directories[directory_index].ordinal != intent.ordinal {
-            return Err(JournalModelError::new(
-                "directory publication intent has the wrong deterministic ordinal",
-            ));
-        }
-        self.validate_directory_publish_intent(&intent)?;
+        self.validate_placement_slot(index, &intent)?;
         let mut next = self.next_base(current_record)?;
         next.phase = JournalPhaseV2::Preparing {
             completed: *completed,
-            pending_directory: Some(intent),
+            pending: Some(PreparationPendingIntentV2::PlaceOwner(intent)),
         };
         self.finish_named_successor(next)
     }
@@ -1902,7 +2657,10 @@ impl JournalSnapshotV2 {
     ) -> Result<Self, JournalModelError> {
         let JournalPhaseV2::Preparing {
             completed,
-            pending_directory: Some(intent),
+            pending:
+                Some(PreparationPendingIntentV2::PlaceOwner(PreparationPlacementIntentV2::Directory(
+                    intent,
+                ))),
         } = &self.phase
         else {
             return Err(JournalModelError::new(
@@ -1915,7 +2673,54 @@ impl JournalSnapshotV2 {
             completed: completed
                 .checked_add(1)
                 .ok_or_else(|| JournalModelError::new("preparation counter overflow"))?,
-            pending_directory: None,
+            pending: None,
+        };
+        self.finish_named_successor(next)
+    }
+
+    pub(super) fn complete_file_placement(
+        &self,
+        current_record: RecordBindingV2,
+        observation: FilePlacementObservationV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending:
+                Some(PreparationPendingIntentV2::PlaceOwner(PreparationPlacementIntentV2::File(intent))),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "file placement completion requires its durable pending intent",
+            ));
+        };
+        let mut next = self.next_base(current_record)?;
+        next.apply_file_placement(intent, observation)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: completed
+                .checked_add(1)
+                .ok_or_else(|| JournalModelError::new("preparation counter overflow"))?,
+            pending: None,
+        };
+        self.finish_named_successor(next)
+    }
+
+    pub(super) fn cancel_preparation_placement(
+        &self,
+        current_record: RecordBindingV2,
+    ) -> Result<Self, JournalModelError> {
+        let JournalPhaseV2::Preparing {
+            completed,
+            pending: Some(PreparationPendingIntentV2::PlaceOwner(_)),
+        } = &self.phase
+        else {
+            return Err(JournalModelError::new(
+                "preparation placement cancellation requires a durable PlaceOwner intent",
+            ));
+        };
+        let mut next = self.next_base(current_record)?;
+        next.phase = JournalPhaseV2::Preparing {
+            completed: *completed,
+            pending: None,
         };
         self.finish_named_successor(next)
     }
@@ -1926,7 +2731,7 @@ impl JournalSnapshotV2 {
     ) -> Result<Self, JournalModelError> {
         let JournalPhaseV2::Preparing {
             completed,
-            pending_directory: None,
+            pending: None,
         } = &self.phase
         else {
             return Err(JournalModelError::new("only Preparing can become Prepared"));
@@ -1978,10 +2783,8 @@ impl JournalSnapshotV2 {
     ) -> Result<Self, JournalModelError> {
         if !matches!(
             &self.phase,
-            JournalPhaseV2::Preparing {
-                pending_directory: None,
-                ..
-            } | JournalPhaseV2::Prepared
+            JournalPhaseV2::Preparing { pending: None, .. }
+                | JournalPhaseV2::Prepared
                 | JournalPhaseV2::Replacing { .. }
         ) {
             return Err(JournalModelError::new(
@@ -2228,7 +3031,7 @@ impl JournalSnapshotV2 {
 
     fn next_base(&self, current_record: RecordBindingV2) -> Result<Self, JournalModelError> {
         self.validate()?;
-        self.validate_record_binding(&current_record)?;
+        self.validate_record_binding_after_validation(&current_record)?;
         let mut next = self.clone();
         next.sequence = self
             .sequence
@@ -2240,7 +3043,10 @@ impl JournalSnapshotV2 {
 
     fn finish_named_successor(&self, next: Self) -> Result<Self, JournalModelError> {
         next.validate()?;
-        self.validate_successor(&next)?;
+        let current_record = next.previous_record.as_ref().ok_or_else(|| {
+            JournalModelError::new("successor is missing its exact previous-record binding")
+        })?;
+        self.validate_successor_after_validation(current_record, &next)?;
         Ok(next)
     }
 
@@ -2248,25 +3054,33 @@ impl JournalSnapshotV2 {
         for (directory_index, directory) in self.directories.iter().enumerate() {
             if directory.disposition == DirectoryDispositionV2::Create {
                 if index == 0 {
-                    return Ok(PreparationSlot::DirectoryCandidate(directory_index));
+                    return Ok(PreparationSlot::DirectoryOwner(directory_index));
                 }
                 index -= 1;
                 if index == 0 {
-                    return Ok(PreparationSlot::DirectoryPublish(directory_index));
+                    return Ok(PreparationSlot::DirectoryPlacement(directory_index));
                 }
                 index -= 1;
             }
         }
         for entry_index in 0..self.entries.len() {
             if index == 0 {
-                return Ok(PreparationSlot::Stage(entry_index));
+                return Ok(PreparationSlot::StageOwner(entry_index));
+            }
+            index -= 1;
+            if index == 0 {
+                return Ok(PreparationSlot::StagePlacement(entry_index));
             }
             index -= 1;
         }
         for (entry_index, entry) in self.entries.iter().enumerate() {
             if entry.backup.is_some() {
                 if index == 0 {
-                    return Ok(PreparationSlot::Backup(entry_index));
+                    return Ok(PreparationSlot::BackupOwner(entry_index));
+                }
+                index -= 1;
+                if index == 0 {
+                    return Ok(PreparationSlot::BackupPlacement(entry_index));
                 }
                 index -= 1;
             }
@@ -2283,7 +3097,7 @@ impl JournalSnapshotV2 {
     ) -> Result<(), JournalModelError> {
         match (self.preparation_slot(index)?, observation) {
             (
-                PreparationSlot::DirectoryCandidate(directory_index),
+                PreparationSlot::DirectoryOwner(directory_index),
                 PreparationObservationV2::DirectoryCandidate {
                     exact,
                     parent_after,
@@ -2299,16 +3113,30 @@ impl JournalSnapshotV2 {
                         "directory candidate observation does not match its missing exact preimage",
                     ));
                 }
-                require_private_directory_mode(&exact, 0o700, "directory candidate")?;
-                let parent = self.directory_parent(directory_index)?;
-                self.validate_and_set_parent_after_creation(parent, parent_after)?;
+                if exact.mode != directory.planned_mode {
+                    return Err(JournalModelError::new(
+                        "directory owner must already carry its final planned mode",
+                    ));
+                }
+                // Owner creation is contained by the exact transaction
+                // workspace. It must not mutate the logical destination
+                // parent before a durable placement intent exists.
+                if &parent_after != self.project.workspace().exact() {
+                    return Err(JournalModelError::new(
+                        "directory owner observation is not bound to the exact transaction workspace",
+                    ));
+                }
                 self.directories[directory_index].created_exact = Some(exact.clone());
                 self.directories[directory_index].candidate_current = PresenceV2::Present(exact);
             }
-            (PreparationSlot::Stage(entry_index), PreparationObservationV2::Stage { exact }) => {
+            (
+                PreparationSlot::StageOwner(entry_index),
+                PreparationObservationV2::Stage { exact },
+            ) => {
                 exact.validate()?;
                 let entry = &mut self.entries[entry_index];
-                if !entry.stage.current.is_missing()
+                if !entry.stage.owner_current.is_missing()
+                    || !entry.stage.current.is_missing()
                     || entry.stage.prepared.is_some()
                     || !entry
                         .planned
@@ -2320,9 +3148,12 @@ impl JournalSnapshotV2 {
                     ));
                 }
                 entry.stage.prepared = Some(exact.clone());
-                entry.stage.current = PresenceV2::Present(exact);
+                entry.stage.owner_current = PresenceV2::Present(exact);
             }
-            (PreparationSlot::Backup(entry_index), PreparationObservationV2::Backup { exact }) => {
+            (
+                PreparationSlot::BackupOwner(entry_index),
+                PreparationObservationV2::Backup { exact },
+            ) => {
                 exact.validate()?;
                 let entry = &mut self.entries[entry_index];
                 let PreimageV2::Regular { exact: preimage } = &entry.preimage else {
@@ -2331,7 +3162,8 @@ impl JournalSnapshotV2 {
                     ));
                 };
                 let backup = entry.backup.as_mut().expect("replace entry has backup");
-                if !backup.current.is_missing()
+                if !backup.owner_current.is_missing()
+                    || !backup.current.is_missing()
                     || backup.prepared.is_some()
                     || exact.state != preimage.state
                     || exact.link_count != 1
@@ -2342,7 +3174,7 @@ impl JournalSnapshotV2 {
                     ));
                 }
                 backup.prepared = Some(exact.clone());
-                backup.current = PresenceV2::Present(exact);
+                backup.owner_current = PresenceV2::Present(exact);
             }
             _ => {
                 return Err(JournalModelError::new(
@@ -2351,6 +3183,245 @@ impl JournalSnapshotV2 {
             }
         }
         Ok(())
+    }
+
+    fn owner_creation_intent(
+        &self,
+        index: usize,
+    ) -> Result<OwnerCreationIntentV2, JournalModelError> {
+        match self.preparation_slot(index)? {
+            PreparationSlot::DirectoryOwner(directory_index) => {
+                let directory = &self.directories[directory_index];
+                Ok(OwnerCreationIntentV2 {
+                    ordinal: directory.ordinal,
+                    artifact: OwnerArtifactKindV2::Directory,
+                    owner_name: directory.candidate_name.clone().ok_or_else(|| {
+                        JournalModelError::new("created directory has no owner name")
+                    })?,
+                    policy: OwnerCreationPolicyV2::Directory {
+                        final_mode: directory.planned_mode,
+                    },
+                })
+            }
+            PreparationSlot::StageOwner(entry_index) => {
+                let entry = &self.entries[entry_index];
+                let (final_readonly, final_posix_mode) = match &entry.preimage {
+                    PreimageV2::Absent => (false, normal_create_file_mode()),
+                    PreimageV2::Regular { exact } => (exact.state.readonly, exact.state.posix_mode),
+                };
+                Ok(OwnerCreationIntentV2 {
+                    ordinal: entry.ordinal,
+                    artifact: OwnerArtifactKindV2::Stage,
+                    owner_name: entry.stage.owner_name.clone(),
+                    policy: OwnerCreationPolicyV2::File {
+                        max_byte_len: entry.planned.byte_len,
+                        final_readonly,
+                        final_posix_mode,
+                    },
+                })
+            }
+            PreparationSlot::BackupOwner(entry_index) => {
+                let entry = &self.entries[entry_index];
+                let PreimageV2::Regular { exact } = &entry.preimage else {
+                    return Err(JournalModelError::new(
+                        "backup owner slot has no exact regular-file preimage",
+                    ));
+                };
+                let backup = entry.backup.as_ref().ok_or_else(|| {
+                    JournalModelError::new("backup owner slot has no backup artifact")
+                })?;
+                Ok(OwnerCreationIntentV2 {
+                    ordinal: entry.ordinal,
+                    artifact: OwnerArtifactKindV2::Backup,
+                    owner_name: backup.owner_name.clone(),
+                    policy: OwnerCreationPolicyV2::File {
+                        max_byte_len: exact.state.byte_len,
+                        final_readonly: exact.state.readonly,
+                        final_posix_mode: exact.state.posix_mode,
+                    },
+                })
+            }
+            PreparationSlot::DirectoryPlacement(_)
+            | PreparationSlot::StagePlacement(_)
+            | PreparationSlot::BackupPlacement(_) => Err(JournalModelError::new(
+                "CreateOwner can only arm the next deterministic owner slot",
+            )),
+        }
+    }
+
+    fn validate_owner_creation_slot(
+        &self,
+        index: usize,
+        intent: &OwnerCreationIntentV2,
+    ) -> Result<(), JournalModelError> {
+        if &self.owner_creation_intent(index)? == intent {
+            Ok(())
+        } else {
+            Err(JournalModelError::new(
+                "CreateOwner intent is not the canonical next owner slot",
+            ))
+        }
+    }
+
+    fn validate_owner_completion(
+        &self,
+        index: usize,
+        intent: &OwnerCreationIntentV2,
+        observation: &PreparationObservationV2,
+    ) -> Result<(), JournalModelError> {
+        self.validate_owner_creation_slot(index, intent)?;
+        match (intent.policy(), observation) {
+            (
+                OwnerCreationPolicyV2::Directory { final_mode },
+                PreparationObservationV2::DirectoryCandidate { exact, .. },
+            ) if intent.artifact == OwnerArtifactKindV2::Directory && exact.mode == *final_mode => {
+                Ok(())
+            }
+            (
+                OwnerCreationPolicyV2::File {
+                    max_byte_len,
+                    final_readonly,
+                    final_posix_mode,
+                },
+                PreparationObservationV2::Stage { exact },
+            ) if intent.artifact == OwnerArtifactKindV2::Stage
+                && exact.state.byte_len == *max_byte_len
+                && exact.state.readonly == *final_readonly
+                && exact.state.posix_mode == *final_posix_mode
+                && exact.link_count == 1 =>
+            {
+                Ok(())
+            }
+            (
+                OwnerCreationPolicyV2::File {
+                    max_byte_len,
+                    final_readonly,
+                    final_posix_mode,
+                },
+                PreparationObservationV2::Backup { exact },
+            ) if intent.artifact == OwnerArtifactKindV2::Backup
+                && exact.state.byte_len == *max_byte_len
+                && exact.state.readonly == *final_readonly
+                && exact.state.posix_mode == *final_posix_mode
+                && exact.link_count == 1 =>
+            {
+                Ok(())
+            }
+            _ => Err(JournalModelError::new(
+                "owner completion does not match its durable CreateOwner kind, length, final mode, and single-link policy",
+            )),
+        }
+    }
+
+    pub(super) fn validate_owner_residual(
+        &self,
+        index: usize,
+        binding: &OwnedResidualDeleteBindingV2,
+    ) -> Result<(), JournalModelError> {
+        self.validate_owner_creation_slot(index, binding.owner())?;
+        let private_file_mode = (false, private_posix_mode(0o600));
+        let private_directory_mode = DirectoryModeV2::new(false, private_posix_mode(0o700))?;
+        let identity = match (binding.owner.policy(), binding.object()) {
+            (
+                OwnerCreationPolicyV2::File {
+                    max_byte_len,
+                    final_readonly,
+                    final_posix_mode,
+                },
+                OwnedResidualObjectV2::File(exact),
+            ) if binding.owner.artifact != OwnerArtifactKindV2::Directory => {
+                exact.validate()?;
+                let actual_mode = (exact.readonly, exact.posix_mode);
+                let final_mode = (*final_readonly, *final_posix_mode);
+                if exact.byte_len > *max_byte_len
+                    || exact.link_count != 1
+                    || (actual_mode != private_file_mode && actual_mode != final_mode)
+                {
+                    return Err(JournalModelError::new(
+                        "owned residual file exceeds its declared length, is multiply linked, or has a mode outside {0600, final}",
+                    ));
+                }
+                exact.identity
+            }
+            (
+                OwnerCreationPolicyV2::Directory { final_mode },
+                OwnedResidualObjectV2::Directory(exact),
+            ) if binding.owner.artifact == OwnerArtifactKindV2::Directory => {
+                exact.validate()?;
+                if exact.link_count != 2
+                    || (exact.exact.mode != private_directory_mode
+                        && exact.exact.mode != *final_mode)
+                {
+                    return Err(JournalModelError::new(
+                        "owned residual directory is not empty-linked or has a mode outside {0700, final}",
+                    ));
+                }
+                exact.exact.identity
+            }
+            _ => {
+                return Err(JournalModelError::new(
+                    "owned residual kind does not match its durable CreateOwner intent",
+                ));
+            }
+        };
+        if self.identity_is_bound_elsewhere(identity) {
+            return Err(JournalModelError::new(
+                "owned residual aliases an existing protected transaction object",
+            ));
+        }
+        Ok(())
+    }
+
+    fn identity_is_bound_elsewhere(&self, identity: ObjectIdentityV2) -> bool {
+        let protected = [
+            self.project.root_current.identity,
+            self.project.write_lock.identity,
+            self.project.workspace_parent_current.identity,
+            self.project.workspace.exact.identity,
+            self.bootstrap.intent.exact.identity,
+            self.bootstrap.exact.identity,
+        ];
+        protected.contains(&identity)
+            || self
+                .previous_record
+                .as_ref()
+                .is_some_and(|record| record.exact.identity == identity)
+            || self.directories.iter().any(|directory| {
+                directory
+                    .current
+                    .as_present()
+                    .is_some_and(|exact| exact.identity == identity)
+                    || directory
+                        .candidate_current
+                        .as_present()
+                        .is_some_and(|exact| exact.identity == identity)
+            })
+            || self.entries.iter().any(|entry| {
+                entry
+                    .current_target
+                    .as_present()
+                    .is_some_and(|exact| exact.identity == identity)
+                    || entry
+                        .stage
+                        .owner_current
+                        .as_present()
+                        .is_some_and(|exact| exact.identity == identity)
+                    || entry
+                        .stage
+                        .current
+                        .as_present()
+                        .is_some_and(|exact| exact.identity == identity)
+                    || entry.backup.as_ref().is_some_and(|backup| {
+                        backup
+                            .owner_current
+                            .as_present()
+                            .is_some_and(|exact| exact.identity == identity)
+                            || backup
+                                .current
+                                .as_present()
+                                .is_some_and(|exact| exact.identity == identity)
+                    })
+            })
     }
 
     fn validate_directory_publish_intent(
@@ -2375,7 +3446,173 @@ impl JournalSnapshotV2 {
                 "directory publication intent is not bound to the exact private candidate, missing target, and parent",
             ));
         }
-        require_private_directory_mode(expected, 0o700, "directory candidate")
+        if expected.mode != directory.planned_mode {
+            return Err(JournalModelError::new(
+                "directory placement owner is not already in its final planned mode",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_placement_slot(
+        &self,
+        index: usize,
+        intent: &PreparationPlacementIntentV2,
+    ) -> Result<(), JournalModelError> {
+        match (self.preparation_slot(index)?, intent) {
+            (
+                PreparationSlot::DirectoryPlacement(directory_index),
+                PreparationPlacementIntentV2::Directory(intent),
+            ) if self.directories[directory_index].ordinal == intent.ordinal => {
+                self.validate_directory_publish_intent(intent)
+            }
+            (
+                PreparationSlot::StagePlacement(entry_index),
+                PreparationPlacementIntentV2::File(intent),
+            ) if self.entries[entry_index].ordinal == intent.ordinal
+                && intent.artifact == FileArtifactKindV2::Stage =>
+            {
+                self.validate_file_placement_intent(intent)
+            }
+            (
+                PreparationSlot::BackupPlacement(entry_index),
+                PreparationPlacementIntentV2::File(intent),
+            ) if self.entries[entry_index].ordinal == intent.ordinal
+                && intent.artifact == FileArtifactKindV2::Backup =>
+            {
+                self.validate_file_placement_intent(intent)
+            }
+            _ => Err(JournalModelError::new(
+                "artifact placement intent does not match the deterministic next slot",
+            )),
+        }
+    }
+
+    fn file_artifact(
+        &self,
+        intent: &FilePlacementIntentV2,
+    ) -> Result<&ArtifactV2, JournalModelError> {
+        let entry = self
+            .entries
+            .get(index_of(intent.ordinal, self.entries.len())?)
+            .ok_or_else(|| JournalModelError::new("file placement ordinal exceeds cohort"))?;
+        match intent.artifact {
+            FileArtifactKindV2::Stage => Ok(&entry.stage),
+            FileArtifactKindV2::Backup => entry
+                .backup
+                .as_ref()
+                .ok_or_else(|| JournalModelError::new("backup placement names a create entry")),
+        }
+    }
+
+    fn file_artifact_mut(
+        &mut self,
+        intent: &FilePlacementIntentV2,
+    ) -> Result<&mut ArtifactV2, JournalModelError> {
+        let index = index_of(intent.ordinal, self.entries.len())?;
+        match intent.artifact {
+            FileArtifactKindV2::Stage => Ok(&mut self.entries[index].stage),
+            FileArtifactKindV2::Backup => self.entries[index]
+                .backup
+                .as_mut()
+                .ok_or_else(|| JournalModelError::new("backup placement names a create entry")),
+        }
+    }
+
+    fn validate_file_placement_intent(
+        &self,
+        intent: &FilePlacementIntentV2,
+    ) -> Result<(), JournalModelError> {
+        let artifact = self.file_artifact(intent)?;
+        let expected = artifact
+            .owner_current
+            .as_present()
+            .ok_or_else(|| JournalModelError::new("file placement owner is not present"))?;
+        let entry = &self.entries[index_of(intent.ordinal, self.entries.len())?];
+        let expected_parent = self.directory_parent_for_logical_path(&entry.logical_path)?;
+        if !artifact.current.is_missing()
+            || artifact.owner_name != intent.owner_name
+            || artifact.name != intent.placed_name
+            || artifact.prepared.as_ref() != Some(expected)
+            || expected != &intent.expected_owner
+            || expected.link_count != 1
+            || expected_parent != intent.parent
+            || self.parent_current(intent.parent)? != &intent.parent_before
+        {
+            return Err(JournalModelError::new(
+                "file placement intent is not bound to the exact workspace owner, missing destination, and exact logical parent",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_file_placement_world(
+        &self,
+        intent: &FilePlacementIntentV2,
+        owner: &PresenceV2<ExactFileStateV2>,
+        placed: &PresenceV2<ExactFileStateV2>,
+        parent: &ExactDirectoryStateV2,
+    ) -> Result<PreparationPlacementWorldV2, JournalModelError> {
+        self.validate_file_placement_intent(intent)?;
+        if parent != &intent.parent_before {
+            return Err(JournalModelError::new(
+                "file placement world substituted or mutated its exact destination parent",
+            ));
+        }
+        match (owner, placed) {
+            (PresenceV2::Present(exact), PresenceV2::Missing)
+                if exact == &intent.expected_owner =>
+            {
+                Ok(PreparationPlacementWorldV2::Before)
+            }
+            (PresenceV2::Missing, PresenceV2::Present(exact))
+                if exact == &intent.expected_owner =>
+            {
+                Ok(PreparationPlacementWorldV2::After)
+            }
+            _ => Err(JournalModelError::new(
+                "file placement world is neither exact owner-before nor exact destination-after",
+            )),
+        }
+    }
+
+    fn apply_file_placement(
+        &mut self,
+        intent: &FilePlacementIntentV2,
+        observation: FilePlacementObservationV2,
+    ) -> Result<(), JournalModelError> {
+        let world = self.validate_file_placement_world(
+            intent,
+            &observation.owner,
+            &PresenceV2::Present(observation.placed.clone()),
+            &observation.parent_after,
+        )?;
+        if world != PreparationPlacementWorldV2::After {
+            return Err(JournalModelError::new(
+                "file placement completion requires the exact destination-after world",
+            ));
+        }
+        let artifact = self.file_artifact_mut(intent)?;
+        artifact.owner_current = PresenceV2::Missing;
+        artifact.current = PresenceV2::Present(observation.placed);
+        Ok(())
+    }
+
+    fn directory_parent_for_logical_path(
+        &self,
+        logical_path: &str,
+    ) -> Result<DirectoryParentV2, JournalModelError> {
+        let Some(parent) = immediate_parent(logical_path) else {
+            return Ok(DirectoryParentV2::ProjectRoot);
+        };
+        let parent_index = self
+            .directories
+            .iter()
+            .position(|directory| directory.logical_path == parent)
+            .ok_or_else(|| JournalModelError::new("file parent is absent from the cohort"))?;
+        Ok(DirectoryParentV2::Cohort {
+            ordinal: self.directories[parent_index].ordinal,
+        })
     }
 
     pub(super) fn validate_directory_publication_world(
@@ -2391,27 +3628,19 @@ impl JournalSnapshotV2 {
                 "directory publication world substituted or mutated its exact parent",
             ));
         }
-        let directory = &self.directories[index_of(intent.ordinal, self.directories.len())?];
         match (candidate, target) {
             (PresenceV2::Present(exact), PresenceV2::Missing)
                 if exact == &intent.expected_candidate =>
             {
-                Ok(DirectoryPublicationWorldV2::CandidatePrivate)
-            }
-            (PresenceV2::Present(exact), PresenceV2::Missing)
-                if exact.identity == intent.expected_candidate.identity
-                    && exact.mode == directory.planned_mode =>
-            {
-                Ok(DirectoryPublicationWorldV2::CandidateReady)
+                Ok(DirectoryPublicationWorldV2::Before)
             }
             (PresenceV2::Missing, PresenceV2::Present(exact))
-                if exact.identity == intent.expected_candidate.identity
-                    && exact.mode == directory.planned_mode =>
+                if exact == &intent.expected_candidate =>
             {
-                Ok(DirectoryPublicationWorldV2::Published)
+                Ok(DirectoryPublicationWorldV2::After)
             }
             _ => Err(JournalModelError::new(
-                "directory publication world is neither candidate-before, mode-ready candidate, nor exact target-after",
+                "directory placement world is neither exact owner-before nor exact target-after",
             )),
         }
     }
@@ -2427,7 +3656,7 @@ impl JournalSnapshotV2 {
             &PresenceV2::Present(observation.target.clone()),
             &observation.parent_after,
         )?;
-        if world != DirectoryPublicationWorldV2::Published {
+        if world != DirectoryPublicationWorldV2::After {
             return Err(JournalModelError::new(
                 "directory publication completion requires the exact published after-world",
             ));
@@ -2624,12 +3853,24 @@ impl JournalSnapshotV2 {
 
     fn cleanup_target_missing(&self, target: CleanupTargetV2) -> Result<bool, JournalModelError> {
         Ok(match target {
-            CleanupTargetV2::Stage { ordinal } => self.entries
+            CleanupTargetV2::OwnedStage { ordinal } => self.entries
+                [index_of(ordinal, self.entries.len())?]
+            .stage
+            .owner_current
+            .is_missing(),
+            CleanupTargetV2::PlacedStage { ordinal } => self.entries
                 [index_of(ordinal, self.entries.len())?]
             .stage
             .current
             .is_missing(),
-            CleanupTargetV2::Backup { ordinal } => self.entries
+            CleanupTargetV2::OwnedBackup { ordinal } => self.entries
+                [index_of(ordinal, self.entries.len())?]
+            .backup
+            .as_ref()
+            .ok_or_else(|| JournalModelError::new("cleanup plan names a missing backup slot"))?
+            .owner_current
+            .is_missing(),
+            CleanupTargetV2::PlacedBackup { ordinal } => self.entries
                 [index_of(ordinal, self.entries.len())?]
             .backup
             .as_ref()
@@ -2640,7 +3881,7 @@ impl JournalSnapshotV2 {
                 [index_of(ordinal, self.directories.len())?]
             .current
             .is_missing(),
-            CleanupTargetV2::DirectoryCandidate { ordinal } => self.directories
+            CleanupTargetV2::OwnedDirectory { ordinal } => self.directories
                 [index_of(ordinal, self.directories.len())?]
             .candidate_current
             .is_missing(),
@@ -2652,12 +3893,26 @@ impl JournalSnapshotV2 {
             CleanupIntentV2::RemoveFile { target, expected } => {
                 expected.validate()?;
                 let current = match target {
-                    CleanupTargetV2::Stage { ordinal } => {
+                    CleanupTargetV2::OwnedStage { ordinal } => {
+                        &self.entries[index_of(*ordinal, self.entries.len())?]
+                            .stage
+                            .owner_current
+                    }
+                    CleanupTargetV2::PlacedStage { ordinal } => {
                         &self.entries[index_of(*ordinal, self.entries.len())?]
                             .stage
                             .current
                     }
-                    CleanupTargetV2::Backup { ordinal } => {
+                    CleanupTargetV2::OwnedBackup { ordinal } => {
+                        &self.entries[index_of(*ordinal, self.entries.len())?]
+                            .backup
+                            .as_ref()
+                            .ok_or_else(|| {
+                                JournalModelError::new("cleanup intent names a missing backup slot")
+                            })?
+                            .owner_current
+                    }
+                    CleanupTargetV2::PlacedBackup { ordinal } => {
                         &self.entries[index_of(*ordinal, self.entries.len())?]
                             .backup
                             .as_ref()
@@ -2667,7 +3922,7 @@ impl JournalSnapshotV2 {
                             .current
                     }
                     CleanupTargetV2::CreatedDirectory { .. }
-                    | CleanupTargetV2::DirectoryCandidate { .. } => {
+                    | CleanupTargetV2::OwnedDirectory { .. } => {
                         return Err(JournalModelError::new(
                             "a created directory requires a directory cleanup intent",
                         ));
@@ -2687,7 +3942,7 @@ impl JournalSnapshotV2 {
             } => {
                 let (ordinal, candidate) = match target {
                     CleanupTargetV2::CreatedDirectory { ordinal } => (*ordinal, false),
-                    CleanupTargetV2::DirectoryCandidate { ordinal } => (*ordinal, true),
+                    CleanupTargetV2::OwnedDirectory { ordinal } => (*ordinal, true),
                     _ => {
                         return Err(JournalModelError::new(
                             "directory cleanup intent must target a logical created directory or its candidate",
@@ -2703,7 +3958,11 @@ impl JournalSnapshotV2 {
                 };
                 if directory.disposition != DirectoryDispositionV2::Create
                     || current != &PresenceV2::Present(expected.clone())
-                    || self.directory_parent(directory_index)? != *parent
+                    || (if candidate {
+                        DirectoryParentV2::TransactionWorkspace
+                    } else {
+                        self.directory_parent(directory_index)?
+                    }) != *parent
                     || self.parent_current(*parent)? != parent_before
                     || (!candidate && !self.managed_children_are_missing(directory_index)?)
                 {
@@ -2730,7 +3989,11 @@ impl JournalSnapshotV2 {
                     ));
                 }
                 match target {
-                    CleanupTargetV2::Stage { ordinal } => {
+                    CleanupTargetV2::OwnedStage { ordinal } => {
+                        let index = index_of(*ordinal, self.entries.len())?;
+                        self.entries[index].stage.owner_current = PresenceV2::Missing;
+                    }
+                    CleanupTargetV2::PlacedStage { ordinal } => {
                         let index = index_of(*ordinal, self.entries.len())?;
                         let entry = &mut self.entries[index];
                         entry.stage.current = PresenceV2::Missing;
@@ -2743,7 +4006,15 @@ impl JournalSnapshotV2 {
                             }
                         }
                     }
-                    CleanupTargetV2::Backup { ordinal } => {
+                    CleanupTargetV2::OwnedBackup { ordinal } => {
+                        let index = index_of(*ordinal, self.entries.len())?;
+                        self.entries[index]
+                            .backup
+                            .as_mut()
+                            .expect("validated backup-owner cleanup")
+                            .owner_current = PresenceV2::Missing;
+                    }
+                    CleanupTargetV2::PlacedBackup { ordinal } => {
                         let index = index_of(*ordinal, self.entries.len())?;
                         self.entries[index]
                             .backup
@@ -2752,7 +4023,7 @@ impl JournalSnapshotV2 {
                             .current = PresenceV2::Missing;
                     }
                     CleanupTargetV2::CreatedDirectory { .. }
-                    | CleanupTargetV2::DirectoryCandidate { .. } => {
+                    | CleanupTargetV2::OwnedDirectory { .. } => {
                         unreachable!("validated intent")
                     }
                 }
@@ -2771,7 +4042,7 @@ impl JournalSnapshotV2 {
                 validate_parent_removal_transition(parent_before, &parent_after)?;
                 let (ordinal, candidate) = match target {
                     CleanupTargetV2::CreatedDirectory { ordinal } => (*ordinal, false),
-                    CleanupTargetV2::DirectoryCandidate { ordinal } => (*ordinal, true),
+                    CleanupTargetV2::OwnedDirectory { ordinal } => (*ordinal, true),
                     _ => unreachable!("validated directory intent"),
                 };
                 let index = index_of(ordinal, self.directories.len())?;
@@ -2811,6 +4082,7 @@ impl JournalSnapshotV2 {
     ) -> Result<&ExactDirectoryStateV2, JournalModelError> {
         match parent {
             DirectoryParentV2::ProjectRoot => Ok(&self.project.root_current),
+            DirectoryParentV2::TransactionWorkspace => Ok(self.project.workspace().exact()),
             DirectoryParentV2::Cohort { ordinal } => self.directories
                 [index_of(ordinal, self.directories.len())?]
             .current
@@ -2826,6 +4098,13 @@ impl JournalSnapshotV2 {
     ) -> Result<(), JournalModelError> {
         match parent {
             DirectoryParentV2::ProjectRoot => self.project.root_current = exact,
+            DirectoryParentV2::TransactionWorkspace => {
+                if &exact != self.project.workspace().exact() {
+                    return Err(JournalModelError::new(
+                        "transaction workspace identity/mode cannot change while owner children are removed",
+                    ));
+                }
+            }
             DirectoryParentV2::Cohort { ordinal } => {
                 let index = index_of(ordinal, self.directories.len())?;
                 if self.directories[index].logical_path == WORKSPACE_PARENT_LOGICAL_PATH {
@@ -2941,7 +4220,25 @@ impl JournalSnapshotV2 {
         let previous = next.previous_record.as_ref().ok_or_else(|| {
             JournalModelError::new("successor is missing its exact previous-record binding")
         })?;
-        self.validate_record_binding(previous)?;
+        self.validate_record_binding_after_validation(previous)?;
+        self.validate_successor_after_validation(previous, next)
+    }
+
+    fn validate_successor_after_validation(
+        &self,
+        current_record: &RecordBindingV2,
+        next: &Self,
+    ) -> Result<(), JournalModelError> {
+        if self.sequence.checked_add(1) != Some(next.sequence) {
+            return Err(JournalModelError::new(
+                "successor sequence must increase by exactly one",
+            ));
+        }
+        if next.previous_record.as_ref() != Some(current_record) {
+            return Err(JournalModelError::new(
+                "successor does not bind the exact validated predecessor record",
+            ));
+        }
         self.validate_static_successor(next)?;
         self.validate_dynamic_successor(next)
     }
@@ -2974,9 +4271,12 @@ impl JournalSnapshotV2 {
                     last_ordinary = Some(&entry.logical_path);
                 }
                 EntryRoleV2::InstallLock => {
-                    if install_lock_seen || index + 1 != self.entries.len() {
+                    if entry.logical_path != DEFAULT_KIT_LOCK_PATH
+                        || install_lock_seen
+                        || index + 1 != self.entries.len()
+                    {
                         return Err(JournalModelError::new(
-                            "at most one install-lock entry is allowed and it must be last",
+                            "the sole install-lock entry must use the canonical path and be last",
                         ));
                     }
                     install_lock_seen = true;
@@ -3013,14 +4313,15 @@ impl JournalSnapshotV2 {
             }
             if let PresenceV2::Present(stage) = &entry.stage.current {
                 stage.validate()?;
-                if entry.stage.prepared.as_ref() != Some(stage)
-                    && !(entry.action == EntryActionV2::Create
-                        && entry.stage.prepared.as_ref().is_some_and(|prepared| {
-                            prepared.identity == stage.identity
-                                && prepared.state == stage.state
-                                && prepared.link_count == 1
-                                && stage.link_count == 2
-                        }))
+                if !entry.stage.owner_current.is_missing()
+                    || (entry.stage.prepared.as_ref() != Some(stage)
+                        && !(entry.action == EntryActionV2::Create
+                            && entry.stage.prepared.as_ref().is_some_and(|prepared| {
+                                prepared.identity == stage.identity
+                                    && prepared.state == stage.state
+                                    && prepared.link_count == 1
+                                    && stage.link_count == 2
+                            })))
                 {
                     return Err(JournalModelError::new(format!(
                         "stage for {} changed from its prepared exact identity/state",
@@ -3034,6 +4335,21 @@ impl JournalSnapshotV2 {
                 {
                     return Err(JournalModelError::new(format!(
                         "stage for {} is not an exact planned state",
+                        entry.logical_path
+                    )));
+                }
+            }
+            if let PresenceV2::Present(owner) = &entry.stage.owner_current {
+                owner.validate()?;
+                if entry.stage.prepared.as_ref() != Some(owner)
+                    || owner.link_count != 1
+                    || !entry.stage.current.is_missing()
+                    || !entry
+                        .planned
+                        .matches_resolved(&owner.state, &entry.preimage)
+                {
+                    return Err(JournalModelError::new(format!(
+                        "stage owner for {} is not one exact independent planned workspace child",
                         entry.logical_path
                     )));
                 }
@@ -3065,6 +4381,23 @@ impl JournalSnapshotV2 {
                         ));
                     }
                 }
+                if let PresenceV2::Present(owner) = &backup.owner_current {
+                    owner.validate()?;
+                    let PreimageV2::Regular { exact: preimage } = &entry.preimage else {
+                        unreachable!("backup belongs to replace entry")
+                    };
+                    if backup.prepared.as_ref() != Some(owner)
+                        || owner.state != preimage.state
+                        || owner.link_count != 1
+                        || owner.identity == preimage.identity
+                        || !backup.current.is_missing()
+                    {
+                        return Err(JournalModelError::new(format!(
+                            "backup owner for {} is not one exact independent preimage workspace child",
+                            entry.logical_path
+                        )));
+                    }
+                }
                 if let PresenceV2::Present(current) = &backup.current {
                     current.validate()?;
                     let PreimageV2::Regular { exact: preimage } = &entry.preimage else {
@@ -3074,6 +4407,7 @@ impl JournalSnapshotV2 {
                         || current.state != preimage.state
                         || current.link_count != 1
                         || current.identity == preimage.identity
+                        || !backup.owner_current.is_missing()
                     {
                         return Err(JournalModelError::new(format!(
                             "backup for {} is not an independent exact preimage copy",
@@ -3084,16 +4418,20 @@ impl JournalSnapshotV2 {
             }
         }
         match self.operation {
+            JournalOperationV2::AtomicWrite
+                if self.entries.len() != 1
+                    || install_lock_seen
+                    || self.entries[0].logical_path == DEFAULT_KIT_LOCK_PATH =>
+            {
+                return Err(JournalModelError::new(
+                    "AtomicWrite requires exactly one ordinary non-install-lock target",
+                ));
+            }
             JournalOperationV2::Init | JournalOperationV2::Add | JournalOperationV2::Sync
                 if !install_lock_seen =>
             {
                 return Err(JournalModelError::new(
-                    "Init/Add/Sync cohorts require exactly one selected install-lock entry, last",
-                ));
-            }
-            JournalOperationV2::AtomicWrite if self.entries.len() != 1 => {
-                return Err(JournalModelError::new(
-                    "AtomicWrite requires exactly one explicitly-role-marked logical target",
+                    "Init, Add, and Sync require one canonical final install-lock entry",
                 ));
             }
             _ => {}
@@ -3108,6 +4446,7 @@ impl JournalSnapshotV2 {
                 expected_paths.insert(parent);
             }
         }
+        expected_paths.insert(WORKSPACE_PARENT_LOGICAL_PATH.to_owned());
         let mut expected_paths: Vec<_> = expected_paths.into_iter().collect();
         expected_paths.sort_by(|left, right| {
             path_depth(left)
@@ -3173,7 +4512,12 @@ impl JournalSnapshotV2 {
                         ));
                     }
                     if let Some(created) = &directory.created_exact {
-                        require_private_directory_mode(created, 0o700, "directory candidate")?;
+                        created.validate()?;
+                        if created.mode != directory.planned_mode {
+                            return Err(JournalModelError::new(
+                                "directory owner binding must retain its final planned mode",
+                            ));
+                        }
                     } else if !directory.candidate_current.is_missing() || !current.is_missing() {
                         return Err(JournalModelError::new(
                             "directory candidate/target cannot exist without exact prepared ownership evidence",
@@ -3182,6 +4526,7 @@ impl JournalSnapshotV2 {
                     if let PresenceV2::Present(candidate) = &directory.candidate_current {
                         candidate.validate()?;
                         if directory.created_exact.as_ref() != Some(candidate)
+                            || candidate.mode != directory.planned_mode
                             || !current.is_missing()
                         {
                             return Err(JournalModelError::new(format!(
@@ -3230,7 +4575,7 @@ impl JournalSnapshotV2 {
             .find(|directory| directory.logical_path == WORKSPACE_PARENT_LOGICAL_PATH)
             .ok_or_else(|| {
                 JournalModelError::new(
-                    "directory cohort must bind the transaction workspace parent _kit",
+                    "directory cohort must bind the private transaction workspace parent",
                 )
             })?;
         if workspace_parent.disposition != DirectoryDispositionV2::Existing
@@ -3250,10 +4595,7 @@ impl JournalSnapshotV2 {
         let entry_count = u32::try_from(self.entries.len())
             .map_err(|_| JournalModelError::new("entry cohort exceeds u32"))?;
         match &self.phase {
-            JournalPhaseV2::Preparing {
-                completed,
-                pending_directory,
-            } => {
+            JournalPhaseV2::Preparing { completed, pending } => {
                 if usize::try_from(*completed)
                     .ok()
                     .is_none_or(|value| value > self.preparation_step_count())
@@ -3264,20 +4606,18 @@ impl JournalSnapshotV2 {
                         "Preparing does not match its exact preparation prefix and preimages",
                     ));
                 }
-                if let Some(intent) = pending_directory {
-                    let PreparationSlot::DirectoryPublish(index) =
-                        self.preparation_slot(*completed as usize)?
-                    else {
-                        return Err(JournalModelError::new(
-                            "pending directory intent is not at a publication slot",
-                        ));
-                    };
-                    if self.directories[index].ordinal != intent.ordinal {
-                        return Err(JournalModelError::new(
-                            "pending directory intent is not at the deterministic ordinal",
-                        ));
+                if let Some(intent) = pending {
+                    match intent {
+                        PreparationPendingIntentV2::CreateOwner(intent) => {
+                            self.validate_owner_creation_slot(*completed as usize, intent)?;
+                        }
+                        PreparationPendingIntentV2::DiscardOwner(binding) => {
+                            self.validate_owner_residual(*completed as usize, binding)?;
+                        }
+                        PreparationPendingIntentV2::PlaceOwner(intent) => {
+                            self.validate_placement_slot(*completed as usize, intent)?;
+                        }
                     }
-                    self.validate_directory_publish_intent(intent)?;
                 }
             }
             JournalPhaseV2::Prepared => {
@@ -3376,6 +4716,13 @@ impl JournalSnapshotV2 {
                 "cleanup cursor or pending intent exceeds the immutable plan",
             ));
         }
+        for target in plan.iter().take(completed) {
+            if !self.cleanup_target_missing(*target)? {
+                return Err(JournalModelError::new(
+                    "completed cleanup slots must name exact missing transaction objects",
+                ));
+            }
+        }
         if let Some(intent) = pending {
             if Some(&intent.target()) != plan.get(completed) {
                 return Err(JournalModelError::new(
@@ -3433,6 +4780,7 @@ impl JournalSnapshotV2 {
         }
         for entry in &self.entries {
             let target = entry.current_target.as_present();
+            let stage_owner = entry.stage.owner_current.as_present();
             let stage = entry.stage.current.as_present();
             if let Some(target) = target {
                 if !identities.insert(target.identity) {
@@ -3440,6 +4788,13 @@ impl JournalSnapshotV2 {
                         "live target aliases an unrelated protected object",
                     ));
                 }
+            }
+            if let Some(owner) = stage_owner
+                && !identities.insert(owner.identity)
+            {
+                return Err(JournalModelError::new(
+                    "live stage owner aliases an unrelated protected object",
+                ));
             }
             if let Some(stage) = stage {
                 let allowed_create_alias = entry.action == EntryActionV2::Create
@@ -3461,6 +4816,16 @@ impl JournalSnapshotV2 {
                         "live backup is not an independent exact file",
                     ));
                 }
+            }
+            if let Some(owner) = entry
+                .backup
+                .as_ref()
+                .and_then(|backup| backup.owner_current.as_present())
+                && !identities.insert(owner.identity)
+            {
+                return Err(JournalModelError::new(
+                    "live backup owner aliases an unrelated protected object",
+                ));
             }
         }
         Ok(())
@@ -3493,7 +4858,10 @@ impl JournalSnapshotV2 {
                 || old.role != new.role
                 || old.preimage != new.preimage
                 || old.planned != new.planned
+                || old.stage.owner_name != new.stage.owner_name
                 || old.stage.name != new.stage.name
+                || old.backup.as_ref().map(|backup| &backup.owner_name)
+                    != new.backup.as_ref().map(|backup| &backup.owner_name)
                 || old.backup.as_ref().map(|backup| &backup.name)
                     != new.backup.as_ref().map(|backup| &backup.name)
             {
@@ -3525,80 +4893,142 @@ impl JournalSnapshotV2 {
             (
                 JournalPhaseV2::Preparing {
                     completed,
-                    pending_directory: None,
+                    pending: None,
                 },
                 JournalPhaseV2::Preparing {
                     completed: next_completed,
-                    pending_directory: None,
+                    pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
                 },
-            ) if next_completed == &completed.saturating_add(1) => {
+            ) if completed == next_completed && same_runtime() => {
+                self.validate_owner_creation_slot(*completed as usize, intent)
+            }
+            (
+                JournalPhaseV2::Preparing {
+                    completed,
+                    pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
+                },
+                JournalPhaseV2::Preparing {
+                    completed: next_completed,
+                    pending: Some(PreparationPendingIntentV2::DiscardOwner(binding)),
+                },
+            ) if completed == next_completed && same_runtime() && binding.owner() == intent => {
+                self.validate_owner_residual(*completed as usize, binding)
+            }
+            (
+                JournalPhaseV2::Preparing {
+                    completed,
+                    pending: Some(PreparationPendingIntentV2::CreateOwner(intent)),
+                },
+                JournalPhaseV2::Preparing {
+                    completed: next_completed,
+                    pending: None,
+                },
+            ) if completed.checked_add(1) == Some(*next_completed) => {
                 let index = usize::try_from(*completed).map_err(|_| {
                     JournalModelError::new("preparation counter does not fit usize")
                 })?;
                 let mut expected = self.clone_runtime_only();
                 let observation = self.preparation_observation_from_successor(next, index)?;
+                self.validate_owner_completion(index, intent, &observation)?;
                 expected.apply_preparation(index, observation)?;
-                if !expected.runtime_equals(next) {
-                    return Err(JournalModelError::new(
-                        "preparation successor changed state outside the next exact slot",
-                    ));
-                }
-                Ok(())
-            }
-            (
-                JournalPhaseV2::Preparing {
-                    completed,
-                    pending_directory: None,
-                },
-                JournalPhaseV2::Preparing {
-                    completed: next_completed,
-                    pending_directory: Some(intent),
-                },
-            ) if completed == next_completed && same_runtime() => {
-                self.validate_directory_publish_intent(intent)
-            }
-            (
-                JournalPhaseV2::Preparing {
-                    completed,
-                    pending_directory: Some(intent),
-                },
-                JournalPhaseV2::Preparing {
-                    completed: next_completed,
-                    pending_directory: None,
-                },
-            ) if completed.checked_add(1) == Some(*next_completed) => {
-                let index = index_of(intent.ordinal, next.directories.len())?;
-                let target = next.directories[index]
-                    .current
-                    .as_present()
-                    .cloned()
-                    .ok_or_else(|| {
-                        JournalModelError::new(
-                            "directory publication successor is missing its exact target",
-                        )
-                    })?;
-                let parent_after = next.parent_current(intent.parent)?.clone();
-                let mut expected = self.clone_runtime_only();
-                expected.apply_directory_publication(
-                    intent,
-                    DirectoryPublicationObservationV2::new(
-                        target,
-                        next.directories[index].candidate_current.clone(),
-                        parent_after,
-                    ),
-                )?;
                 if expected.runtime_equals(next) {
                     Ok(())
                 } else {
                     Err(JournalModelError::new(
-                        "directory publication successor changed state outside its exact candidate/target pair",
+                        "owner completion changed state outside the durable CreateOwner slot",
                     ))
                 }
             }
             (
                 JournalPhaseV2::Preparing {
                     completed,
-                    pending_directory: None,
+                    pending: None,
+                },
+                JournalPhaseV2::Preparing {
+                    completed: next_completed,
+                    pending: Some(PreparationPendingIntentV2::PlaceOwner(intent)),
+                },
+            ) if completed == next_completed && same_runtime() => {
+                self.validate_placement_slot(*completed as usize, intent)
+            }
+            (
+                JournalPhaseV2::Preparing {
+                    completed,
+                    pending: Some(PreparationPendingIntentV2::PlaceOwner(intent)),
+                },
+                JournalPhaseV2::Preparing {
+                    completed: next_completed,
+                    pending: None,
+                },
+            ) if completed.checked_add(1) == Some(*next_completed) => {
+                let mut expected = self.clone_runtime_only();
+                match intent {
+                    PreparationPlacementIntentV2::Directory(intent) => {
+                        let index = index_of(intent.ordinal, next.directories.len())?;
+                        let target = next.directories[index]
+                            .current
+                            .as_present()
+                            .cloned()
+                            .ok_or_else(|| {
+                                JournalModelError::new(
+                                    "directory placement successor is missing its exact target",
+                                )
+                            })?;
+                        let parent_after = next.parent_current(intent.parent)?.clone();
+                        expected.apply_directory_publication(
+                            intent,
+                            DirectoryPublicationObservationV2::new(
+                                target,
+                                next.directories[index].candidate_current.clone(),
+                                parent_after,
+                            ),
+                        )?;
+                    }
+                    PreparationPlacementIntentV2::File(intent) => {
+                        let artifact = next.file_artifact(intent)?;
+                        let placed = artifact.current.as_present().cloned().ok_or_else(|| {
+                            JournalModelError::new(
+                                "file placement successor is missing its exact placed artifact",
+                            )
+                        })?;
+                        let parent_after = next.parent_current(intent.parent)?.clone();
+                        expected.apply_file_placement(
+                            intent,
+                            FilePlacementObservationV2::new(
+                                placed,
+                                artifact.owner_current.clone(),
+                                parent_after,
+                            ),
+                        )?;
+                    }
+                }
+                if expected.runtime_equals(next) {
+                    Ok(())
+                } else {
+                    Err(JournalModelError::new(
+                        "artifact placement successor changed state outside its exact owner/destination pair",
+                    ))
+                }
+            }
+            (
+                JournalPhaseV2::Preparing {
+                    completed,
+                    pending:
+                        Some(
+                            PreparationPendingIntentV2::CreateOwner(_)
+                            | PreparationPendingIntentV2::DiscardOwner(_)
+                            | PreparationPendingIntentV2::PlaceOwner(_),
+                        ),
+                },
+                JournalPhaseV2::Preparing {
+                    completed: next_completed,
+                    pending: None,
+                },
+            ) if completed == next_completed && same_runtime() => Ok(()),
+            (
+                JournalPhaseV2::Preparing {
+                    completed,
+                    pending: None,
                 },
                 JournalPhaseV2::Prepared,
             ) if usize::try_from(*completed).ok() == Some(self.preparation_step_count())
@@ -3620,10 +5050,7 @@ impl JournalSnapshotV2 {
                 self.validate_replacement_successor(next, *committed as usize)
             }
             (
-                JournalPhaseV2::Preparing {
-                    pending_directory: None,
-                    ..
-                }
+                JournalPhaseV2::Preparing { pending: None, .. }
                 | JournalPhaseV2::Prepared
                 | JournalPhaseV2::Replacing { .. },
                 JournalPhaseV2::RollingBack {
@@ -3829,7 +5256,7 @@ impl JournalSnapshotV2 {
         index: usize,
     ) -> Result<PreparationObservationV2, JournalModelError> {
         match self.preparation_slot(index)? {
-            PreparationSlot::DirectoryCandidate(directory_index) => {
+            PreparationSlot::DirectoryOwner(directory_index) => {
                 let exact = next.directories[directory_index]
                     .candidate_current
                     .as_present()
@@ -3837,30 +5264,33 @@ impl JournalSnapshotV2 {
                     .ok_or_else(|| {
                         JournalModelError::new("preparation successor is missing its directory")
                     })?;
-                let parent = self.directory_parent(directory_index)?;
                 Ok(PreparationObservationV2::DirectoryCandidate {
                     exact,
-                    parent_after: next.parent_current(parent)?.clone(),
+                    parent_after: next
+                        .parent_current(DirectoryParentV2::TransactionWorkspace)?
+                        .clone(),
                 })
             }
-            PreparationSlot::DirectoryPublish(_) => Err(JournalModelError::new(
-                "directory publication requires its named armed transition",
+            PreparationSlot::DirectoryPlacement(_)
+            | PreparationSlot::StagePlacement(_)
+            | PreparationSlot::BackupPlacement(_) => Err(JournalModelError::new(
+                "artifact placement requires its named armed transition",
             )),
-            PreparationSlot::Stage(entry_index) => Ok(PreparationObservationV2::Stage {
+            PreparationSlot::StageOwner(entry_index) => Ok(PreparationObservationV2::Stage {
                 exact: next.entries[entry_index]
                     .stage
-                    .current
+                    .owner_current
                     .as_present()
                     .cloned()
                     .ok_or_else(|| {
                         JournalModelError::new("preparation successor is missing its stage")
                     })?,
             }),
-            PreparationSlot::Backup(entry_index) => Ok(PreparationObservationV2::Backup {
+            PreparationSlot::BackupOwner(entry_index) => Ok(PreparationObservationV2::Backup {
                 exact: next.entries[entry_index]
                     .backup
                     .as_ref()
-                    .and_then(|backup| backup.current.as_present())
+                    .and_then(|backup| backup.owner_current.as_present())
                     .cloned()
                     .ok_or_else(|| {
                         JournalModelError::new("preparation successor is missing its backup")
@@ -3885,19 +5315,55 @@ impl JournalSnapshotV2 {
         let mut missing_seen = false;
         for index in 0..self.preparation_step_count() {
             let present = match self.preparation_slot(index)? {
-                PreparationSlot::DirectoryCandidate(directory) => {
-                    self.directories[directory].created_exact.is_some()
+                PreparationSlot::DirectoryOwner(directory) => {
+                    let directory = &self.directories[directory];
+                    directory.created_exact.as_ref().is_some_and(|created| {
+                        directory.candidate_current == PresenceV2::Present(created.clone())
+                            || (directory.candidate_current.is_missing()
+                                && directory.current.as_present().is_some_and(|published| {
+                                    published.identity == created.identity
+                                        && published.mode == directory.planned_mode
+                                }))
+                    })
                 }
-                PreparationSlot::DirectoryPublish(directory) => {
-                    self.directories[directory].current.as_present().is_some()
+                PreparationSlot::DirectoryPlacement(directory) => {
+                    let directory = &self.directories[directory];
+                    directory.created_exact.is_some()
+                        && directory.candidate_current.is_missing()
+                        && directory.current.as_present().is_some()
                 }
-                PreparationSlot::Stage(entry) => self.entries[entry].stage.prepared.is_some(),
-                PreparationSlot::Backup(entry) => self.entries[entry]
-                    .backup
-                    .as_ref()
-                    .expect("backup slot")
-                    .prepared
-                    .is_some(),
+                PreparationSlot::StageOwner(entry) => {
+                    let stage = &self.entries[entry].stage;
+                    stage.prepared.as_ref().is_some_and(|prepared| {
+                        (stage.owner_current == PresenceV2::Present(prepared.clone())
+                            && stage.current.is_missing())
+                            || (stage.owner_current.is_missing()
+                                && stage.current == PresenceV2::Present(prepared.clone()))
+                    })
+                }
+                PreparationSlot::StagePlacement(entry) => {
+                    let stage = &self.entries[entry].stage;
+                    stage.prepared.as_ref().is_some_and(|prepared| {
+                        stage.owner_current.is_missing()
+                            && stage.current == PresenceV2::Present(prepared.clone())
+                    })
+                }
+                PreparationSlot::BackupOwner(entry) => {
+                    let backup = self.entries[entry].backup.as_ref().expect("backup slot");
+                    backup.prepared.as_ref().is_some_and(|prepared| {
+                        (backup.owner_current == PresenceV2::Present(prepared.clone())
+                            && backup.current.is_missing())
+                            || (backup.owner_current.is_missing()
+                                && backup.current == PresenceV2::Present(prepared.clone()))
+                    })
+                }
+                PreparationSlot::BackupPlacement(entry) => {
+                    let backup = self.entries[entry].backup.as_ref().expect("backup slot");
+                    backup.prepared.as_ref().is_some_and(|prepared| {
+                        backup.owner_current.is_missing()
+                            && backup.current == PresenceV2::Present(prepared.clone())
+                    })
+                }
             };
             if present && missing_seen {
                 return Err(JournalModelError::new(
@@ -3943,11 +5409,13 @@ impl JournalSnapshotV2 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreparationSlot {
-    DirectoryCandidate(usize),
-    DirectoryPublish(usize),
-    Stage(usize),
-    Backup(usize),
+pub(super) enum PreparationSlot {
+    DirectoryOwner(usize),
+    DirectoryPlacement(usize),
+    StageOwner(usize),
+    StagePlacement(usize),
+    BackupOwner(usize),
+    BackupPlacement(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4141,6 +5609,15 @@ pub(super) fn stage_name(transaction_id: &TransactionId, ordinal: ArtifactOrdina
     )
 }
 
+pub(super) fn stage_owner_name(transaction_id: &TransactionId, ordinal: ArtifactOrdinal) -> String {
+    format!(
+        "{STAGE_OWNER_PREFIX}{}-{ordinal:0width$}",
+        transaction_id.as_str(),
+        ordinal = ordinal.get(),
+        width = ORDINAL_DECIMAL_WIDTH
+    )
+}
+
 pub(super) fn backup_name(transaction_id: &TransactionId, ordinal: ArtifactOrdinal) -> String {
     format!(
         "{BACKUP_PREFIX}{}-{ordinal:0width$}",
@@ -4148,6 +5625,98 @@ pub(super) fn backup_name(transaction_id: &TransactionId, ordinal: ArtifactOrdin
         ordinal = ordinal.get(),
         width = ORDINAL_DECIMAL_WIDTH
     )
+}
+
+pub(super) fn backup_owner_name(
+    transaction_id: &TransactionId,
+    ordinal: ArtifactOrdinal,
+) -> String {
+    format!(
+        "{BACKUP_OWNER_PREFIX}{}-{ordinal:0width$}",
+        transaction_id.as_str(),
+        ordinal = ordinal.get(),
+        width = ORDINAL_DECIMAL_WIDTH
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OwnerArtifactNameV2 {
+    transaction_id: TransactionId,
+    ordinal: ArtifactOrdinal,
+    kind: OwnerArtifactKindV2,
+}
+
+impl OwnerArtifactNameV2 {
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) const fn ordinal(&self) -> ArtifactOrdinal {
+        self.ordinal
+    }
+
+    pub(super) const fn kind(&self) -> OwnerArtifactKindV2 {
+        self.kind
+    }
+}
+
+pub(super) fn parse_owner_artifact_name(
+    name: &str,
+) -> Result<OwnerArtifactNameV2, JournalModelError> {
+    let (rest, kind) = if let Some(rest) = name.strip_prefix(DIRECTORY_CANDIDATE_PREFIX) {
+        (rest, OwnerArtifactKindV2::Directory)
+    } else if let Some(rest) = name.strip_prefix(STAGE_OWNER_PREFIX) {
+        (rest, OwnerArtifactKindV2::Stage)
+    } else if let Some(rest) = name.strip_prefix(BACKUP_OWNER_PREFIX) {
+        (rest, OwnerArtifactKindV2::Backup)
+    } else {
+        return Err(JournalModelError::new(
+            "workspace owner name does not use a v2 owner namespace",
+        ));
+    };
+    let split = rest
+        .len()
+        .checked_sub(ORDINAL_DECIMAL_WIDTH + 1)
+        .ok_or_else(|| {
+            JournalModelError::new("workspace owner name is shorter than its fixed suffix")
+        })?;
+    if rest.as_bytes().get(split) != Some(&b'-') {
+        return Err(JournalModelError::new(
+            "workspace owner name has no fixed ordinal separator",
+        ));
+    }
+    let transaction_id = TransactionId::parse(&rest[..split])?;
+    let ordinal_text = &rest[split + 1..];
+    if ordinal_text.len() != ORDINAL_DECIMAL_WIDTH
+        || !ordinal_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(JournalModelError::new(
+            "workspace owner ordinal is not fixed-width decimal",
+        ));
+    }
+    let ordinal = ArtifactOrdinal::new(
+        ordinal_text
+            .parse::<u32>()
+            .map_err(|_| JournalModelError::new("workspace owner ordinal exceeds u32"))?,
+    )?;
+    let parsed = OwnerArtifactNameV2 {
+        transaction_id,
+        ordinal,
+        kind,
+    };
+    let canonical = match kind {
+        OwnerArtifactKindV2::Directory => {
+            directory_candidate_name(&parsed.transaction_id, parsed.ordinal)
+        }
+        OwnerArtifactKindV2::Stage => stage_owner_name(&parsed.transaction_id, parsed.ordinal),
+        OwnerArtifactKindV2::Backup => backup_owner_name(&parsed.transaction_id, parsed.ordinal),
+    };
+    if canonical != name {
+        return Err(JournalModelError::new(
+            "workspace owner name is not canonical",
+        ));
+    }
+    Ok(parsed)
 }
 
 pub(super) fn directory_candidate_name(
@@ -4306,6 +5875,10 @@ impl PartialEnvelopeHeaderV2 {
         &self.owner_tag
     }
 
+    pub(super) const fn payload_len(&self) -> u64 {
+        self.payload_len
+    }
+
     pub(super) fn to_prefix_bytes(&self) -> Result<Vec<u8>, JournalModelError> {
         self.validate()?;
         let mut bytes = serde_json::to_vec(self).map_err(|error| {
@@ -4378,6 +5951,150 @@ impl PartialEnvelopeHeaderV2 {
             return Err(JournalModelError::new(
                 "partial envelope is not owned by the exact transaction workspace and sequence",
             ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_bootstrap_binding(
+        &self,
+        transaction_id: &TransactionId,
+        bootstrap: &WorkspaceBootstrapBindingV2,
+        sequence: u64,
+    ) -> Result<(), JournalModelError> {
+        let envelope = bootstrap.envelope();
+        if &self.transaction_id != transaction_id
+            || self.canonical_root_hash != *envelope.canonical_root_hash()
+            || self.owner_tag != *envelope.owner_tag()
+            || self.workspace_parent_identity
+                != envelope.workspace_parent_after_workspace().identity
+            || self.workspace_identity != envelope.workspace_exact().identity
+            || self.sequence != sequence
+        {
+            return Err(JournalModelError::new(
+                "partial envelope is not owned by the exact bootstrap workspace and sequence",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Authenticates a crash-truncated header before its terminating newline.
+    /// Every byte whose value is already determined must be the exact
+    /// canonical prefix for this bootstrap authority.  The only variable
+    /// fields are the lowercase SHA-256 payload digest and canonical `u64`
+    /// payload length.
+    pub(super) fn validate_incomplete_ownership_prefix(
+        bytes: &[u8],
+        transaction_id: &TransactionId,
+        bootstrap: &WorkspaceBootstrapBindingV2,
+        sequence: u64,
+    ) -> Result<(), JournalModelError> {
+        if bytes.contains(&b'\n') {
+            return Err(JournalModelError::new(
+                "an invalid complete partial header is not an owned incomplete prefix",
+            ));
+        }
+        let envelope = bootstrap.envelope();
+        let placeholder_digest = Sha256Digest::parse(&format!("sha256:{}", "0".repeat(64)))?;
+        let placeholder = Self {
+            magic: PARTIAL_MAGIC.to_owned(),
+            version: JOURNAL_VERSION,
+            owner_tag: envelope.owner_tag().clone(),
+            transaction_id: transaction_id.clone(),
+            canonical_root_hash: envelope.canonical_root_hash().clone(),
+            workspace_parent_identity: envelope.workspace_parent_after_workspace().identity,
+            workspace_identity: envelope.workspace_exact().identity,
+            sequence,
+            payload_hash: placeholder_digest,
+            payload_len: 0,
+        }
+        .to_prefix_bytes()?;
+        let marker = b"\"payloadHash\":\"";
+        let marker_offset = placeholder
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .ok_or_else(|| JournalModelError::new("canonical partial header lost payload hash"))?;
+        let digest_offset = marker_offset + marker.len();
+        if bytes.len() <= digest_offset {
+            if bytes != &placeholder[..bytes.len()] {
+                return Err(JournalModelError::new(
+                    "incomplete partial header is not the canonical ownership prefix",
+                ));
+            }
+            return Ok(());
+        }
+        if bytes[..digest_offset] != placeholder[..digest_offset] {
+            return Err(JournalModelError::new(
+                "incomplete partial header substituted its ownership fields",
+            ));
+        }
+
+        let tail = &bytes[digest_offset..];
+        let digest_prefix = b"sha256:";
+        let compared_prefix = tail.len().min(digest_prefix.len());
+        if tail[..compared_prefix] != digest_prefix[..compared_prefix] {
+            return Err(JournalModelError::new(
+                "incomplete partial header has a noncanonical payload digest prefix",
+            ));
+        }
+        if tail.len() <= digest_prefix.len() {
+            return Ok(());
+        }
+        let digest_hex = &tail[digest_prefix.len()..tail.len().min(71)];
+        if !digest_hex
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(JournalModelError::new(
+                "incomplete partial header payload digest is not lowercase hexadecimal",
+            ));
+        }
+        if tail.len() <= 71 {
+            return Ok(());
+        }
+
+        let length_marker = b"\",\"payloadLen\":";
+        let marker_tail = &tail[71..];
+        let compared_marker = marker_tail.len().min(length_marker.len());
+        if marker_tail[..compared_marker] != length_marker[..compared_marker] {
+            return Err(JournalModelError::new(
+                "incomplete partial header has a noncanonical payload-length field",
+            ));
+        }
+        if marker_tail.len() <= length_marker.len() {
+            return Ok(());
+        }
+
+        let number_tail = &marker_tail[length_marker.len()..];
+        if number_tail.is_empty() {
+            return Ok(());
+        }
+        let close = number_tail.iter().position(|byte| *byte == b'}');
+        let digits = close.map_or(number_tail, |index| &number_tail[..index]);
+        if digits.is_empty()
+            || !digits.iter().all(u8::is_ascii_digit)
+            || (digits.len() > 1 && digits[0] == b'0')
+            || digits.len() > 20
+        {
+            return Err(JournalModelError::new(
+                "incomplete partial header has a noncanonical payload length",
+            ));
+        }
+        if digits.len() == 20
+            && std::str::from_utf8(digits)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_none()
+        {
+            return Err(JournalModelError::new(
+                "incomplete partial header payload length exceeds u64",
+            ));
+        }
+        if let Some(index) = close {
+            if index + 1 != number_tail.len() {
+                return Err(JournalModelError::new(
+                    "incomplete partial header has bytes after its canonical closing brace",
+                ));
+            }
         }
         Ok(())
     }
@@ -4632,6 +6349,41 @@ impl FinalizationLeaseV2 {
         Ok(lease)
     }
 
+    pub(super) fn arm_bootstrap_abort(
+        bootstrap: WorkspaceBootstrapBindingV2,
+    ) -> Result<Self, JournalModelError> {
+        let envelope = bootstrap.envelope();
+        let transaction_id = envelope.transaction_id().clone();
+        let canonical_root_hash = envelope.canonical_root_hash().clone();
+        let owner_tag = envelope.owner_tag().clone();
+        let workspace_parent = envelope.workspace_parent_after_workspace().clone();
+        let workspace_name = envelope.workspace_name().to_owned();
+        let workspace = envelope.workspace_exact().clone();
+        let intent_exact = bootstrap.intent.exact.clone();
+        let bootstrap_exact = bootstrap.exact.clone();
+        let lease = Self {
+            version: JOURNAL_VERSION,
+            generation: 0,
+            transaction_id,
+            canonical_root_hash,
+            owner_tag,
+            outcome: FinalizationOutcomeV2::Rollback,
+            terminal_sequence: 0,
+            workspace_parent_before: workspace_parent.clone(),
+            workspace_parent_current: workspace_parent,
+            workspace_name,
+            workspace: PresenceV2::Present(workspace),
+            bootstrap,
+            bootstrap_intent_current: PresenceV2::Present(intent_exact),
+            bootstrap_current: PresenceV2::Present(bootstrap_exact),
+            records: Vec::new(),
+            partial: None,
+            state: FinalizationStateV2::WorkspacePresent,
+        };
+        lease.validate()?;
+        Ok(lease)
+    }
+
     pub(super) const fn generation(&self) -> u64 {
         self.generation
     }
@@ -4836,24 +6588,62 @@ impl FinalizationLeaseV2 {
             &self.bootstrap.intent.envelope.workspace_parent_preimage,
             &self.bootstrap.envelope.workspace_parent_preimage,
         )?;
+        validate_parent_stable_growth(
+            &self.bootstrap.envelope.workspace_parent_after_workspace,
+            &self.workspace_parent_before,
+        )?;
+        let mut historical_identities = BTreeSet::new();
+        for identity in [
+            self.workspace_parent_before.identity,
+            self.bootstrap.envelope.workspace_exact.identity,
+            self.bootstrap.intent.exact.identity,
+            self.bootstrap.exact.identity,
+        ] {
+            if !historical_identities.insert(identity) {
+                return Err(JournalModelError::new(
+                    "finalization bootstrap authority contains aliased protected identities",
+                ));
+            }
+        }
+        for record in &self.records {
+            if !historical_identities.insert(record.exact.identity) {
+                return Err(JournalModelError::new(
+                    "finalization record manifest aliases protected historical authority",
+                ));
+            }
+        }
+        if let Some(partial) = &self.partial {
+            partial.validate_exact_file()?;
+            if !historical_identities.insert(partial.exact.identity) {
+                return Err(JournalModelError::new(
+                    "finalization partial aliases protected historical authority",
+                ));
+            }
+        }
         match self.state {
             FinalizationStateV2::WorkspacePresent => {
                 let workspace = self.workspace.as_present().ok_or_else(|| {
                     JournalModelError::new("workspace-present lease is missing its exact workspace")
                 })?;
                 require_private_directory_mode(workspace, 0o700, "finalization workspace")?;
-                if self.workspace_parent_current != self.workspace_parent_before
+                if self.generation != 0
+                    || workspace != &self.bootstrap.envelope.workspace_exact
+                    || self.workspace_parent_current != self.workspace_parent_before
                     || self.bootstrap_intent_current
                         != PresenceV2::Present(self.bootstrap.intent.exact.clone())
                     || self.bootstrap_current != PresenceV2::Present(self.bootstrap.exact.clone())
                 {
                     return Err(JournalModelError::new(
-                        "workspace-present lease must bind its exact parent and bootstrap file",
+                        "workspace-present lease must be generation zero and bind its exact bootstrap workspace, parent, and files",
                     ));
                 }
-                if self.records.is_empty() {
+                if self.records.is_empty()
+                    && (self.outcome != FinalizationOutcomeV2::Rollback
+                        || self.terminal_sequence != 0
+                        || self.partial.is_some())
+                {
                     return Err(JournalModelError::new(
-                        "workspace-present lease requires an exact record inventory",
+                        "bootstrap-abort finalization must be rollback generation zero without journal records",
                     ));
                 }
                 let mut identities = BTreeSet::new();
@@ -4880,7 +6670,9 @@ impl FinalizationLeaseV2 {
                     }
                     require_private_file_mode(&record.exact, 0o600, "finalization journal record")?;
                 }
-                if self.records.last().map(|record| record.sequence) != Some(self.terminal_sequence)
+                if !self.records.is_empty()
+                    && self.records.last().map(|record| record.sequence)
+                        != Some(self.terminal_sequence)
                 {
                     return Err(JournalModelError::new(
                         "finalization inventory does not end at its terminal sequence",
@@ -4899,16 +6691,26 @@ impl FinalizationLeaseV2 {
                 }
             }
             FinalizationStateV2::WorkspaceRemoved => {
-                if !self.workspace.is_missing()
+                if self.generation != 1
+                    || !self.workspace.is_missing()
                     || !self.bootstrap_intent_current.is_missing()
                     || !self.bootstrap_current.is_missing()
                 {
                     return Err(JournalModelError::new(
-                        "workspace-removed lease must mark every mutable workspace/bootstrap object missing",
+                        "workspace-removed lease must be generation one and mark every mutable workspace/bootstrap object missing",
                     ));
                 }
                 if self.records.is_empty()
-                    || self.records.last().map(|record| record.sequence)
+                    && (self.outcome != FinalizationOutcomeV2::Rollback
+                        || self.terminal_sequence != 0
+                        || self.partial.is_some())
+                {
+                    return Err(JournalModelError::new(
+                        "workspace-removed bootstrap abort must retain its empty rollback lineage",
+                    ));
+                }
+                if !self.records.is_empty()
+                    && self.records.last().map(|record| record.sequence)
                         != Some(self.terminal_sequence)
                 {
                     return Err(JournalModelError::new(
@@ -4978,6 +6780,10 @@ const fn private_posix_mode(mode: u32) -> Option<u32> {
         let _ = mode;
         None
     }
+}
+
+const fn normal_create_file_mode() -> Option<u32> {
+    private_posix_mode(0o644)
 }
 
 fn require_private_file_mode(
@@ -5175,12 +6981,6 @@ fn derive_managed_children_for(
                 leaf_name(&directory.logical_path),
                 ManagedChildKindV2::Directory,
             ));
-            if let Some(candidate_name) = &directory.candidate_name {
-                children.insert(ManagedChildV2::new(
-                    candidate_name.clone(),
-                    ManagedChildKindV2::Directory,
-                ));
-            }
         }
     }
     children.into_iter().collect()
@@ -5190,17 +6990,34 @@ fn derive_cleanup_plans(
     entries: &[JournalEntryV2],
     directories: &[JournalDirectoryV2],
 ) -> CleanupPlansV2 {
-    let backups = entries.iter().rev().filter_map(|entry| {
-        entry.backup.as_ref().map(|_| CleanupTargetV2::Backup {
+    let placed_backups = entries.iter().rev().filter_map(|entry| {
+        entry
+            .backup
+            .as_ref()
+            .map(|_| CleanupTargetV2::PlacedBackup {
+                ordinal: entry.ordinal,
+            })
+    });
+    let placed_stages = entries
+        .iter()
+        .rev()
+        .map(|entry| CleanupTargetV2::PlacedStage {
+            ordinal: entry.ordinal,
+        });
+    let owned_backups = entries.iter().rev().filter_map(|entry| {
+        entry.backup.as_ref().map(|_| CleanupTargetV2::OwnedBackup {
             ordinal: entry.ordinal,
         })
     });
-    let stages = entries.iter().rev().map(|entry| CleanupTargetV2::Stage {
-        ordinal: entry.ordinal,
-    });
-    let candidates = directories.iter().rev().filter_map(|directory| {
+    let owned_stages = entries
+        .iter()
+        .rev()
+        .map(|entry| CleanupTargetV2::OwnedStage {
+            ordinal: entry.ordinal,
+        });
+    let owners = directories.iter().rev().filter_map(|directory| {
         (directory.disposition == DirectoryDispositionV2::Create).then_some(
-            CleanupTargetV2::DirectoryCandidate {
+            CleanupTargetV2::OwnedDirectory {
                 ordinal: directory.ordinal,
             },
         )
@@ -5212,14 +7029,18 @@ fn derive_cleanup_plans(
             },
         )
     });
-    let commit = backups
+    let commit = placed_backups
         .clone()
-        .chain(stages.clone())
-        .chain(candidates.clone())
+        .chain(placed_stages.clone())
+        .chain(owned_backups.clone())
+        .chain(owned_stages.clone())
+        .chain(owners.clone())
         .collect();
-    let rollback = backups
-        .chain(stages)
-        .chain(candidates)
+    let rollback = placed_backups
+        .chain(placed_stages)
+        .chain(owned_backups)
+        .chain(owned_stages)
+        .chain(owners)
         .chain(created)
         .collect();
     CleanupPlansV2 { commit, rollback }
@@ -5378,13 +7199,19 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let paths = logical_parents(logical_path);
+        let mut paths = logical_parents(logical_path);
         assert!(
             paths
                 .iter()
-                .any(|path| path.as_str() == WORKSPACE_PARENT_LOGICAL_PATH),
+                .any(|path| path.as_str() == "src/components/ui/_kit"),
             "test path cohort omitted _kit: {paths:?}"
         );
+        paths.push(WORKSPACE_PARENT_LOGICAL_PATH.to_owned());
+        paths.sort_by(|left, right| {
+            path_depth(left)
+                .cmp(&path_depth(right))
+                .then_with(|| left.cmp(right))
+        });
         let mut directories = Vec::new();
         for (index, path) in paths.iter().enumerate() {
             let ordinal = ordinal_from_index(index).unwrap();
@@ -5507,6 +7334,163 @@ mod tests {
         let mut noncanonical = envelope.clone();
         noncanonical.insert(0, b' ');
         assert!(JournalSnapshotV2::from_record_envelope_slice(&noncanonical).is_err());
+
+        let header_len = envelope.iter().position(|byte| *byte == b'\n').unwrap();
+        for cut in [0, 1, header_len / 2, header_len] {
+            PartialEnvelopeHeaderV2::validate_incomplete_ownership_prefix(
+                &envelope[..cut],
+                snapshot.transaction_id(),
+                snapshot.bootstrap(),
+                0,
+            )
+            .unwrap();
+        }
+        let mut forged_prefix = envelope[..header_len].to_vec();
+        let transaction_offset = forged_prefix
+            .windows(TX_TEXT.len())
+            .position(|window| window == TX_TEXT.as_bytes())
+            .unwrap();
+        forged_prefix[transaction_offset] = b'f';
+        assert!(
+            PartialEnvelopeHeaderV2::validate_incomplete_ownership_prefix(
+                &forged_prefix,
+                snapshot.transaction_id(),
+                snapshot.bootstrap(),
+                0,
+            )
+            .is_err()
+        );
+
+        let owner_bytes = snapshot.bootstrap.envelope.to_json_bytes().unwrap();
+        assert!(
+            WorkspaceBootstrapBindingV2::from_exact_envelopes(
+                snapshot.bootstrap.intent.clone(),
+                snapshot.bootstrap.envelope.clone(),
+                exact_file(
+                    snapshot.bootstrap.intent.exact.identity.namespace(),
+                    snapshot.bootstrap.intent.exact.identity.object(),
+                    &owner_bytes,
+                    0o600,
+                    1,
+                ),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validated_records_cache_canonical_bytes_bindings_and_adjacency() {
+        let snapshot = build_snapshot(false);
+        let canonical_bytes = snapshot.record_envelope_bytes().unwrap();
+        let current_identity = ObjectIdentityV2::from_u128(9, 101);
+        let expected_binding = snapshot.expected_record_binding(current_identity).unwrap();
+
+        let current =
+            Arc::new(ValidatedJournalEnvelopeV2::from_snapshot(snapshot.clone()).unwrap())
+                .bind_exact(expected_binding.exact().clone())
+                .unwrap();
+        assert_eq!(current.snapshot(), &snapshot);
+        assert_eq!(current.envelope_bytes(), canonical_bytes);
+        assert_eq!(current.binding(), &expected_binding);
+        assert_eq!(
+            current.binding().exact().state().content_hash(),
+            &content_hash(&canonical_bytes)
+        );
+
+        let reparsed =
+            ValidatedJournalEnvelopeV2::from_record_envelope_slice(&canonical_bytes).unwrap();
+        assert_eq!(reparsed.snapshot(), &snapshot);
+        assert_eq!(reparsed.envelope_bytes(), canonical_bytes);
+
+        let successor_snapshot = snapshot
+            .arm_owner_creation(current.binding().clone())
+            .unwrap();
+        let successor_envelope =
+            ValidatedJournalEnvelopeV2::from_snapshot(successor_snapshot).unwrap();
+        let successor_exact = ExactFileStateV2::new(
+            ObjectIdentityV2::from_u128(9, 102),
+            successor_envelope.record_state.clone(),
+            2,
+        )
+        .unwrap();
+        let successor = Arc::new(successor_envelope)
+            .bind_exact(successor_exact)
+            .unwrap();
+        assert_eq!(successor.binding().exact().link_count(), 2);
+        current.validate_successor(&successor).unwrap();
+
+        let mut substituted_predecessor = successor.snapshot().clone();
+        substituted_predecessor
+            .previous_record
+            .as_mut()
+            .unwrap()
+            .exact
+            .identity = ObjectIdentityV2::from_u128(9, 999);
+        let substituted_envelope =
+            ValidatedJournalEnvelopeV2::from_snapshot(substituted_predecessor).unwrap();
+        let substituted_exact = ExactFileStateV2::new(
+            ObjectIdentityV2::from_u128(9, 103),
+            substituted_envelope.record_state.clone(),
+            1,
+        )
+        .unwrap();
+        let substituted_successor = Arc::new(substituted_envelope)
+            .bind_exact(substituted_exact)
+            .unwrap();
+        assert!(current.validate_successor(&substituted_successor).is_err());
+
+        let mut noncanonical_payload = vec![b' '];
+        noncanonical_payload.extend_from_slice(&snapshot.to_json_bytes().unwrap());
+        let header = PartialEnvelopeHeaderV2::for_payload(
+            snapshot.transaction_id.clone(),
+            snapshot.project(),
+            snapshot.sequence(),
+            &noncanonical_payload,
+        )
+        .unwrap();
+        let mut noncanonical_envelope = header.to_prefix_bytes().unwrap();
+        noncanonical_envelope.extend_from_slice(&noncanonical_payload);
+        assert!(JournalSnapshotV2::from_record_envelope_slice(&noncanonical_envelope).is_ok());
+        assert!(
+            ValidatedJournalEnvelopeV2::from_record_envelope_slice(&noncanonical_envelope).is_err()
+        );
+    }
+
+    #[test]
+    fn preparation_prefix_requires_each_live_exact_owned_object() {
+        let mut file_snapshot = build_snapshot(false);
+        let desired = b":root { --accent: blue; }\n";
+        let staged = exact_file(7, 1, desired, 0o644, 1);
+        file_snapshot = file_snapshot
+            .adopt_next_preparation(
+                record(&file_snapshot, 90),
+                PreparationObservationV2::Stage {
+                    exact: staged.clone(),
+                },
+            )
+            .unwrap();
+        file_snapshot.entries[0].stage.owner_current = PresenceV2::Missing;
+        assert!(file_snapshot.validate().is_err());
+
+        let mut directory_snapshot = build_snapshot(true);
+        let candidate = exact_directory(7, 20, 0o755, 2);
+        let workspace = directory_snapshot.project().workspace().exact().clone();
+        directory_snapshot = directory_snapshot
+            .adopt_next_preparation(
+                record(&directory_snapshot, 91),
+                PreparationObservationV2::DirectoryCandidate {
+                    exact: candidate,
+                    parent_after: workspace,
+                },
+            )
+            .unwrap();
+        let directory = directory_snapshot
+            .directories
+            .iter_mut()
+            .find(|directory| directory.created_exact.is_some())
+            .unwrap();
+        directory.candidate_current = PresenceV2::Missing;
+        assert!(directory_snapshot.validate().is_err());
     }
 
     #[test]
@@ -5526,10 +7510,37 @@ mod tests {
                 },
             )
             .unwrap();
+        let parent = snapshot
+            .directory_parent_for_logical_path(snapshot.entries[0].logical_path())
+            .unwrap();
+        let placement = FilePlacementIntentV2::new(
+            ArtifactOrdinal::new(0).unwrap(),
+            FileArtifactKindV2::Stage,
+            snapshot.entries[0].stage.owner_name(),
+            snapshot.entries[0].stage.name(),
+            staged.clone(),
+            parent,
+            snapshot.parent_current(parent).unwrap().clone(),
+        );
         let binding = record(&snapshot, 101);
         records.push(binding.clone());
-        snapshot = snapshot.mark_prepared(binding).unwrap();
+        snapshot = snapshot.arm_file_placement(binding, placement).unwrap();
         let binding = record(&snapshot, 102);
+        records.push(binding.clone());
+        snapshot = snapshot
+            .complete_file_placement(
+                binding,
+                FilePlacementObservationV2::new(
+                    staged.clone(),
+                    PresenceV2::Missing,
+                    snapshot.parent_current(parent).unwrap().clone(),
+                ),
+            )
+            .unwrap();
+        let binding = record(&snapshot, 103);
+        records.push(binding.clone());
+        snapshot = snapshot.mark_prepared(binding).unwrap();
+        let binding = record(&snapshot, 104);
         records.push(binding.clone());
         let linked = staged.with_link_count(2).unwrap();
         snapshot = snapshot
@@ -5538,28 +7549,28 @@ mod tests {
                 ReplacementObservationV2::new(linked.clone(), PresenceV2::Present(linked.clone())),
             )
             .unwrap();
-        let binding = record(&snapshot, 103);
+        let binding = record(&snapshot, 105);
         records.push(binding.clone());
         snapshot = snapshot.enter_commit_complete(binding).unwrap();
         assert!(snapshot.phase().desired_state_is_irreversible());
-        let binding = record(&snapshot, 104);
+        let binding = record(&snapshot, 106);
         records.push(binding.clone());
         snapshot = snapshot
             .arm_cleanup(
                 binding,
                 CleanupIntentV2::RemoveFile {
-                    target: CleanupTargetV2::Stage {
+                    target: CleanupTargetV2::PlacedStage {
                         ordinal: ArtifactOrdinal::new(0).unwrap(),
                     },
                     expected: linked,
                 },
             )
             .unwrap();
-        let binding = record(&snapshot, 105);
+        let binding = record(&snapshot, 107);
         records.push(binding.clone());
         snapshot = snapshot.complete_cleanup(binding, None).unwrap();
         assert!(snapshot.ready_for_finalization());
-        records.push(record(&snapshot, 106));
+        records.push(record(&snapshot, 108));
 
         let lease = FinalizationLeaseV2::arm(&snapshot, records, None).unwrap();
         let parent_after = exact_directory(1, 3, 0o755, 10);
@@ -5574,21 +7585,37 @@ mod tests {
             FinalizationLeaseV2::from_json_slice(&removed.to_json_bytes().unwrap()).unwrap(),
             removed
         );
+
+        let mut forged_generation = lease.clone();
+        forged_generation.generation = 7;
+        assert!(forged_generation.validate().is_err());
+        let mut forged_workspace = lease.clone();
+        forged_workspace.workspace = PresenceV2::Present(exact_directory(3, 77, 0o700, 2));
+        assert!(forged_workspace.validate().is_err());
+        let mut forged_tombstone = removed.clone();
+        forged_tombstone.generation = 2;
+        assert!(forged_tombstone.validate().is_err());
+
+        let mut completed_cleanup_with_live_stage = snapshot.clone();
+        completed_cleanup_with_live_stage.entries[0].stage.current =
+            PresenceV2::Present(exact_file(7, 1, desired, 0o644, 2));
+        assert!(completed_cleanup_with_live_stage.validate().is_err());
     }
 
     #[test]
     fn directory_candidate_publish_world_and_rollback_cleanup_are_exact() {
         let mut snapshot = build_snapshot(true);
         let directory_ordinal = ArtifactOrdinal::new(4).unwrap();
-        let candidate = exact_directory(7, 20, 0o700, 2);
+        let candidate = exact_directory(7, 20, 0o755, 2);
         let parent_after_candidate = exact_directory(1, 3, 0o755, 12);
+        let workspace_after_candidate = snapshot.project.workspace.exact.clone();
 
         snapshot = snapshot
             .adopt_next_preparation(
                 record(&snapshot, 200),
                 PreparationObservationV2::DirectoryCandidate {
                     exact: candidate.clone(),
-                    parent_after: parent_after_candidate.clone(),
+                    parent_after: workspace_after_candidate,
                 },
             )
             .unwrap();
@@ -5610,19 +7637,18 @@ mod tests {
                     &parent_after_candidate,
                 )
                 .unwrap(),
-            DirectoryPublicationWorldV2::CandidatePrivate
+            DirectoryPublicationWorldV2::Before
         );
-        let ready = exact_directory(7, 20, 0o755, 2);
         assert_eq!(
             snapshot
                 .validate_directory_publication_world(
                     &intent,
-                    &PresenceV2::Present(ready.clone()),
                     &PresenceV2::Missing,
+                    &PresenceV2::Present(candidate.clone()),
                     &parent_after_candidate,
                 )
                 .unwrap(),
-            DirectoryPublicationWorldV2::CandidateReady
+            DirectoryPublicationWorldV2::After
         );
         assert!(
             snapshot
@@ -5642,7 +7668,7 @@ mod tests {
             .complete_directory_publication(
                 record(&snapshot, 202),
                 DirectoryPublicationObservationV2::new(
-                    ready.clone(),
+                    candidate.clone(),
                     PresenceV2::Missing,
                     parent_after_candidate.clone(),
                 ),
@@ -5658,19 +7684,44 @@ mod tests {
                 },
             )
             .unwrap();
-        snapshot = snapshot.mark_prepared(record(&snapshot, 204)).unwrap();
-        snapshot = snapshot.begin_rollback(record(&snapshot, 205)).unwrap();
+        let parent = snapshot
+            .directory_parent_for_logical_path(snapshot.entries[0].logical_path())
+            .unwrap();
+        let placement = FilePlacementIntentV2::new(
+            ArtifactOrdinal::new(0).unwrap(),
+            FileArtifactKindV2::Stage,
+            snapshot.entries[0].stage.owner_name(),
+            snapshot.entries[0].stage.name(),
+            staged.clone(),
+            parent,
+            snapshot.parent_current(parent).unwrap().clone(),
+        );
         snapshot = snapshot
-            .advance_rollback_noop(record(&snapshot, 206))
+            .arm_file_placement(record(&snapshot, 204), placement)
             .unwrap();
         snapshot = snapshot
-            .finish_rollback_targets(record(&snapshot, 207))
+            .complete_file_placement(
+                record(&snapshot, 205),
+                FilePlacementObservationV2::new(
+                    staged.clone(),
+                    PresenceV2::Missing,
+                    snapshot.parent_current(parent).unwrap().clone(),
+                ),
+            )
+            .unwrap();
+        snapshot = snapshot.mark_prepared(record(&snapshot, 206)).unwrap();
+        snapshot = snapshot.begin_rollback(record(&snapshot, 207)).unwrap();
+        snapshot = snapshot
+            .advance_rollback_noop(record(&snapshot, 208))
+            .unwrap();
+        snapshot = snapshot
+            .finish_rollback_targets(record(&snapshot, 209))
             .unwrap();
         snapshot = snapshot
             .arm_cleanup(
-                record(&snapshot, 208),
+                record(&snapshot, 210),
                 CleanupIntentV2::RemoveFile {
-                    target: CleanupTargetV2::Stage {
+                    target: CleanupTargetV2::PlacedStage {
                         ordinal: ArtifactOrdinal::new(0).unwrap(),
                     },
                     expected: staged,
@@ -5678,19 +7729,22 @@ mod tests {
             )
             .unwrap();
         snapshot = snapshot
-            .complete_cleanup(record(&snapshot, 209), None)
+            .complete_cleanup(record(&snapshot, 211), None)
             .unwrap();
         snapshot = snapshot
-            .advance_cleanup_noop(record(&snapshot, 210))
+            .advance_cleanup_noop(record(&snapshot, 212))
+            .unwrap();
+        snapshot = snapshot
+            .advance_cleanup_noop(record(&snapshot, 213))
             .unwrap();
         snapshot = snapshot
             .arm_cleanup(
-                record(&snapshot, 211),
+                record(&snapshot, 214),
                 CleanupIntentV2::RemoveDirectory {
                     target: CleanupTargetV2::CreatedDirectory {
                         ordinal: directory_ordinal,
                     },
-                    expected: ready,
+                    expected: candidate,
                     parent: DirectoryParentV2::Cohort {
                         ordinal: ArtifactOrdinal::new(3).unwrap(),
                     },
@@ -5700,7 +7754,7 @@ mod tests {
             .unwrap();
         snapshot = snapshot
             .complete_cleanup(
-                record(&snapshot, 212),
+                record(&snapshot, 215),
                 Some(exact_directory(1, 3, 0o755, 11)),
             )
             .unwrap();

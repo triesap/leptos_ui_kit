@@ -57,7 +57,8 @@ const REGISTRY_TESTS: [&str; 7] = [
 
 const FACADE_FILES: [&str; 1] = ["src/lib.rs"];
 const PRIMITIVES_FILES: [&str; 1] = ["src/lib.rs"];
-const CODEGEN_FILES: [&str; 31] = [
+const CODEGEN_PLATFORM_FILES: [&str; 2] = ["src/lib.rs", "src/windows.rs"];
+const CODEGEN_FILES: [&str; 35] = [
     "src/command.rs",
     "src/digest.rs",
     "src/error.rs",
@@ -75,11 +76,15 @@ const CODEGEN_FILES: [&str; 31] = [
     "src/planning/mod.rs",
     "src/planning/sync.rs",
     "src/tests.rs",
+    "src/transaction/authority.rs",
     "src/transaction/engine.rs",
     "src/transaction/fs.rs",
     "src/transaction/journal.rs",
     "src/transaction/lock.rs",
     "src/transaction/mod.rs",
+    "src/transaction/recovery.rs",
+    "src/transaction/recovery_capture.rs",
+    "src/transaction/recovery_policy.rs",
     "src/transaction/replace.rs",
     "src/transaction/runtime.rs",
     "src/transaction/store.rs",
@@ -104,7 +109,7 @@ const CLI_FILES: [&str; 11] = [
     "tests/workflow.rs",
 ];
 
-const PACKAGES: [PackageSpec; 5] = [
+const PACKAGES: [PackageSpec; 6] = [
     PackageSpec {
         name: "leptos_ui_kit",
         path_in_vcs: "crates/leptos_ui_kit",
@@ -119,6 +124,11 @@ const PACKAGES: [PackageSpec; 5] = [
         name: "leptos_ui_kit_codegen",
         path_in_vcs: "crates/leptos_ui_kit_codegen",
         files: &CODEGEN_FILES,
+    },
+    PackageSpec {
+        name: "leptos_ui_kit_codegen_platform",
+        path_in_vcs: "crates/leptos_ui_kit_codegen_platform",
+        files: &CODEGEN_PLATFORM_FILES,
     },
     PackageSpec {
         name: "leptos_ui_kit_primitives",

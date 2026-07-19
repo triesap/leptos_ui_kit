@@ -11,22 +11,35 @@ use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, DEFAULT_KIT_LOCK_PATH, InstallLock, InstalledFile,
     PlannedFile, PlannedFileAction, UiModuleExport, lock_to_json_at_path,
+    parse_install_lock_str_at_path,
 };
+
+pub(crate) fn read_canonical_install_lock(
+    context: &PlanningContext,
+    lock_path: &str,
+) -> Result<Option<(InstallLock, String)>, CodegenError> {
+    let Some(input) = context.read_optional_string(lock_path)? else {
+        return Ok(None);
+    };
+    let path = context.project_root().join(lock_path);
+    let lock = parse_install_lock_str_at_path(&input, &path)?;
+    let canonical = lock_to_json_at_path(&lock, &path)?;
+    if input != canonical {
+        return Err(CodegenError::InvalidLock {
+            path,
+            reason: "install lock must use its canonical JSON serialization".to_owned(),
+        });
+    }
+
+    Ok(Some((lock, canonical)))
+}
 
 pub(crate) fn load_or_empty_lock(
     context: &PlanningContext,
     lock_path: &str,
     config_hash: String,
 ) -> Result<InstallLock, CodegenError> {
-    let path = context.project_root().join(lock_path);
-    if let Some(input) = context.read_optional_string(lock_path)? {
-        let mut lock = serde_json::from_str::<InstallLock>(&input).map_err(|source| {
-            CodegenError::LockParse {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        lock.validate_at_path(Path::new(lock_path))?;
+    if let Some((mut lock, _)) = read_canonical_install_lock(context, lock_path)? {
         lock.project.config_hash = config_hash;
         return Ok(lock);
     }
@@ -133,6 +146,95 @@ pub(crate) fn upsert_planned_file(
         change = change.with_item(item_id);
     }
     changes.push(change);
+    Ok(())
+}
+
+/// Adds the install-lock publication that closes a non-empty command cohort.
+///
+/// Unlike an ordinary upsert, `force_publication` keeps an exact-content
+/// update in the plan. The durable transaction protocol uses that replacement
+/// as the unique, final desired-state marker whenever another project file is
+/// changing.
+pub(crate) fn upsert_planned_install_lock(
+    context: &PlanningContext,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    content: String,
+    force_publication: bool,
+) -> Result<(), CodegenError> {
+    let logical_path = Path::new(DEFAULT_KIT_LOCK_PATH);
+    let parsed = parse_install_lock_str_at_path(&content, logical_path)?;
+    if lock_to_json_at_path(&parsed, logical_path)? != content {
+        return Err(CodegenError::InvalidLock {
+            path: PathBuf::from(DEFAULT_KIT_LOCK_PATH),
+            reason: "planned install lock must use its canonical JSON serialization".to_owned(),
+        });
+    }
+
+    let target_count = files
+        .iter()
+        .filter(|file| file.path == DEFAULT_KIT_LOCK_PATH)
+        .count();
+    if target_count > 1 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            reason: "the plan contains duplicate install-lock targets".to_owned(),
+        });
+    }
+    if changes.iter().any(|change| {
+        change.path == DEFAULT_KIT_LOCK_PATH && change.kind != ChangeKind::WriteLockFile
+    }) {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            reason: "the canonical install lock cannot carry another change kind".to_owned(),
+        });
+    }
+    let marker_count = changes
+        .iter()
+        .filter(|change| change.kind == ChangeKind::WriteLockFile)
+        .count();
+    if marker_count > 1
+        || changes.iter().any(|change| {
+            change.kind == ChangeKind::WriteLockFile
+                && (change.path != DEFAULT_KIT_LOCK_PATH || !change.tracked)
+        })
+    {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            reason: "the plan contains an invalid install-lock change marker".to_owned(),
+        });
+    }
+    if target_count == 0 && marker_count == 1 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            reason: "the install-lock change marker has no planned target".to_owned(),
+        });
+    }
+
+    let existing = read_canonical_install_lock(context, DEFAULT_KIT_LOCK_PATH)?
+        .map(|(_, canonical)| canonical);
+    let publication_required =
+        target_count == 1 || force_publication || existing.as_deref() != Some(content.as_str());
+    if !publication_required {
+        return Ok(());
+    }
+
+    files.retain(|file| file.path != DEFAULT_KIT_LOCK_PATH);
+    files.push(PlannedFile {
+        path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+        action: if existing.is_some() {
+            PlannedFileAction::Update
+        } else {
+            PlannedFileAction::Create
+        },
+        content,
+    });
+    changes.retain(|change| change.kind != ChangeKind::WriteLockFile);
+    changes.push(ChangeRecord::new(
+        ChangeKind::WriteLockFile,
+        DEFAULT_KIT_LOCK_PATH,
+        true,
+    ));
     Ok(())
 }
 

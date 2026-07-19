@@ -12,8 +12,9 @@ use std::{
 
 use cap_std::{ambient_authority, fs::Dir};
 use leptos_ui_kit_codegen::{
-    CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_init, apply_sync,
+    CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_add, apply_init, apply_sync,
 };
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 const WORKER_ROLE_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_ROLE";
@@ -187,8 +188,8 @@ fn unknown_coordination_lock_is_rejected_without_replacement() {
 }
 
 #[test]
-fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
-    for attempt in 1..=8 {
+fn killed_transaction_recovers_to_the_state_selected_by_its_durable_v2_phase() {
+    for attempt in 1..=12 {
         let sandbox = tempdir().expect("process-test sandbox");
         let project = sandbox.path().join("project");
         let control = sandbox.path().join("control");
@@ -197,12 +198,19 @@ fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
         let lock = WriteLock::acquire(&project).expect("bootstrap coordination");
         drop(lock);
         let before = project_tree(&project);
+
+        let desired_sandbox = tempdir().expect("desired-state sandbox");
+        let desired_project = desired_sandbox.path().join("project");
+        setup_project(&desired_project);
+        apply_init(&desired_project).expect("materialize exact desired state");
+        let desired = project_tree(&desired_project);
+
         let mut worker = spawn_worker("apply-init", &project, &control, "crash-writer");
         let deadline = Instant::now() + BARRIER_TIMEOUT;
-        let mut saw_journal = false;
+        let mut saw_published_record = false;
         while Instant::now() < deadline {
-            if transaction_journal_is_valid(&project) {
-                saw_journal = true;
+            if latest_durable_record(&project).is_some() {
+                saw_published_record = true;
                 worker.kill_and_wait();
                 break;
             }
@@ -211,26 +219,43 @@ fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
             }
             thread::yield_now();
         }
-        if !saw_journal {
+        if !saw_published_record {
             worker.wait_success();
             continue;
         }
 
-        let mut recovery = spawn_worker("recover", &project, &control, "recovery");
+        let Some(killed_record) = latest_durable_record(&project) else {
+            continue;
+        };
+        let (recovery_role, expected) = match killed_record.disposition {
+            DurableDisposition::RollbackClass => ("recover-precommit", &before),
+            DurableDisposition::FinishOnly => ("recover-postcommit", &desired),
+        };
+
+        let mut recovery = spawn_worker(recovery_role, &project, &control, "recovery");
         recovery.wait_success();
         assert_eq!(
             project_tree(&project),
-            before,
-            "fresh-process recovery after crash attempt {attempt}"
+            *expected,
+            "fresh-process recovery disagreed with durable record sequence {} ({:?}) on attempt {attempt}",
+            killed_record.sequence,
+            killed_record.disposition,
         );
         assert!(
-            !project
-                .join("src/components/ui/_kit/.transactions")
-                .exists()
+            transaction_workspace_paths(&project).is_empty(),
+            "recovery must remove every journal-v2 transaction workspace"
         );
+        assert!(
+            !has_transaction_artifacts(&project),
+            "recovery must remove every journal-v2 top-level authority"
+        );
+
+        let mut second = spawn_worker(recovery_role, &project, &control, "recovery-again");
+        second.wait_success();
+        assert_eq!(project_tree(&project), *expected);
         return;
     }
-    panic!("could not observe a durable in-flight journal before the worker completed");
+    panic!("could not kill a worker while a published journal-v2 record remained authoritative");
 }
 
 #[test]
@@ -250,9 +275,12 @@ fn transaction_process_worker() {
         "apply-init" => {
             apply_init(&project).expect("worker applies init");
         }
-        "recover" => {
-            apply_sync(&project)
-                .expect_err("recovery succeeds before sync reports the missing kit config");
+        "recover-precommit" => {
+            apply_add(&project, "__recovery_probe_missing_item__")
+                .expect_err("the recovery probe must fail after completing recovery");
+        }
+        "recover-postcommit" => {
+            apply_sync(&project).expect("finish-only recovery preserves the installed project");
         }
         other => panic!("unknown transaction-process worker role {other}"),
     }
@@ -455,20 +483,123 @@ fn setup_project(root: &Path) {
     fs::write(root.join("index.html"), INDEX_HTML).expect("write project index");
 }
 
-fn transaction_journal_is_valid(project: &Path) -> bool {
-    let transactions = project.join("src/components/ui/_kit/.transactions");
-    let Ok(entries) = fs::read_dir(transactions) else {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableDisposition {
+    RollbackClass,
+    FinishOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableRecord {
+    sequence: u64,
+    disposition: DurableDisposition,
+}
+
+fn latest_durable_record(project: &Path) -> Option<DurableRecord> {
+    transaction_workspace_paths(project)
+        .into_iter()
+        .flat_map(|workspace| {
+            let workspace_id = workspace
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("transaction-v2-"))
+                .filter(|id| is_lower_hex(id, 32))?
+                .to_owned();
+            let entries = fs::read_dir(workspace).ok()?;
+            Some(entries.filter_map(move |entry| {
+                durable_record_from_entry(entry.ok()?.path(), &workspace_id)
+            }))
+        })
+        .flatten()
+        .max_by_key(|record| record.sequence)
+}
+
+fn durable_record_from_entry(path: PathBuf, workspace_id: &str) -> Option<DurableRecord> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".json")?;
+    let tail = stem.strip_prefix("transaction-v2-")?;
+    let (transaction_id, sequence_text) = tail.rsplit_once('-')?;
+    if transaction_id != workspace_id
+        || !is_lower_hex(transaction_id, 32)
+        || sequence_text.len() != 20
+        || !sequence_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let sequence = sequence_text.parse::<u64>().ok()?;
+    let bytes = fs::read(&path).ok()?;
+    let newline = bytes.iter().position(|byte| *byte == b'\n')?;
+    let header: serde_json::Value = serde_json::from_slice(&bytes[..newline]).ok()?;
+    let payload = &bytes[newline + 1..];
+    let payload_len = u64::try_from(payload.len()).ok()?;
+    let payload_hash = format!("sha256:{:x}", Sha256::digest(payload));
+    if header.get("magic")?.as_str()? != "leptos-ui-kit-journal-partial-v2"
+        || header.get("version")?.as_u64()? != 2
+        || header.get("transactionId")?.as_str()? != transaction_id
+        || header.get("sequence")?.as_u64()? != sequence
+        || header.get("payloadLen")?.as_u64()? != payload_len
+        || header.get("payloadHash")?.as_str()? != payload_hash
+    {
+        return None;
+    }
+    let snapshot: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    if snapshot.get("version")?.as_u64()? != 2
+        || snapshot.get("transactionId")?.as_str()? != transaction_id
+        || snapshot.get("sequence")?.as_u64()? != sequence
+    {
+        return None;
+    }
+    let disposition = match snapshot.get("phase")?.get("kind")?.as_str()? {
+        "commitComplete" => DurableDisposition::FinishOnly,
+        "preparing" | "prepared" | "replacing" | "rollingBack" | "rollbackComplete" => {
+            DurableDisposition::RollbackClass
+        }
+        _ => return None,
     };
-    entries.filter_map(Result::ok).any(|entry| {
-        let name = entry.file_name();
-        name.to_str()
-            .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
-            && fs::read(entry.path())
-                .ok()
-                .and_then(|content| serde_json::from_slice::<serde_json::Value>(&content).ok())
-                .is_some()
+    Some(DurableRecord {
+        sequence,
+        disposition,
     })
+}
+
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn transaction_workspace_paths(project: &Path) -> Vec<PathBuf> {
+    let kit = project.join("src/components/ui/_kit/.transactions");
+    let Ok(entries) = fs::read_dir(kit) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("transaction-v2-"))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn has_transaction_artifacts(project: &Path) -> bool {
+    let kit = project.join("src/components/ui/_kit/.transactions");
+    fs::read_dir(kit)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .any(|name| {
+            name.starts_with("transaction-v2-")
+                || name.starts_with("bootstrap-intent-v2-")
+                || name.starts_with("finalization-v2-")
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,6 +661,10 @@ fn assert_exact_first_use_coordination(root: &Path) {
             (
                 PathBuf::from(DEFAULT_KIT_WRITE_LOCK_PATH),
                 TreeEntry::File(ADVISORY_LOCK_MARKER.to_vec()),
+            ),
+            (
+                PathBuf::from("src/components/ui/_kit/.transactions"),
+                TreeEntry::Directory,
             ),
         ]),
         "first-use operation left a non-exact coordination residual"

@@ -17,7 +17,10 @@ use cap_std::{
 use crate::CodegenError;
 use crate::path_safety::PlanningContext;
 
-use super::fs::{CreatedFile, FsOps, HardLinkEndpoint, SystemFs};
+use super::fs::{CreatedFile, ExclusiveCreateFailure, FsOps, HardLinkEndpoint, SystemFs};
+use super::journal::{
+    parse_bootstrap_intent_name, parse_finalization_file_name, parse_transaction_directory_name,
+};
 
 pub const DEFAULT_KIT_WRITE_LOCK_PATH: &str = "src/components/ui/_kit/.write.lock";
 pub(crate) const DEFAULT_KIT_COORDINATION_IGNORE_PATH: &str = "src/components/ui/_kit/.gitignore";
@@ -266,13 +269,17 @@ impl WriteLock {
         )?;
         let (project_root, project_device, project_inode) = context.project_identity();
 
-        Ok(Self {
+        let lock = Self {
             path: opened.path,
             file: Some(opened.file.into_std()),
             identity: opened.identity,
             project_root: project_root.to_path_buf(),
             project_identity: (project_device, project_inode),
-        })
+        };
+        let transaction_namespace =
+            lock.open_or_create_transaction_namespace(context, fs.as_ref())?;
+        drop(transaction_namespace);
+        Ok(lock)
     }
 
     pub(crate) fn validate_context(&self, context: &PlanningContext) -> Result<(), CodegenError> {
@@ -313,6 +320,18 @@ impl WriteLock {
 
     pub(crate) fn identity(&self) -> (u64, u64) {
         self.identity
+    }
+
+    pub(super) fn open_or_create_transaction_namespace(
+        &self,
+        context: &PlanningContext,
+        fs: &dyn FsOps,
+    ) -> Result<Dir, CodegenError> {
+        self.validate_context(context)?;
+        let kit = context.open_directory(KIT_DIRECTORY_PATH)?;
+        let transactions = open_or_create_transactions_directory(context, fs, &kit)?;
+        self.validate_context(context)?;
+        Ok(transactions.directory)
     }
 }
 
@@ -922,14 +941,14 @@ struct ClaimedCandidate {
 enum CandidateAliasCleanupOutcome {
     Removed,
     Absent,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     Retry,
 }
 
 enum CandidateAliasCleanupAttempt {
     Removed,
     Absent,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     Retry,
     Failed(std::io::Error),
 }
@@ -1302,7 +1321,10 @@ fn create_candidate(
         let name = random_candidate_name(kind)?;
         let path = transactions.path.join(&name);
         require_current_transactions_directory(context, fs, kit_directory, transactions)?;
-        match fs.create_new_file(&transactions.directory, Path::new(&name), &path, 0o600) {
+        match fs
+            .create_new_file(&transactions.directory, Path::new(&name), &path, 0o600)
+            .bind_empty(fs, &transactions.directory, Path::new(&name), &path)
+        {
             Ok(created) => {
                 let (file, source_guard, identity) =
                     finish_candidate_handles(fs, &transactions.directory, &name, &path, created)?;
@@ -1314,8 +1336,24 @@ fn create_candidate(
                     identity,
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(CodegenError::Io { path, source }),
+            Err(ExclusiveCreateFailure::NotCreated(source))
+                if source.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                continue;
+            }
+            Err(ExclusiveCreateFailure::NotCreated(source)) => {
+                return Err(CodegenError::Io { path, source });
+            }
+            Err(ExclusiveCreateFailure::CreatedUnverified { created, source }) => {
+                let _candidate_capability = created;
+                return Err(CodegenError::RecoveryRequired {
+                    journal_path: path,
+                    reason: format!(
+                        "coordination-candidate creation changed the namespace but its live owner \
+                         capability could not be rebound: {source}"
+                    ),
+                });
+            }
         }
     }
     Err(CodegenError::Io {
@@ -1335,10 +1373,8 @@ fn finish_candidate_handles(
     path: &Path,
     created: CreatedFile,
 ) -> Result<FinishedCandidateHandles, CodegenError> {
-    let CreatedFile {
-        file: source_guard,
-        identity,
-    } = created;
+    let identity = created.identity();
+    let source_guard = created.file;
     let owner = match fs.open_candidate_owner(parent, Path::new(name), path) {
         Ok(owner) => owner,
         Err(source) => {
@@ -1350,7 +1386,7 @@ fn finish_candidate_handles(
             return Err(original);
         }
     };
-    if owner.identity != identity {
+    if owner.identity() != identity {
         let original = CodegenError::UnsafePath {
             path: path.to_string_lossy().into_owned(),
             reason: "coordination candidate changed while its Windows owner was opened".to_owned(),
@@ -1385,7 +1421,8 @@ fn finish_candidate_handles(
     _path: &Path,
     created: CreatedFile,
 ) -> Result<FinishedCandidateHandles, CodegenError> {
-    Ok((created.file, None, created.identity))
+    let identity = created.identity();
+    Ok((created.file, None, identity))
 }
 
 fn random_candidate_name(kind: CandidateKind) -> Result<String, CodegenError> {
@@ -1495,7 +1532,6 @@ fn cleanup_stale_lock_candidates(
         };
 
         let mut names = Vec::new();
-        let mut journal_present = false;
         for entry in transactions
             .directory
             .entries()
@@ -1509,8 +1545,10 @@ fn cleanup_stale_lock_candidates(
                 source,
             })?;
             let name = entry.file_name();
-            if transaction_journal_name(&name) || journal_update_name(&name) {
-                journal_present = true;
+            if transaction_journal_name(&name)
+                || journal_update_name(&name)
+                || journal_v2_authority_name(&name)
+            {
                 continue;
             }
             if candidate_kind(&name).is_none() {
@@ -1804,10 +1842,8 @@ fn cleanup_stale_lock_candidates(
 
         require_current_transactions_directory(context, fs, kit_directory, &transactions)?;
         let mut removed_any = false;
-        #[cfg(windows)]
-        let mut removed_held_lock_alias = false;
-        let mut restart = false;
-        'removal: for candidate in &claimed {
+        #[cfg(not(windows))]
+        for candidate in &claimed {
             for alias in &candidate.aliases {
                 match cleanup_claimed_candidate_alias(
                     context,
@@ -1820,88 +1856,49 @@ fn cleanup_stale_lock_candidates(
                 )? {
                     CandidateAliasCleanupOutcome::Removed => {
                         removed_any = true;
-                        #[cfg(windows)]
-                        if candidate.identity == held_lock_identity {
-                            removed_held_lock_alias = true;
-                        }
                     }
                     CandidateAliasCleanupOutcome::Absent => {}
-                    CandidateAliasCleanupOutcome::Retry => {
-                        restart = true;
-                        break 'removal;
-                    }
                 }
             }
         }
+        #[cfg(windows)]
+        let restart = {
+            let mut restart = false;
+            'removal: for candidate in &claimed {
+                for alias in &candidate.aliases {
+                    match cleanup_claimed_candidate_alias(
+                        context,
+                        fs,
+                        kit_directory,
+                        &transactions,
+                        alias,
+                        candidate.identity,
+                        candidate.identity == held_lock_identity,
+                    )? {
+                        CandidateAliasCleanupOutcome::Removed => {
+                            removed_any = true;
+                        }
+                        CandidateAliasCleanupOutcome::Absent => {}
+                        CandidateAliasCleanupOutcome::Retry => {
+                            restart = true;
+                            break 'removal;
+                        }
+                    }
+                }
+            }
+            restart
+        };
         if removed_any {
             sync_directory(fs, &transactions.directory, &transactions.path)?;
         }
+        #[cfg(windows)]
         if restart {
             return Err(CodegenError::WriteLockContended {
                 path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
             });
         }
 
-        if journal_present {
-            return Ok(StaleCandidateCleanupOutcome::Complete);
-        }
-
-        let transactions_identity = transactions.identity;
-        drop(claimed);
-        drop(transactions.directory);
-        let directory_cleanup = try_cleanup_transactions_directory_by_identity(
-            fs,
-            kit_directory,
-            context,
-            transactions_identity,
-        );
-        let directory_cleanup = match directory_cleanup {
-            Ok(outcome) => outcome,
-            Err(original) => {
-                best_effort_cleanup_transactions_directory_by_identity(
-                    fs,
-                    kit_directory,
-                    context,
-                    transactions_identity,
-                );
-                return Err(original);
-            }
-        };
-        match directory_cleanup {
-            TransactionsDirectoryCleanupOutcome::Removed
-            | TransactionsDirectoryCleanupOutcome::Absent => {
-                return Ok(StaleCandidateCleanupOutcome::Complete);
-            }
-            TransactionsDirectoryCleanupOutcome::NotQuiescent(_) => {
-                #[cfg(windows)]
-                if removed_held_lock_alias {
-                    return Ok(StaleCandidateCleanupOutcome::HeldLockAliasDeferred {
-                        transactions_identity,
-                    });
-                }
-                continue 'quiescence;
-            }
-            TransactionsDirectoryCleanupOutcome::Failed(source) => {
-                #[cfg(windows)]
-                if removed_held_lock_alias && windows_namespace_delete_pending_error(&source) {
-                    return Ok(StaleCandidateCleanupOutcome::HeldLockAliasDeferred {
-                        transactions_identity,
-                    });
-                }
-                best_effort_cleanup_transactions_directory_by_identity(
-                    fs,
-                    kit_directory,
-                    context,
-                    transactions_identity,
-                );
-                return Err(CodegenError::Io {
-                    path: context
-                        .project_root()
-                        .join("src/components/ui/_kit/.transactions"),
-                    source,
-                });
-            }
-        }
+        return Ok(StaleCandidateCleanupOutcome::Complete);
     }
 
     Err(CodegenError::InvalidCoordinationState {
@@ -1959,6 +1956,15 @@ fn journal_update_name(name: &OsStr) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+fn journal_v2_authority_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    parse_transaction_directory_name(name).is_ok()
+        || parse_bootstrap_intent_name(name).is_ok()
+        || parse_finalization_file_name(name).is_ok()
 }
 
 #[cfg(unix)]
@@ -2068,6 +2074,7 @@ fn cleanup_claimed_candidate_alias(
     match outcome {
         CandidateAliasCleanupAttempt::Removed => Ok(CandidateAliasCleanupOutcome::Removed),
         CandidateAliasCleanupAttempt::Absent => Ok(CandidateAliasCleanupOutcome::Absent),
+        #[cfg(windows)]
         CandidateAliasCleanupAttempt::Retry => Ok(CandidateAliasCleanupOutcome::Retry),
         CandidateAliasCleanupAttempt::Failed(source) => {
             let original = CodegenError::Io {
@@ -2141,10 +2148,7 @@ fn try_cleanup_claimed_candidate_alias(
 
     #[cfg(windows)]
     {
-        let CreatedFile {
-            file: cleanup_file,
-            identity: cleanup_identity,
-        } = match fs.open_file_for_cleanup(
+        let opened = match fs.open_file_for_cleanup(
             &transactions.directory,
             Path::new(&alias.name),
             &alias.path,
@@ -2161,6 +2165,8 @@ fn try_cleanup_claimed_candidate_alias(
             }
             Err(source) => return Ok(CandidateAliasCleanupAttempt::Failed(source)),
         };
+        let cleanup_identity = opened.identity();
+        let cleanup_file = opened.file;
         if cleanup_identity != identity || file_identity(&cleanup_file, &alias.path)? != identity {
             return Err(CodegenError::UnsafePath {
                 path: alias.path.to_string_lossy().into_owned(),
@@ -3253,6 +3259,51 @@ mod held_lock_validation_tests {
         );
         lock.validate_context(&context)
             .expect("unchanged held lock must validate");
+    }
+
+    #[test]
+    fn lock_acquisition_persists_the_empty_transaction_namespace() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let namespace_path = directory
+            .path()
+            .join("src/components/ui/_kit/.transactions");
+
+        assert!(
+            namespace_path.is_dir(),
+            "lock acquisition must persist the transaction namespace",
+        );
+
+        let namespace = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("reopen the persistent transaction namespace");
+        assert!(namespace_path.is_dir());
+        drop(namespace);
+    }
+
+    #[test]
+    fn reopening_the_namespace_preserves_nonempty_evidence() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let namespace_path = directory
+            .path()
+            .join("src/components/ui/_kit/.transactions");
+        let namespace = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("create transaction namespace explicitly");
+        namespace
+            .write("evidence", b"preserve")
+            .expect("write evidence");
+        drop(namespace);
+
+        let reopened = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("reopen nonempty transaction namespace");
+        drop(reopened);
+        assert_eq!(
+            fs::read(namespace_path.join("evidence")).expect("preserved evidence"),
+            b"preserve",
+        );
     }
 
     #[test]

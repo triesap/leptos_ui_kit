@@ -63,7 +63,6 @@ use planning::{
 use transaction::{
     DEFAULT_KIT_COORDINATION_IGNORE_PATH, FaultFs, FsEvent, FsOperation, KIT_ADVISORY_LOCK_CONTENT,
     KIT_COORDINATION_IGNORE_CONTENT, apply_planned_files_with, apply_planned_files_with_snapshot,
-    recover_pending_locked,
 };
 
 #[cfg(test)]

@@ -18,9 +18,132 @@ use sha2::{Digest, Sha256};
 
 use crate::PreservedFileMode;
 
+/// A live capability for a file whose capability-relative `create_new` open
+/// completed successfully.
+///
+/// Exact metadata is optional because metadata acquisition is a distinct
+/// post-create operation which can fail after the name has already been
+/// mutated.  Keeping the handle in that world lets the transaction bind a
+/// fresh namespace observation to the object it actually created instead of
+/// guessing from the pathname.
+#[derive(Debug)]
 pub(crate) struct CreatedFile {
     pub file: File,
-    pub identity: (u64, u64),
+    exact_metadata: Option<ExactFileMetadataObservation>,
+}
+
+impl CreatedFile {
+    fn unverified(file: File) -> Self {
+        Self {
+            file,
+            exact_metadata: None,
+        }
+    }
+
+    fn verified(file: File, exact_metadata: ExactFileMetadataObservation) -> Self {
+        Self {
+            file,
+            exact_metadata: Some(exact_metadata),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn exact_metadata(&self) -> Option<ExactFileMetadataObservation> {
+        self.exact_metadata
+    }
+
+    pub(crate) fn identity(&self) -> (u64, u64) {
+        self.exact_metadata
+            .expect("verified created-file capability must retain exact metadata")
+            .identity
+    }
+}
+
+/// Closed outcome of an exclusive file creation.
+///
+/// `NotCreated` is the only variant which proves that this call did not create
+/// a directory entry.  Both created variants retain the live handle.  The
+/// unverified variant may still carry exact metadata when a later
+/// post-success hook failed after metadata acquisition.
+#[derive(Debug)]
+pub(crate) enum ExclusiveCreateOutcome {
+    NotCreated {
+        source: io::Error,
+    },
+    CreatedUnverified {
+        created: CreatedFile,
+        source: io::Error,
+    },
+    CreatedVerified {
+        created: CreatedFile,
+    },
+}
+
+impl ExclusiveCreateOutcome {
+    pub(crate) fn bind_empty<F>(
+        self,
+        fs: &F,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+    ) -> Result<CreatedFile, ExclusiveCreateFailure>
+    where
+        F: FsOps + ?Sized,
+    {
+        match self {
+            Self::CreatedVerified { created } => Ok(created),
+            Self::NotCreated { source } => Err(ExclusiveCreateFailure::NotCreated(source)),
+            Self::CreatedUnverified {
+                mut created,
+                source,
+            } => match fs.observe_created_file_exact(parent, name, path, &mut created, 0) {
+                Ok(_) => Ok(created),
+                Err(rebind_source) => Err(ExclusiveCreateFailure::CreatedUnverified {
+                    created,
+                    source: io::Error::other(format!(
+                        "exclusive create reported a post-create error ({source}) and its live \
+                         capability could not be rebound to the empty owner name ({rebind_source})"
+                    )),
+                }),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ExclusiveFileCopyOutcome {
+    NotCreated {
+        source: io::Error,
+    },
+    CreatedUnverified {
+        created: CreatedFile,
+        source: io::Error,
+    },
+    CreatedVerified {
+        copy: ExclusiveFileCopy,
+    },
+}
+
+impl ExclusiveFileCopyOutcome {
+    #[cfg(test)]
+    fn into_verified(self) -> Result<ExclusiveFileCopy, ExclusiveCreateFailure> {
+        match self {
+            Self::CreatedVerified { copy } => Ok(copy),
+            Self::NotCreated { source } => Err(ExclusiveCreateFailure::NotCreated(source)),
+            Self::CreatedUnverified { created, source } => {
+                Err(ExclusiveCreateFailure::CreatedUnverified { created, source })
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ExclusiveCreateFailure {
+    NotCreated(io::Error),
+    CreatedUnverified {
+        created: CreatedFile,
+        source: io::Error,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -36,7 +159,6 @@ impl<'a> HardLinkEndpoint<'a> {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct DirectoryEndpoint<'a> {
     pub parent: &'a Dir,
@@ -45,7 +167,6 @@ pub(crate) struct DirectoryEndpoint<'a> {
     pub path: &'a Path,
 }
 
-#[allow(dead_code)]
 impl<'a> DirectoryEndpoint<'a> {
     pub(crate) fn new(parent: &'a Dir, name: &'a Path, directory: &'a Dir, path: &'a Path) -> Self {
         Self {
@@ -65,14 +186,12 @@ impl<'a> DirectoryEndpoint<'a> {
 /// ReFS file identifier to 64 bits. Transaction decisions that require exact
 /// identity therefore fail closed on Windows until a full-width, safe handle
 /// identity API is available.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactIdentitySupport {
     Complete,
     Unsupported,
 }
 
-#[allow(dead_code)]
 pub(crate) const fn exact_identity_support() -> ExactIdentitySupport {
     #[cfg(windows)]
     {
@@ -84,7 +203,6 @@ pub(crate) const fn exact_identity_support() -> ExactIdentitySupport {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactFileObservation {
     pub identity: (u64, u64),
@@ -94,14 +212,26 @@ pub(crate) struct ExactFileObservation {
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExactFileMetadataObservation {
+    pub identity: (u64, u64),
+    pub byte_len: u64,
+    pub mode: PreservedFileMode,
+    pub link_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactFileRead {
     pub bytes: Vec<u8>,
     pub observation: ExactFileObservation,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExactFileBytesRead {
+    pub bytes: Vec<u8>,
+    pub observation: ExactFileMetadataObservation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryObservation {
     pub identity: (u64, u64),
@@ -109,14 +239,12 @@ pub(crate) struct ExactDirectoryObservation {
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct ExactDirectoryHandle {
     pub directory: Dir,
     pub observation: ExactDirectoryObservation,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactDirectoryEntryKind {
     RegularFile,
@@ -126,7 +254,6 @@ pub(crate) enum ExactDirectoryEntryKind {
     Other,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryEntry {
     pub name: OsString,
@@ -137,14 +264,18 @@ pub(crate) struct ExactDirectoryEntry {
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryInventory {
     pub directory: ExactDirectoryObservation,
     pub entries: Vec<ExactDirectoryEntry>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExactRelocationSource {
+    File(ExactFileObservation),
+    EmptyDirectory(ExactDirectoryObservation),
+}
+
 #[derive(Debug)]
 pub(crate) struct ExclusiveFileCopy {
     pub file: File,
@@ -152,66 +283,102 @@ pub(crate) struct ExclusiveFileCopy {
     pub copy: ExactFileObservation,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParentSyncKind {
     Target,
     Journal,
 }
 
-/// The filesystem disposition of one immutable no-clobber publication.
-///
-/// Store/recovery code must not collapse these variants into a generic error:
-/// once the published hard link can be visible, rollback safety depends on
-/// whether its parent-directory durability barrier completed. Observations are
-/// the last exact states proven at the corresponding protocol boundary. A
-/// `DurableWithPartialResidual` is conservative. Its observations describe
-/// the last exact *linked* world before cleanup, not necessarily current path
-/// state. When `partial_absent_in_process` is true, the unlink completed in
-/// this process but its durability/final state was not proven; recovery must
-/// therefore accept and classify both the pre-unlink two-alias world and the
-/// post-unlink single-target world rather than trusting either link count as
-/// current after a crash.
-#[allow(dead_code)]
+/// Typed result for a capability-relative atomic no-clobber relocation.
+/// Cross-filesystem placement is a protocol incompatibility, not an ordinary
+/// transient I/O failure, and callers must fail closed without copying.
 #[derive(Debug)]
-pub(crate) enum ImmutablePublicationOutcome {
-    NotPublished {
-        partial: Option<ExactFileObservation>,
+pub(crate) enum NoReplaceRelocationError {
+    CrossDevice,
+    Unsupported,
+    Io(io::Error),
+}
+
+impl NoReplaceRelocationError {
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            Self::CrossDevice => io::Error::new(
+                io::ErrorKind::CrossesDevices,
+                "transaction owner and destination are on different filesystems",
+            ),
+            Self::Unsupported => io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic capability-relative no-replace relocation is unavailable on this platform",
+            ),
+            Self::Io(source) => source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactRemovalPostName {
+    Absent,
+    Substituted,
+    Unknown,
+}
+
+/// Phase-aware failure from an exact unlink/rmdir boundary.
+///
+/// Callers must never treat `Mutated` as an ordinary pre-mutation I/O error:
+/// the expected object is already unlinked and the parent must be freshly
+/// rebound, synced, and recaptured before journal progress is published.
+#[derive(Debug)]
+pub(crate) enum ExactRemovalError {
+    NotMutated(io::Error),
+    Mutated {
+        post_name: ExactRemovalPostName,
         source: io::Error,
-    },
-    VisibleDurabilityUnknown {
-        partial: ExactFileObservation,
-        published: Option<ExactFileObservation>,
-        source: io::Error,
-    },
-    DurableWithPartialResidual {
-        last_linked_published: ExactFileObservation,
-        last_linked_partial: ExactFileObservation,
-        partial_absent_in_process: bool,
-        source: io::Error,
-    },
-    Durable {
-        published: ExactFileObservation,
     },
 }
 
-/// The filesystem disposition of atomically publishing one fully prepared
-/// private directory at an expected-absent logical name.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) enum DirectoryPublicationOutcome {
-    NotPublished {
-        candidate: Option<ExactDirectoryInventory>,
-        source: io::Error,
-    },
-    VisibleDurabilityUnknown {
-        candidate: ExactDirectoryInventory,
-        published: Option<ExactDirectoryInventory>,
-        source: io::Error,
-    },
-    Durable {
-        published: ExactDirectoryInventory,
-    },
+impl ExactRemovalError {
+    fn not_mutated(source: io::Error) -> Self {
+        Self::NotMutated(source)
+    }
+
+    fn mutated(post_name: ExactRemovalPostName, source: io::Error) -> Self {
+        Self::Mutated { post_name, source }
+    }
+
+    pub(crate) const fn post_name(&self) -> Option<ExactRemovalPostName> {
+        match self {
+            Self::NotMutated(_) => None,
+            Self::Mutated { post_name, .. } => Some(*post_name),
+        }
+    }
+
+    pub(crate) const fn mutation_may_have_completed(&self) -> bool {
+        matches!(self, Self::Mutated { .. })
+    }
+
+    pub(crate) fn source_error(&self) -> &io::Error {
+        match self {
+            Self::NotMutated(source) | Self::Mutated { source, .. } => source,
+        }
+    }
+}
+
+impl fmt::Display for ExactRemovalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotMutated(source) => write!(formatter, "exact removal did not mutate: {source}"),
+            Self::Mutated { post_name, source } => write!(
+                formatter,
+                "exact removal mutated with post-name state {post_name:?}: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExactRemovalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source_error())
+    }
 }
 
 #[cfg(windows)]
@@ -221,19 +388,42 @@ pub(crate) struct HandleDeleteError {
 }
 
 pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
+    #[cfg(test)]
+    fn observe_transition(&self, key: super::runtime::TransitionKey);
     fn before_create_directory(&self, path: &Path) -> io::Result<()>;
     fn after_create_directory(&self, path: &Path) -> io::Result<()>;
     fn before_open_coordination_file(&self, path: &Path) -> io::Result<()>;
     fn before_inspect_metadata(&self, path: &Path) -> io::Result<()>;
     fn before_read_handle(&self, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn observe_regular_file(
         &self,
         parent: &Dir,
         name: &Path,
         path: &Path,
     ) -> io::Result<ExactFileObservation>;
-    #[allow(dead_code)]
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation>;
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation>;
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation>;
     fn read_regular_file_exact(
         &self,
         parent: &Dir,
@@ -241,12 +431,17 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         max_bytes: u64,
     ) -> io::Result<ExactFileRead>;
-    #[allow(dead_code)]
+    fn read_regular_file_bytes_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileBytesRead>;
     fn observe_directory(
         &self,
         endpoint: DirectoryEndpoint<'_>,
     ) -> io::Result<ExactDirectoryObservation>;
-    #[allow(dead_code)]
     fn open_directory_exact(
         &self,
         parent: &Dir,
@@ -254,7 +449,6 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         mode: u32,
     ) -> io::Result<ExactDirectoryHandle>;
-    #[allow(dead_code)]
     fn create_directory_exact(
         &self,
         parent: &Dir,
@@ -262,11 +456,17 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         mode: u32,
     ) -> io::Result<ExactDirectoryHandle>;
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn inventory_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
+    ) -> io::Result<ExactDirectoryInventory>;
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
     ) -> io::Result<ExactDirectoryInventory>;
     fn create_new_file(
         &self,
@@ -274,14 +474,13 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         name: &Path,
         path: &Path,
         mode: u32,
-    ) -> io::Result<CreatedFile>;
-    #[allow(dead_code)]
+    ) -> ExclusiveCreateOutcome;
     fn create_exclusive_copy(
         &self,
         source: HardLinkEndpoint<'_>,
         expected_source: &ExactFileObservation,
         destination: HardLinkEndpoint<'_>,
-    ) -> io::Result<ExclusiveFileCopy>;
+    ) -> ExclusiveFileCopyOutcome;
     #[cfg(windows)]
     fn open_file_for_cleanup(
         &self,
@@ -307,10 +506,8 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     fn set_directory_mode(&self, directory: &Dir, path: &Path, mode: u32) -> io::Result<()>;
     fn write_handle(&self, file: &mut File, path: &Path, content: &[u8]) -> io::Result<()>;
     fn sync_handle(&self, file: &File, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn flush_file(&self, file: &File, path: &Path) -> io::Result<()>;
     fn sync_directory(&self, directory: &Dir, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn sync_parent(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -324,24 +521,12 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         from: HardLinkEndpoint<'_>,
         to: HardLinkEndpoint<'_>,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
     fn publish_absent(
         &self,
         staged: HardLinkEndpoint<'_>,
         expected_stage: &ExactFileObservation,
         target: HardLinkEndpoint<'_>,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
-    fn publish_immutable(
-        &self,
-        partial: HardLinkEndpoint<'_>,
-        expected_partial: &ExactFileObservation,
-        target: HardLinkEndpoint<'_>,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        parent_sync_kind: ParentSyncKind,
-    ) -> ImmutablePublicationOutcome;
-    #[allow(dead_code)]
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
@@ -351,34 +536,45 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         target_name: &Path,
         target_path: &Path,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
-    fn publish_directory_absent(
+    fn relocate_noreplace(
         &self,
-        candidate: DirectoryEndpoint<'_>,
-        expected_candidate: &ExactDirectoryInventory,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> DirectoryPublicationOutcome;
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError>;
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError>;
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn remove_file_exact(
         &self,
         parent: &Dir,
         name: &Path,
         path: &Path,
         expected: &ExactFileObservation,
-    ) -> io::Result<()>;
+    ) -> Result<(), ExactRemovalError>;
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> Result<(), ExactRemovalError>;
     #[cfg(windows)]
     fn remove_file_by_handle(&self, file: File, path: &Path) -> Result<(), HandleDeleteError>;
     fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn remove_empty_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
-    ) -> io::Result<()>;
+    ) -> Result<(), ExactRemovalError>;
+    fn before_mutation_rebind(&self, path: &Path) -> io::Result<()>;
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn after_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn rename(
@@ -390,7 +586,6 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         to_name: &Path,
         to: &Path,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
     fn replace_existing(
         &self,
         staged: HardLinkEndpoint<'_>,
@@ -413,6 +608,9 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
 pub(super) struct SystemFs;
 
 impl FsOps for SystemFs {
+    #[cfg(test)]
+    fn observe_transition(&self, _key: super::runtime::TransitionKey) {}
+
     fn before_create_directory(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
@@ -433,6 +631,7 @@ impl FsOps for SystemFs {
         Ok(())
     }
 
+    #[cfg(test)]
     fn observe_regular_file(
         &self,
         parent: &Dir,
@@ -440,6 +639,37 @@ impl FsOps for SystemFs {
         path: &Path,
     ) -> io::Result<ExactFileObservation> {
         observe_regular_file_exact(parent, name, path)
+    }
+
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        observe_regular_file_bounded_exact(parent, name, path, max_bytes)
+    }
+
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation> {
+        observe_regular_file_metadata_exact(parent, name, path, max_bytes)
+    }
+
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        observe_created_file_exact_impl(parent, name, path, created, max_bytes)
     }
 
     fn read_regular_file_exact(
@@ -450,6 +680,16 @@ impl FsOps for SystemFs {
         max_bytes: u64,
     ) -> io::Result<ExactFileRead> {
         read_regular_file_exact_impl(parent, name, path, max_bytes)
+    }
+
+    fn read_regular_file_bytes_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileBytesRead> {
+        read_regular_file_bytes_exact_impl(parent, name, path, max_bytes)
     }
 
     fn observe_directory(
@@ -479,6 +719,7 @@ impl FsOps for SystemFs {
         create_directory_exact_impl(parent, name, path, mode)
     }
 
+    #[cfg(test)]
     fn inventory_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -487,55 +728,23 @@ impl FsOps for SystemFs {
         inventory_directory_exact_impl(endpoint, expected)
     }
 
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
+    ) -> io::Result<ExactDirectoryInventory> {
+        inventory_directory_exact_bounded_impl(endpoint, expected, max_entries)
+    }
+
     fn create_new_file(
         &self,
         parent: &Dir,
         name: &Path,
-        _path: &Path,
+        path: &Path,
         mode: u32,
-    ) -> io::Result<CreatedFile> {
-        let mut options = OpenOptions::new();
-        options.create_new(true).read(true).write(true);
-        options.follow(FollowSymlinks::No);
-        options.nonblock(true);
-        #[cfg(windows)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-            use windows_sys::Win32::{
-                Foundation::{GENERIC_READ, GENERIC_WRITE},
-                Storage::FileSystem::{
-                    DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-                },
-            };
-
-            options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE);
-            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
-        }
-        #[cfg(unix)]
-        {
-            use cap_std::fs::OpenOptionsExt;
-
-            options.mode(mode);
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
-        let file = parent.open_with(name, &options)?;
-        match opened_regular_file_identity(&file) {
-            Ok(identity) => Ok(CreatedFile { file, identity }),
-            Err(error) => {
-                #[cfg(windows)]
-                {
-                    use fs_at::os::windows::FileExt;
-
-                    let _ = file.into_std().delete_by_handle();
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = parent.remove_file(name);
-                }
-                Err(error)
-            }
-        }
+    ) -> ExclusiveCreateOutcome {
+        create_new_file_impl(parent, name, path, mode, || Ok(()))
     }
 
     fn create_exclusive_copy(
@@ -543,7 +752,7 @@ impl FsOps for SystemFs {
         source: HardLinkEndpoint<'_>,
         expected_source: &ExactFileObservation,
         destination: HardLinkEndpoint<'_>,
-    ) -> io::Result<ExclusiveFileCopy> {
+    ) -> ExclusiveFileCopyOutcome {
         create_exclusive_file_copy(self, source, expected_source, destination)
     }
 
@@ -567,8 +776,8 @@ impl FsOps for SystemFs {
         options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE);
         options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         let file = parent.open_with(name, &options)?;
-        let identity = opened_regular_file_identity(&file)?;
-        Ok(CreatedFile { file, identity })
+        let metadata = opened_regular_file_metadata(&file)?;
+        Ok(CreatedFile::verified(file, metadata))
     }
 
     #[cfg(windows)]
@@ -589,8 +798,8 @@ impl FsOps for SystemFs {
 
         options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         let file = parent.open_with(name, &options)?;
-        let identity = opened_regular_file_identity(&file)?;
-        Ok(CreatedFile { file, identity })
+        let metadata = opened_regular_file_metadata(&file)?;
+        Ok(CreatedFile::verified(file, metadata))
     }
 
     fn set_file_mode(&self, file: &File, _path: &Path, mode: u32) -> io::Result<()> {
@@ -718,26 +927,6 @@ impl FsOps for SystemFs {
             .hard_link(staged.name, target.parent, target.name)
     }
 
-    fn publish_immutable(
-        &self,
-        partial: HardLinkEndpoint<'_>,
-        expected_partial: &ExactFileObservation,
-        target: HardLinkEndpoint<'_>,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        parent_sync_kind: ParentSyncKind,
-    ) -> ImmutablePublicationOutcome {
-        publish_immutable_exact(
-            self,
-            partial,
-            expected_partial,
-            target,
-            target_parent,
-            expected_target_parent,
-            parent_sync_kind,
-        )
-    }
-
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
@@ -757,24 +946,33 @@ impl FsOps for SystemFs {
         )
     }
 
-    fn publish_directory_absent(
+    fn relocate_noreplace(
         &self,
-        candidate: DirectoryEndpoint<'_>,
-        expected_candidate: &ExactDirectoryInventory,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> DirectoryPublicationOutcome {
-        publish_directory_absent_exact(
-            self,
-            candidate,
-            expected_candidate,
-            target_parent,
-            expected_target_parent,
-            target_name,
-            target_path,
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError> {
+        relocate_noreplace_impl(
+            owner_parent,
+            owner_name,
+            owner_path,
+            destination_parent,
+            destination_name,
+            destination_path,
+            expected_source,
         )
+    }
+
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError> {
+        probe_noreplace_relocation_impl(parent, path)
     }
 
     fn remove_file(&self, parent: &Dir, name: &Path, _path: &Path) -> io::Result<()> {
@@ -787,8 +985,18 @@ impl FsOps for SystemFs {
         name: &Path,
         path: &Path,
         expected: &ExactFileObservation,
-    ) -> io::Result<()> {
+    ) -> Result<(), ExactRemovalError> {
         remove_exact_file(parent, name, path, expected, || Ok(()))
+    }
+
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> Result<(), ExactRemovalError> {
+        remove_exact_file_metadata(parent, name, path, expected, || Ok(()))
     }
 
     #[cfg(windows)]
@@ -811,8 +1019,12 @@ impl FsOps for SystemFs {
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
-    ) -> io::Result<()> {
+    ) -> Result<(), ExactRemovalError> {
         remove_empty_directory_exact_impl(endpoint, expected, || Ok(()))
+    }
+
+    fn before_mutation_rebind(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
     }
 
     fn before_final_revalidation(&self, _path: &Path) -> io::Result<()> {
@@ -988,7 +1200,7 @@ fn open_regular_file_nofollow(parent: &Dir, name: &Path) -> io::Result<File> {
     parent.open_with(name, &options)
 }
 
-fn hash_file(file: &mut File) -> io::Result<(String, u64)> {
+fn hash_file_bounded(file: &mut File, max_bytes: u64) -> io::Result<(String, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut byte_len = 0_u64;
@@ -1002,6 +1214,12 @@ fn hash_file(file: &mut File) -> io::Result<(String, u64)> {
         byte_len = byte_len
             .checked_add(count as u64)
             .ok_or_else(|| io::Error::other("regular-file length overflow while hashing"))?;
+        if byte_len > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("regular file grew beyond the bounded hash limit of {max_bytes} bytes"),
+            ));
+        }
     }
     Ok((format!("sha256:{:x}", hasher.finalize()), byte_len))
 }
@@ -1016,13 +1234,132 @@ fn changed_during_observation(path: &Path, detail: &str) -> io::Error {
     )
 }
 
+fn observe_regular_file_metadata_exact(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<ExactFileMetadataObservation> {
+    require_exact_identity_support()?;
+    let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    if path_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding the owner-residual limit of {max_bytes} bytes",
+                path.display(),
+                path_before.byte_len
+            ),
+        ));
+    }
+    let file = open_regular_file_nofollow(parent, name)?;
+    let handle = regular_metadata_state(&file.metadata()?, path)?;
+    let path_after = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    if handle != path_before || path_after != path_before {
+        return Err(changed_during_observation(
+            path,
+            "metadata-only owner observation did not remain identity/mode/length/link stable",
+        ));
+    }
+    Ok(ExactFileMetadataObservation {
+        identity: handle.identity,
+        byte_len: handle.byte_len,
+        mode: handle.mode,
+        link_count: handle.link_count,
+    })
+}
+
+fn observe_created_file_exact_impl(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    created: &mut CreatedFile,
+    max_bytes: u64,
+) -> io::Result<ExactFileObservation> {
+    require_exact_identity_support()?;
+    let handle_before = regular_metadata_state(&created.file.metadata()?, path)?;
+    let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    if created
+        .exact_metadata
+        .is_some_and(|metadata| metadata.identity != handle_before.identity)
+        || path_before != handle_before
+    {
+        return Err(changed_during_observation(
+            path,
+            "the still-open created handle is no longer bound to its owner path",
+        ));
+    }
+    created.exact_metadata = Some(exact_metadata_observation(handle_before));
+    if handle_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding its declared owner length of {max_bytes} bytes",
+                path.display(),
+                handle_before.byte_len
+            ),
+        ));
+    }
+    let (content_hash, byte_len) = hash_file_bounded(&mut created.file, max_bytes)?;
+    if byte_len != handle_before.byte_len {
+        return Err(changed_during_observation(
+            path,
+            "the live-handle hash length differs from the opened metadata",
+        ));
+    }
+    let handle_after = regular_metadata_state(&created.file.metadata()?, path)?;
+    let path_after = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    if handle_after != handle_before || path_after != handle_before {
+        return Err(changed_during_observation(
+            path,
+            "the created owner changed during live-handle hashing",
+        ));
+    }
+    Ok(ExactFileObservation {
+        identity: handle_after.identity,
+        byte_len,
+        content_hash,
+        mode: handle_after.mode,
+        link_count: handle_after.link_count,
+    })
+}
+
+fn exact_metadata_observation(state: RegularMetadataState) -> ExactFileMetadataObservation {
+    ExactFileMetadataObservation {
+        identity: state.identity,
+        byte_len: state.byte_len,
+        mode: state.mode,
+        link_count: state.link_count,
+    }
+}
+
+#[cfg(test)]
 fn observe_regular_file_exact(
     parent: &Dir,
     name: &Path,
     path: &Path,
 ) -> io::Result<ExactFileObservation> {
+    observe_regular_file_bounded_exact(parent, name, path, u64::MAX)
+}
+
+fn observe_regular_file_bounded_exact(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<ExactFileObservation> {
     require_exact_identity_support()?;
     let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    if path_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding the bounded hash limit of {max_bytes} bytes",
+                path.display(),
+                path_before.byte_len
+            ),
+        ));
+    }
     let mut file = open_regular_file_nofollow(parent, name)?;
     let handle_before = regular_metadata_state(&file.metadata()?, path)?;
     if handle_before != path_before {
@@ -1032,7 +1369,7 @@ fn observe_regular_file_exact(
         ));
     }
 
-    let (content_hash, byte_len) = hash_file(&mut file)?;
+    let (content_hash, byte_len) = hash_file_bounded(&mut file, max_bytes)?;
     if byte_len != handle_before.byte_len {
         return Err(changed_during_observation(
             path,
@@ -1064,6 +1401,26 @@ fn read_regular_file_exact_impl(
     path: &Path,
     max_bytes: u64,
 ) -> io::Result<ExactFileRead> {
+    let read = read_regular_file_bytes_exact_impl(parent, name, path, max_bytes)?;
+    let metadata = read.observation;
+    Ok(ExactFileRead {
+        observation: ExactFileObservation {
+            identity: metadata.identity,
+            byte_len: metadata.byte_len,
+            content_hash: format!("sha256:{:x}", Sha256::digest(&read.bytes)),
+            mode: metadata.mode,
+            link_count: metadata.link_count,
+        },
+        bytes: read.bytes,
+    })
+}
+
+fn read_regular_file_bytes_exact_impl(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<ExactFileBytesRead> {
     require_exact_identity_support()?;
     let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
     if path_before.byte_len > max_bytes {
@@ -1095,7 +1452,6 @@ fn read_regular_file_exact_impl(
     let mut bytes = Vec::with_capacity(capacity);
     let mut buffer = [0_u8; 64 * 1024];
     let mut byte_len = 0_u64;
-    let mut hasher = Sha256::new();
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
@@ -1110,7 +1466,6 @@ fn read_regular_file_exact_impl(
                 "the file grew beyond the bounded-read limit",
             ));
         }
-        hasher.update(&buffer[..count]);
         bytes.extend_from_slice(&buffer[..count]);
     }
     if byte_len != handle_before.byte_len {
@@ -1129,12 +1484,11 @@ fn read_regular_file_exact_impl(
         ));
     }
 
-    Ok(ExactFileRead {
+    Ok(ExactFileBytesRead {
         bytes,
-        observation: ExactFileObservation {
+        observation: ExactFileMetadataObservation {
             identity: handle_after.identity,
             byte_len,
-            content_hash: format!("sha256:{:x}", hasher.finalize()),
             mode: handle_after.mode,
             link_count: handle_after.link_count,
         },
@@ -1294,21 +1648,36 @@ fn directory_entry_kind(metadata: &Metadata) -> ExactDirectoryEntryKind {
     }
 }
 
-fn directory_names(directory: &Dir) -> io::Result<Vec<OsString>> {
+fn directory_names_bounded(directory: &Dir, max_entries: usize) -> io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     for entry in directory.entries()? {
+        if names.len() == max_entries {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("directory exceeds its bounded inventory limit of {max_entries} entries"),
+            ));
+        }
         names.push(entry?.file_name());
     }
     names.sort();
     Ok(names)
 }
 
+#[cfg(test)]
 fn inventory_directory_exact_impl(
     endpoint: DirectoryEndpoint<'_>,
     expected: &ExactDirectoryObservation,
 ) -> io::Result<ExactDirectoryInventory> {
+    inventory_directory_exact_bounded_impl(endpoint, expected, usize::MAX)
+}
+
+fn inventory_directory_exact_bounded_impl(
+    endpoint: DirectoryEndpoint<'_>,
+    expected: &ExactDirectoryObservation,
+    max_entries: usize,
+) -> io::Result<ExactDirectoryInventory> {
     require_exact_directory_state(endpoint, expected)?;
-    let names_before = directory_names(endpoint.directory)?;
+    let names_before = directory_names_bounded(endpoint.directory, max_entries)?;
     let mut entries = Vec::with_capacity(names_before.len());
     for name in &names_before {
         let entry_path = endpoint.path.join(name);
@@ -1347,7 +1716,7 @@ fn inventory_directory_exact_impl(
             ));
         }
     }
-    let names_after = directory_names(endpoint.directory)?;
+    let names_after = directory_names_bounded(endpoint.directory, max_entries)?;
     if names_after != names_before {
         return Err(changed_during_observation(
             endpoint.path,
@@ -1378,7 +1747,12 @@ fn require_exact_file_state(
     endpoint: HardLinkEndpoint<'_>,
     expected: &ExactFileObservation,
 ) -> io::Result<()> {
-    let actual = observe_regular_file_exact(endpoint.parent, endpoint.name, endpoint.path)?;
+    let actual = observe_regular_file_bounded_exact(
+        endpoint.parent,
+        endpoint.name,
+        endpoint.path,
+        expected.byte_len,
+    )?;
     if actual == *expected {
         Ok(())
     } else {
@@ -1431,369 +1805,6 @@ fn ensure_same_parent(from: &Dir, to: &Dir, from_path: &Path, to_path: &Path) ->
     }
 }
 
-#[derive(Debug)]
-struct LinkedPublicationObservationError {
-    partial: Option<ExactFileObservation>,
-    published: Option<ExactFileObservation>,
-    source: io::Error,
-}
-
-fn same_immutable_file_state(
-    actual: &ExactFileObservation,
-    expected: &ExactFileObservation,
-) -> bool {
-    actual.identity == expected.identity
-        && actual.byte_len == expected.byte_len
-        && actual.content_hash == expected.content_hash
-        && actual.mode == expected.mode
-}
-
-fn same_directory_binding(
-    actual: &ExactDirectoryObservation,
-    expected: &ExactDirectoryObservation,
-) -> bool {
-    actual.identity == expected.identity && actual.mode == expected.mode
-}
-
-fn validate_linked_publication(
-    partial: &ExactFileObservation,
-    published: &ExactFileObservation,
-    expected_partial: &ExactFileObservation,
-    target_path: &Path,
-) -> io::Result<()> {
-    let expected_link_count = expected_partial
-        .link_count
-        .and_then(|count| count.checked_add(1))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "immutable partial is missing a representable exact link count",
-            )
-        })?;
-    if partial != published
-        || !same_immutable_file_state(partial, expected_partial)
-        || partial.link_count != Some(expected_link_count)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} is not the exact hard-link publication of its recorded immutable partial",
-                target_path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn observe_linked_publication<F>(
-    fs: &F,
-    partial: HardLinkEndpoint<'_>,
-    target: HardLinkEndpoint<'_>,
-    expected_partial: &ExactFileObservation,
-) -> Result<(ExactFileObservation, ExactFileObservation), Box<LinkedPublicationObservationError>>
-where
-    F: FsOps + ?Sized,
-{
-    let published = match fs.observe_regular_file(target.parent, target.name, target.path) {
-        Ok(published) => published,
-        Err(source) => {
-            return Err(Box::new(LinkedPublicationObservationError {
-                partial: None,
-                published: None,
-                source,
-            }));
-        }
-    };
-    let observed_partial = match fs.observe_regular_file(partial.parent, partial.name, partial.path)
-    {
-        Ok(observed_partial) => observed_partial,
-        Err(source) => {
-            return Err(Box::new(LinkedPublicationObservationError {
-                partial: None,
-                published: Some(published),
-                source,
-            }));
-        }
-    };
-    if let Err(source) =
-        validate_linked_publication(&observed_partial, &published, expected_partial, target.path)
-    {
-        return Err(Box::new(LinkedPublicationObservationError {
-            partial: Some(observed_partial),
-            published: Some(published),
-            source,
-        }));
-    }
-    Ok((observed_partial, published))
-}
-
-fn require_name_absent(parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
-    match parent.symlink_metadata(name) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} is unexpectedly occupied at an exact absent-name boundary",
-                path.display()
-            ),
-        )),
-        Err(error) => Err(error),
-    }
-}
-
-fn recorded_file_absent_in_process(
-    parent: &Dir,
-    name: &Path,
-    expected: &ExactFileObservation,
-) -> bool {
-    match parent.symlink_metadata(name) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-        Ok(metadata) => {
-            (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity
-        }
-        Err(_) => false,
-    }
-}
-
-fn publish_immutable_exact<F>(
-    fs: &F,
-    partial: HardLinkEndpoint<'_>,
-    expected_partial: &ExactFileObservation,
-    target: HardLinkEndpoint<'_>,
-    target_parent: DirectoryEndpoint<'_>,
-    expected_target_parent: &ExactDirectoryObservation,
-    parent_sync_kind: ParentSyncKind,
-) -> ImmutablePublicationOutcome
-where
-    F: FsOps + ?Sized,
-{
-    let partial_before = match (|| {
-        require_exact_identity_support()?;
-        if partial.name == target.name {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "immutable partial and publication names must differ",
-            ));
-        }
-        ensure_same_parent(partial.parent, target.parent, partial.path, target.path)?;
-        ensure_same_parent(
-            partial.parent,
-            target_parent.directory,
-            partial.path,
-            target_parent.path,
-        )?;
-        let observed_parent = fs.observe_directory(target_parent)?;
-        if observed_parent != *expected_target_parent {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} no longer matches its recorded publication-parent state",
-                    target_parent.path.display()
-                ),
-            ));
-        }
-        let observed_partial =
-            fs.observe_regular_file(partial.parent, partial.name, partial.path)?;
-        if observed_partial != *expected_partial || observed_partial.link_count != Some(1) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} is not the exact independent single-link immutable partial",
-                    partial.path.display()
-                ),
-            ));
-        }
-        Ok(observed_partial)
-    })() {
-        Ok(partial_before) => partial_before,
-        Err(source) => {
-            return ImmutablePublicationOutcome::NotPublished {
-                partial: None,
-                source,
-            };
-        }
-    };
-
-    if let Err(source) = fs.hard_link(&[], partial, target) {
-        return match observe_linked_publication(fs, partial, target, expected_partial) {
-            Ok((linked_partial, published)) => {
-                ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                    partial: linked_partial,
-                    published: Some(published),
-                    source,
-                }
-            }
-            Err(observation)
-                if observation.partial.as_ref() == Some(&partial_before)
-                    && observation
-                        .published
-                        .as_ref()
-                        .is_some_and(|published| published.identity != partial_before.identity) =>
-            {
-                ImmutablePublicationOutcome::NotPublished {
-                    partial: Some(partial_before),
-                    source,
-                }
-            }
-            Err(observation) => ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                partial: observation.partial.unwrap_or(partial_before),
-                published: observation.published,
-                source: io::Error::other(format!(
-                    "{source}; exact publication reconciliation also failed: {}",
-                    observation.source
-                )),
-            },
-        };
-    }
-
-    let (linked_partial, published_before_sync) =
-        match observe_linked_publication(fs, partial, target, expected_partial) {
-            Ok(observations) => observations,
-            Err(error) => {
-                return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                    partial: error.partial.unwrap_or(partial_before),
-                    published: error.published,
-                    source: error.source,
-                };
-            }
-        };
-
-    let linked_parent = match fs.observe_directory(target_parent) {
-        Ok(linked_parent) if same_directory_binding(&linked_parent, expected_target_parent) => {
-            linked_parent
-        }
-        Ok(_) => {
-            return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                partial: linked_partial,
-                published: Some(published_before_sync),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{} changed identity or mode during immutable publication",
-                        target_parent.path.display()
-                    ),
-                ),
-            };
-        }
-        Err(source) => {
-            return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                partial: linked_partial,
-                published: Some(published_before_sync),
-                source,
-            };
-        }
-    };
-    if let Err(source) = fs.sync_parent(target_parent, &linked_parent, parent_sync_kind) {
-        return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-            partial: linked_partial,
-            published: Some(published_before_sync),
-            source,
-        };
-    }
-
-    let (durable_partial, durable_published) =
-        match observe_linked_publication(fs, partial, target, expected_partial) {
-            Ok(observations) => observations,
-            Err(error) => {
-                return ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                    partial: error.partial.unwrap_or(linked_partial),
-                    published: error.published.or(Some(published_before_sync)),
-                    source: error.source,
-                };
-            }
-        };
-
-    if let Err(source) =
-        fs.remove_file_exact(partial.parent, partial.name, partial.path, &durable_partial)
-    {
-        return ImmutablePublicationOutcome::DurableWithPartialResidual {
-            partial_absent_in_process: recorded_file_absent_in_process(
-                partial.parent,
-                partial.name,
-                &durable_partial,
-            ),
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            source,
-        };
-    }
-    if let Err(source) = require_name_absent(partial.parent, partial.name, partial.path) {
-        return ImmutablePublicationOutcome::DurableWithPartialResidual {
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            partial_absent_in_process: true,
-            source,
-        };
-    }
-    let cleanup_parent = match fs.observe_directory(target_parent) {
-        Ok(cleanup_parent) if same_directory_binding(&cleanup_parent, expected_target_parent) => {
-            cleanup_parent
-        }
-        Ok(_) => {
-            return ImmutablePublicationOutcome::DurableWithPartialResidual {
-                last_linked_published: durable_published,
-                last_linked_partial: durable_partial,
-                partial_absent_in_process: true,
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{} changed identity or mode during immutable-partial cleanup",
-                        target_parent.path.display()
-                    ),
-                ),
-            };
-        }
-        Err(source) => {
-            return ImmutablePublicationOutcome::DurableWithPartialResidual {
-                last_linked_published: durable_published,
-                last_linked_partial: durable_partial,
-                partial_absent_in_process: true,
-                source,
-            };
-        }
-    };
-    if let Err(source) = fs.sync_parent(target_parent, &cleanup_parent, parent_sync_kind) {
-        return ImmutablePublicationOutcome::DurableWithPartialResidual {
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            partial_absent_in_process: true,
-            source,
-        };
-    }
-    if let Err(source) = require_name_absent(partial.parent, partial.name, partial.path) {
-        return ImmutablePublicationOutcome::DurableWithPartialResidual {
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            partial_absent_in_process: true,
-            source,
-        };
-    }
-
-    match fs.observe_regular_file(target.parent, target.name, target.path) {
-        Ok(published) if published == *expected_partial => {
-            ImmutablePublicationOutcome::Durable { published }
-        }
-        Ok(_) => ImmutablePublicationOutcome::DurableWithPartialResidual {
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            partial_absent_in_process: true,
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} changed after immutable publication cleanup",
-                    target.path.display()
-                ),
-            ),
-        },
-        Err(source) => ImmutablePublicationOutcome::DurableWithPartialResidual {
-            last_linked_published: durable_published,
-            last_linked_partial: durable_partial,
-            partial_absent_in_process: true,
-            source,
-        },
-    }
-}
-
 fn require_single_component_name(name: &Path, path: &Path) -> io::Result<()> {
     let mut components = name.components();
     if matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none() {
@@ -1809,6 +1820,17 @@ fn require_single_component_name(name: &Path, path: &Path) -> io::Result<()> {
     }
 }
 
+fn require_name_absent(parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
+    match parent.symlink_metadata(name) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} is still present", path.display()),
+        )),
+    }
+}
+
 fn rename_directory_noreplace_impl(
     candidate_parent: &Dir,
     candidate_name: &Path,
@@ -1817,216 +1839,199 @@ fn rename_directory_noreplace_impl(
     target_name: &Path,
     target_path: &Path,
 ) -> io::Result<()> {
-    require_single_component_name(candidate_name, candidate_path)?;
-    require_single_component_name(target_name, target_path)?;
-    ensure_same_parent(candidate_parent, target_parent, candidate_path, target_path)?;
+    let metadata = candidate_parent.symlink_metadata(candidate_name)?;
+    let state = directory_metadata_state(&metadata, candidate_path)?;
+    let expected = ExactRelocationSource::EmptyDirectory(ExactDirectoryObservation {
+        identity: state.identity,
+        mode: state.mode,
+        link_count: state.link_count,
+    });
+    relocate_noreplace_impl(
+        candidate_parent,
+        candidate_name,
+        candidate_path,
+        target_parent,
+        target_name,
+        target_path,
+        &expected,
+    )
+    .map_err(NoReplaceRelocationError::into_io)
+}
+
+fn relocate_noreplace_impl(
+    owner_parent: &Dir,
+    owner_name: &Path,
+    owner_path: &Path,
+    destination_parent: &Dir,
+    destination_name: &Path,
+    destination_path: &Path,
+    expected_source: &ExactRelocationSource,
+) -> Result<(), NoReplaceRelocationError> {
+    require_single_component_name(owner_name, owner_path).map_err(NoReplaceRelocationError::Io)?;
+    require_single_component_name(destination_name, destination_path)
+        .map_err(NoReplaceRelocationError::Io)?;
+    require_exact_identity_support().map_err(NoReplaceRelocationError::Io)?;
+    let owner_parent_state = directory_metadata_state(
+        &owner_parent
+            .dir_metadata()
+            .map_err(NoReplaceRelocationError::Io)?,
+        owner_path,
+    )
+    .map_err(NoReplaceRelocationError::Io)?;
+    let destination_parent_state = directory_metadata_state(
+        &destination_parent
+            .dir_metadata()
+            .map_err(NoReplaceRelocationError::Io)?,
+        destination_path,
+    )
+    .map_err(NoReplaceRelocationError::Io)?;
+    if owner_parent_state.identity.0 != destination_parent_state.identity.0 {
+        return Err(NoReplaceRelocationError::CrossDevice);
+    }
+
+    match expected_source {
+        ExactRelocationSource::File(expected) => {
+            let actual = observe_regular_file_bounded_exact(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.byte_len,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &actual != expected {
+                return Err(NoReplaceRelocationError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} no longer matches the exact file owner",
+                        owner_path.display()
+                    ),
+                )));
+            }
+        }
+        ExactRelocationSource::EmptyDirectory(expected) => {
+            let opened = open_directory_exact_impl(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            let inventory = inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(owner_parent, owner_name, &opened.directory, owner_path),
+                expected,
+                0,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if inventory.directory != *expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    owner_path,
+                    "the exact empty directory owner changed before relocation",
+                )));
+            }
+        }
+    }
 
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
-    {
+    let relocation = {
         rustix::fs::renameat_with(
-            candidate_parent,
-            candidate_name,
-            target_parent,
-            target_name,
+            owner_parent,
+            owner_name,
+            destination_parent,
+            destination_name,
             rustix::fs::RenameFlags::NOREPLACE,
         )
-        .map_err(io::Error::from)
+        .map_err(|error| {
+            if error == rustix::io::Errno::XDEV {
+                NoReplaceRelocationError::CrossDevice
+            } else {
+                NoReplaceRelocationError::Io(io::Error::from(error))
+            }
+        })
+    };
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+    let relocation = {
+        let _ = (
+            owner_parent,
+            owner_name,
+            destination_parent,
+            destination_name,
+        );
+        Err(NoReplaceRelocationError::Unsupported)
+    };
+    relocation?;
+
+    match expected_source {
+        ExactRelocationSource::File(expected) => {
+            let placed = observe_regular_file_bounded_exact(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.byte_len,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &placed != expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    destination_path,
+                    "relocation placed a file other than the exact durable owner",
+                )));
+            }
+        }
+        ExactRelocationSource::EmptyDirectory(expected) => {
+            let opened = open_directory_exact_impl(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(
+                    destination_parent,
+                    destination_name,
+                    &opened.directory,
+                    destination_path,
+                ),
+                expected,
+                0,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+        }
+    }
+    require_name_absent(owner_parent, owner_name, owner_path).map_err(NoReplaceRelocationError::Io)
+}
+
+fn probe_noreplace_relocation_impl(
+    parent: &Dir,
+    path: &Path,
+) -> Result<(), NoReplaceRelocationError> {
+    require_exact_identity_support().map_err(NoReplaceRelocationError::Io)?;
+    directory_metadata_state(
+        &parent
+            .dir_metadata()
+            .map_err(NoReplaceRelocationError::Io)?,
+        path,
+    )
+    .map_err(NoReplaceRelocationError::Io)?;
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+    {
+        match rustix::fs::renameat_with(
+            parent,
+            Path::new(""),
+            parent,
+            Path::new(""),
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+            Err(_) => Err(NoReplaceRelocationError::Unsupported),
+            Ok(()) => Err(NoReplaceRelocationError::Io(io::Error::other(
+                "no-replace capability probe unexpectedly renamed an empty path",
+            ))),
+        }
     }
     #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
     {
-        let _ = (candidate_parent, candidate_name, target_parent, target_name);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "capability-relative atomic no-replace directory rename is unavailable on this platform",
-        ))
-    }
-}
-
-fn observe_published_directory<F>(
-    fs: &F,
-    candidate: DirectoryEndpoint<'_>,
-    expected_candidate: &ExactDirectoryInventory,
-    target_parent: DirectoryEndpoint<'_>,
-    target_name: &Path,
-    target_path: &Path,
-) -> io::Result<ExactDirectoryInventory>
-where
-    F: FsOps + ?Sized,
-{
-    require_name_absent(candidate.parent, candidate.name, candidate.path)?;
-    let published_endpoint = DirectoryEndpoint::new(
-        target_parent.directory,
-        target_name,
-        candidate.directory,
-        target_path,
-    );
-    let published =
-        fs.inventory_directory_exact(published_endpoint, &expected_candidate.directory)?;
-    if published != *expected_candidate {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} does not match the exact prepared directory candidate",
-                target_path.display()
-            ),
-        ));
-    }
-    Ok(published)
-}
-
-fn publish_directory_absent_exact<F>(
-    fs: &F,
-    candidate: DirectoryEndpoint<'_>,
-    expected_candidate: &ExactDirectoryInventory,
-    target_parent: DirectoryEndpoint<'_>,
-    expected_target_parent: &ExactDirectoryObservation,
-    target_name: &Path,
-    target_path: &Path,
-) -> DirectoryPublicationOutcome
-where
-    F: FsOps + ?Sized,
-{
-    let candidate_before = match (|| {
-        require_exact_identity_support()?;
-        require_single_component_name(candidate.name, candidate.path)?;
-        require_single_component_name(target_name, target_path)?;
-        if candidate.name == target_name {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "prepared directory candidate and publication names must differ",
-            ));
-        }
-        ensure_same_parent(
-            candidate.parent,
-            target_parent.directory,
-            candidate.path,
-            target_path,
-        )?;
-        let observed_parent = fs.observe_directory(target_parent)?;
-        if observed_parent != *expected_target_parent {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} no longer matches its recorded directory-publication parent",
-                    target_parent.path.display()
-                ),
-            ));
-        }
-        let observed_candidate =
-            fs.inventory_directory_exact(candidate, &expected_candidate.directory)?;
-        if observed_candidate != *expected_candidate {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} no longer matches its exact prepared directory inventory",
-                    candidate.path.display()
-                ),
-            ));
-        }
-        Ok(observed_candidate)
-    })() {
-        Ok(candidate_before) => candidate_before,
-        Err(source) => {
-            return DirectoryPublicationOutcome::NotPublished {
-                candidate: None,
-                source,
-            };
-        }
-    };
-
-    if let Err(source) = fs.rename_directory_noreplace(
-        candidate.parent,
-        candidate.name,
-        candidate.path,
-        target_parent.directory,
-        target_name,
-        target_path,
-    ) {
-        return match observe_published_directory(
-            fs,
-            candidate,
-            expected_candidate,
-            target_parent,
-            target_name,
-            target_path,
-        ) {
-            Ok(published) => DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-                candidate: candidate_before,
-                published: Some(published),
-                source,
-            },
-            Err(_) => DirectoryPublicationOutcome::NotPublished {
-                candidate: Some(candidate_before),
-                source,
-            },
-        };
-    }
-
-    let published_before_sync = match observe_published_directory(
-        fs,
-        candidate,
-        expected_candidate,
-        target_parent,
-        target_name,
-        target_path,
-    ) {
-        Ok(published) => published,
-        Err(source) => {
-            return DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-                candidate: candidate_before,
-                published: None,
-                source,
-            };
-        }
-    };
-    let published_parent = match fs.observe_directory(target_parent) {
-        Ok(published_parent)
-            if same_directory_binding(&published_parent, expected_target_parent) =>
-        {
-            published_parent
-        }
-        Ok(_) => {
-            return DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-                candidate: candidate_before,
-                published: Some(published_before_sync),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{} changed identity or mode during directory publication",
-                        target_parent.path.display()
-                    ),
-                ),
-            };
-        }
-        Err(source) => {
-            return DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-                candidate: candidate_before,
-                published: Some(published_before_sync),
-                source,
-            };
-        }
-    };
-    if let Err(source) = fs.sync_parent(target_parent, &published_parent, ParentSyncKind::Target) {
-        return DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-            candidate: candidate_before,
-            published: Some(published_before_sync),
-            source,
-        };
-    }
-    match observe_published_directory(
-        fs,
-        candidate,
-        expected_candidate,
-        target_parent,
-        target_name,
-        target_path,
-    ) {
-        Ok(published) => DirectoryPublicationOutcome::Durable { published },
-        Err(source) => DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-            candidate: candidate_before,
-            published: Some(published_before_sync),
-            source,
-        },
+        let _ = parent;
+        Err(NoReplaceRelocationError::Unsupported)
     }
 }
 
@@ -2056,51 +2061,76 @@ fn create_exclusive_file_copy<F>(
     source: HardLinkEndpoint<'_>,
     expected_source: &ExactFileObservation,
     destination: HardLinkEndpoint<'_>,
-) -> io::Result<ExclusiveFileCopy>
+) -> ExclusiveFileCopyOutcome
 where
     F: FsOps + ?Sized,
 {
-    require_exact_identity_support()?;
-    ensure_same_parent(
-        source.parent,
-        destination.parent,
-        source.path,
-        destination.path,
-    )?;
+    if let Err(source) = require_exact_identity_support() {
+        return ExclusiveFileCopyOutcome::NotCreated { source };
+    }
 
-    let source_path_before =
-        regular_metadata_state(&source.parent.symlink_metadata(source.name)?, source.path)?;
+    let source_path_before = match source
+        .parent
+        .symlink_metadata(source.name)
+        .and_then(|metadata| regular_metadata_state(&metadata, source.path))
+    {
+        Ok(metadata) => metadata,
+        Err(source) => return ExclusiveFileCopyOutcome::NotCreated { source },
+    };
     if !observation_matches_metadata(expected_source, source_path_before) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} changed before it could be copied",
-                source.path.display()
+        return ExclusiveFileCopyOutcome::NotCreated {
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} changed before it could be copied",
+                    source.path.display()
+                ),
             ),
-        ));
+        };
     }
-    fs.before_read_handle(source.path)?;
-    let mut source_file = open_regular_file_nofollow(source.parent, source.name)?;
-    let source_handle_before = regular_metadata_state(&source_file.metadata()?, source.path)?;
+    if let Err(source) = fs.before_read_handle(source.path) {
+        return ExclusiveFileCopyOutcome::NotCreated { source };
+    }
+    let mut source_file = match open_regular_file_nofollow(source.parent, source.name) {
+        Ok(file) => file,
+        Err(source) => return ExclusiveFileCopyOutcome::NotCreated { source },
+    };
+    let source_handle_before = match source_file
+        .metadata()
+        .and_then(|metadata| regular_metadata_state(&metadata, source.path))
+    {
+        Ok(metadata) => metadata,
+        Err(source) => return ExclusiveFileCopyOutcome::NotCreated { source },
+    };
     if source_handle_before != source_path_before {
-        return Err(changed_during_observation(
-            source.path,
-            "the copy source path and handle differ",
-        ));
+        return ExclusiveFileCopyOutcome::NotCreated {
+            source: changed_during_observation(
+                source.path,
+                "the copy source path and handle differ",
+            ),
+        };
     }
 
-    let creation_mode = expected_source.mode.posix_mode.unwrap_or(0o600);
-    let CreatedFile {
-        file: mut destination_file,
-        identity: destination_identity,
-    } = fs.create_new_file(
-        destination.parent,
-        destination.name,
-        destination.path,
-        creation_mode,
-    )?;
+    let mut destination_created = match fs
+        .create_new_file(
+            destination.parent,
+            destination.name,
+            destination.path,
+            0o600,
+        )
+        .bind_empty(fs, destination.parent, destination.name, destination.path)
+    {
+        Ok(created) => created,
+        Err(ExclusiveCreateFailure::NotCreated(source)) => {
+            return ExclusiveFileCopyOutcome::NotCreated { source };
+        }
+        Err(ExclusiveCreateFailure::CreatedUnverified { created, source }) => {
+            return ExclusiveFileCopyOutcome::CreatedUnverified { created, source };
+        }
+    };
+    let destination_identity = destination_created.identity();
 
-    let result = (|| {
+    let result = (|| -> io::Result<(ExactFileObservation, ExactFileObservation)> {
         if destination_identity == expected_source.identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2115,19 +2145,33 @@ where
         let mut source_hasher = Sha256::new();
         let mut copied_len = 0_u64;
         let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = source_file.read(&mut buffer)?;
+        while copied_len < expected_source.byte_len {
+            let remaining = expected_source.byte_len - copied_len;
+            let read_len = usize::try_from(remaining.min(buffer.len() as u64))
+                .expect("bounded copy chunk fits usize");
+            let count = source_file.read(&mut buffer[..read_len])?;
             if count == 0 {
                 break;
             }
-            fs.write_handle(&mut destination_file, destination.path, &buffer[..count])?;
+            fs.write_handle(
+                &mut destination_created.file,
+                destination.path,
+                &buffer[..count],
+            )?;
             source_hasher.update(&buffer[..count]);
             copied_len = copied_len
                 .checked_add(count as u64)
                 .ok_or_else(|| io::Error::other("regular-file length overflow while copying"))?;
         }
-        fs.flush_file(&destination_file, destination.path)?;
-        fs.sync_handle(&destination_file, destination.path)?;
+        let mut extra = [0_u8; 1];
+        if source_file.read(&mut extra)? != 0 {
+            return Err(changed_during_observation(
+                source.path,
+                "the copy source exceeds its durable declared length",
+            ));
+        }
+        fs.flush_file(&destination_created.file, destination.path)?;
+        fs.sync_handle(&destination_created.file, destination.path)?;
 
         let source_hash = format!("sha256:{:x}", source_hasher.finalize());
         let source_handle_after = regular_metadata_state(&source_file.metadata()?, source.path)?;
@@ -2144,12 +2188,18 @@ where
             ));
         }
 
-        fs.set_preserved_file_mode(&destination_file, destination.path, expected_source.mode)?;
-        fs.sync_handle(&destination_file, destination.path)?;
+        fs.set_preserved_file_mode(
+            &destination_created.file,
+            destination.path,
+            expected_source.mode,
+        )?;
+        fs.sync_handle(&destination_created.file, destination.path)?;
         fs.before_read_handle(destination.path)?;
-        let (copy_hash, copy_len) = hash_file(&mut destination_file)?;
-        destination_file.seek(SeekFrom::End(0))?;
-        let copy_handle = regular_metadata_state(&destination_file.metadata()?, destination.path)?;
+        let (copy_hash, copy_len) =
+            hash_file_bounded(&mut destination_created.file, expected_source.byte_len)?;
+        destination_created.file.seek(SeekFrom::End(0))?;
+        let copy_handle =
+            regular_metadata_state(&destination_created.file.metadata()?, destination.path)?;
         let copy_path = regular_metadata_state(
             &destination.parent.symlink_metadata(destination.name)?,
             destination.path,
@@ -2182,67 +2232,37 @@ where
             ));
         }
 
-        Ok(ExclusiveFileCopy {
-            file: destination_file,
-            source: ExactFileObservation {
+        Ok((
+            ExactFileObservation {
                 identity: source_handle_after.identity,
                 byte_len: copied_len,
                 content_hash: source_hash,
                 mode: source_handle_after.mode,
                 link_count: source_handle_after.link_count,
             },
-            copy: ExactFileObservation {
+            ExactFileObservation {
                 identity: copy_handle.identity,
                 byte_len: copy_len,
                 content_hash: copy_hash,
                 mode: copy_handle.mode,
                 link_count: copy_handle.link_count,
             },
-        })
+        ))
     })();
 
     match result {
-        Ok(copy) => Ok(copy),
-        Err(source_error) => {
-            let cleanup = remove_created_file_if_owned(
-                fs,
-                destination.parent,
-                destination.name,
-                destination.path,
-                destination_identity,
-            );
-            match cleanup {
-                Ok(()) => Err(source_error),
-                Err(cleanup_error) => Err(io::Error::other(format!(
-                    "{source_error}; additionally failed to remove exclusive copy {}: {cleanup_error}",
-                    destination.path.display()
-                ))),
-            }
-        }
+        Ok((source, copy)) => ExclusiveFileCopyOutcome::CreatedVerified {
+            copy: ExclusiveFileCopy {
+                file: destination_created.file,
+                source,
+                copy,
+            },
+        },
+        Err(source) => ExclusiveFileCopyOutcome::CreatedUnverified {
+            created: destination_created,
+            source,
+        },
     }
-}
-
-fn remove_created_file_if_owned<F>(
-    fs: &F,
-    parent: &Dir,
-    name: &Path,
-    path: &Path,
-    expected_identity: (u64, u64),
-) -> io::Result<()>
-where
-    F: FsOps + ?Sized,
-{
-    let state = fs.observe_regular_file(parent, name, path)?;
-    if state.identity != expected_identity {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} was substituted before exclusive-copy cleanup",
-                path.display()
-            ),
-        ));
-    }
-    fs.remove_file_exact(parent, name, path, &state)
 }
 
 fn remove_exact_file<F>(
@@ -2251,49 +2271,72 @@ fn remove_exact_file<F>(
     path: &Path,
     expected: &ExactFileObservation,
     before_unlink: F,
-) -> io::Result<()>
+) -> Result<(), ExactRemovalError>
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let actual = observe_regular_file_exact(parent, name, path)?;
+    let actual = observe_regular_file_bounded_exact(parent, name, path, expected.byte_len)
+        .map_err(ExactRemovalError::not_mutated)?;
     if actual != *expected {
-        return Err(io::Error::new(
+        return Err(ExactRemovalError::not_mutated(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "{} is not the exact recorded cleanup object",
                 path.display()
             ),
-        ));
+        )));
     }
 
-    let pinned = open_regular_file_nofollow(parent, name)?;
-    before_unlink()?;
-    let handle_state = regular_metadata_state(&pinned.metadata()?, path)?;
-    let path_state = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    let pinned =
+        open_regular_file_nofollow(parent, name).map_err(ExactRemovalError::not_mutated)?;
+    before_unlink().map_err(ExactRemovalError::not_mutated)?;
+    let handle_state = regular_metadata_state(
+        &pinned.metadata().map_err(ExactRemovalError::not_mutated)?,
+        path,
+    )
+    .map_err(ExactRemovalError::not_mutated)?;
+    let path_state = regular_metadata_state(
+        &parent
+            .symlink_metadata(name)
+            .map_err(ExactRemovalError::not_mutated)?,
+        path,
+    )
+    .map_err(ExactRemovalError::not_mutated)?;
     if handle_state != path_state || !observation_matches_metadata(expected, handle_state) {
-        return Err(changed_during_observation(
+        return Err(ExactRemovalError::not_mutated(changed_during_observation(
             path,
             "the cleanup path changed after exact validation",
-        ));
+        )));
     }
-    parent.remove_file(name)?;
+    parent
+        .remove_file(name)
+        .map_err(ExactRemovalError::not_mutated)?;
 
-    let handle_after = regular_metadata_state(&pinned.metadata()?, path)?;
+    let handle_after = regular_metadata_state(
+        &pinned
+            .metadata()
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?,
+        path,
+    )
+    .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?;
     if handle_after.identity != expected.identity
         || handle_after.byte_len != expected.byte_len
         || handle_after.mode != expected.mode
     {
-        return Err(changed_during_observation(
-            path,
-            "the pinned cleanup object changed across unlink",
+        return Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(path, "the pinned cleanup object changed across unlink"),
         ));
     }
     if let Some(expected_links) = expected.link_count
         && handle_after.link_count != expected_links.checked_sub(1)
     {
-        return Err(changed_during_observation(
-            path,
-            "unlink did not decrement the pinned object's link count exactly once",
+        return Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                path,
+                "unlink did not decrement the pinned object's link count exactly once",
+            ),
         ));
     }
     match parent.symlink_metadata(name) {
@@ -2303,13 +2346,130 @@ where
         {
             // Another actor recreated the name after the exact object was
             // unlinked. It is not transaction-owned and must be preserved.
-            Ok(())
+            Err(ExactRemovalError::mutated(
+                ExactRemovalPostName::Substituted,
+                changed_during_observation(
+                    path,
+                    "the cleanup name was recreated with a substituted object after exact unlink",
+                ),
+            ))
         }
-        Ok(_) => Err(changed_during_observation(
-            path,
-            "the exact object still occupies its name after unlink",
+        Ok(_) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                path,
+                "the exact object still occupies its name after unlink",
+            ),
         )),
-        Err(error) => Err(error),
+        Err(error) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            error,
+        )),
+    }
+}
+
+fn remove_exact_file_metadata<F>(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    expected: &ExactFileMetadataObservation,
+    before_unlink: F,
+) -> Result<(), ExactRemovalError>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let actual = observe_regular_file_metadata_exact(parent, name, path, expected.byte_len)
+        .map_err(ExactRemovalError::not_mutated)?;
+    if actual != *expected {
+        return Err(ExactRemovalError::not_mutated(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is not the exact metadata-bound owner residual",
+                path.display()
+            ),
+        )));
+    }
+    let pinned =
+        open_regular_file_nofollow(parent, name).map_err(ExactRemovalError::not_mutated)?;
+    before_unlink().map_err(ExactRemovalError::not_mutated)?;
+    let handle_state = regular_metadata_state(
+        &pinned.metadata().map_err(ExactRemovalError::not_mutated)?,
+        path,
+    )
+    .map_err(ExactRemovalError::not_mutated)?;
+    let path_state = regular_metadata_state(
+        &parent
+            .symlink_metadata(name)
+            .map_err(ExactRemovalError::not_mutated)?,
+        path,
+    )
+    .map_err(ExactRemovalError::not_mutated)?;
+    let expected_state = RegularMetadataState {
+        identity: expected.identity,
+        byte_len: expected.byte_len,
+        mode: expected.mode,
+        link_count: expected.link_count,
+    };
+    if handle_state != expected_state || path_state != expected_state {
+        return Err(ExactRemovalError::not_mutated(changed_during_observation(
+            path,
+            "metadata-bound owner residual changed before unlink",
+        )));
+    }
+    parent
+        .remove_file(name)
+        .map_err(ExactRemovalError::not_mutated)?;
+    let handle_after = regular_metadata_state(
+        &pinned
+            .metadata()
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?,
+        path,
+    )
+    .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?;
+    if handle_after.identity != expected.identity
+        || handle_after.byte_len != expected.byte_len
+        || handle_after.mode != expected.mode
+    {
+        return Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(path, "metadata-bound owner residual changed across unlink"),
+        ));
+    }
+    if let Some(expected_links) = expected.link_count
+        && handle_after.link_count != expected_links.checked_sub(1)
+    {
+        return Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                path,
+                "metadata-bound owner residual link count did not decrement exactly once",
+            ),
+        ));
+    }
+    match parent.symlink_metadata(name) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata)
+            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+        {
+            Err(ExactRemovalError::mutated(
+                ExactRemovalPostName::Substituted,
+                changed_during_observation(
+                    path,
+                    "the owner-residual name was recreated with a substituted object after exact unlink",
+                ),
+            ))
+        }
+        Ok(_) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                path,
+                "metadata-bound owner residual still occupies its name after unlink",
+            ),
+        )),
+        Err(error) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            error,
+        )),
     }
 }
 
@@ -2317,40 +2477,54 @@ fn remove_empty_directory_exact_impl<F>(
     endpoint: DirectoryEndpoint<'_>,
     expected: &ExactDirectoryObservation,
     before_unlink: F,
-) -> io::Result<()>
+) -> Result<(), ExactRemovalError>
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let initial = inventory_directory_exact_impl(endpoint, expected)?;
+    let initial = inventory_directory_exact_bounded_impl(endpoint, expected, 0)
+        .map_err(ExactRemovalError::not_mutated)?;
     if !initial.entries.is_empty() {
-        return Err(io::Error::new(
+        return Err(ExactRemovalError::not_mutated(io::Error::new(
             io::ErrorKind::DirectoryNotEmpty,
             format!(
                 "{} is not an exact empty directory",
                 endpoint.path.display()
             ),
-        ));
+        )));
     }
 
-    before_unlink()?;
-    let final_inventory = inventory_directory_exact_impl(endpoint, expected)?;
+    before_unlink().map_err(ExactRemovalError::not_mutated)?;
+    let final_inventory = inventory_directory_exact_bounded_impl(endpoint, expected, 0)
+        .map_err(ExactRemovalError::not_mutated)?;
     if !final_inventory.entries.is_empty() {
-        return Err(io::Error::new(
+        return Err(ExactRemovalError::not_mutated(io::Error::new(
             io::ErrorKind::DirectoryNotEmpty,
             format!(
                 "{} gained children at the exact removal boundary",
                 endpoint.path.display()
             ),
-        ));
+        )));
     }
-    endpoint.parent.remove_dir(endpoint.name)?;
+    endpoint
+        .parent
+        .remove_dir(endpoint.name)
+        .map_err(ExactRemovalError::not_mutated)?;
 
-    let handle_after =
-        directory_metadata_state(&endpoint.directory.dir_metadata()?, endpoint.path)?;
+    let handle_after = directory_metadata_state(
+        &endpoint
+            .directory
+            .dir_metadata()
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?,
+        endpoint.path,
+    )
+    .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Unknown, source))?;
     if handle_after.identity != expected.identity || handle_after.mode != expected.mode {
-        return Err(changed_during_observation(
-            endpoint.path,
-            "the pinned directory changed across removal",
+        return Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                endpoint.path,
+                "the pinned directory changed across removal",
+            ),
         ));
     }
     match endpoint.parent.symlink_metadata(endpoint.name) {
@@ -2358,17 +2532,75 @@ where
         Ok(metadata)
             if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
         {
-            Ok(())
+            Err(ExactRemovalError::mutated(
+                ExactRemovalPostName::Substituted,
+                changed_during_observation(
+                    endpoint.path,
+                    "the directory cleanup name was recreated with a substituted object after exact removal",
+                ),
+            ))
         }
-        Ok(_) => Err(changed_during_observation(
-            endpoint.path,
-            "the exact directory still occupies its name after removal",
+        Ok(_) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            changed_during_observation(
+                endpoint.path,
+                "the exact directory still occupies its name after removal",
+            ),
         )),
-        Err(error) => Err(error),
+        Err(error) => Err(ExactRemovalError::mutated(
+            ExactRemovalPostName::Unknown,
+            error,
+        )),
     }
 }
 
-fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
+fn create_new_file_impl(
+    parent: &Dir,
+    name: &Path,
+    _path: &Path,
+    mode: u32,
+    before_identity: impl FnOnce() -> io::Result<()>,
+) -> ExclusiveCreateOutcome {
+    let mut options = OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::{DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE},
+        };
+
+        options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE);
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let file = match parent.open_with(name, &options) {
+        Ok(file) => file,
+        Err(source) => return ExclusiveCreateOutcome::NotCreated { source },
+    };
+    let created = CreatedFile::unverified(file);
+    if let Err(source) = before_identity() {
+        return ExclusiveCreateOutcome::CreatedUnverified { created, source };
+    }
+    match opened_regular_file_metadata(&created.file) {
+        Ok(metadata) => ExclusiveCreateOutcome::CreatedVerified {
+            created: CreatedFile::verified(created.file, metadata),
+        },
+        Err(source) => ExclusiveCreateOutcome::CreatedUnverified { created, source },
+    }
+}
+
+fn opened_regular_file_metadata(file: &File) -> io::Result<ExactFileMetadataObservation> {
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -2383,7 +2615,12 @@ fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
             "controlled file is a Windows reparse point",
         ));
     }
-    Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
+    Ok(ExactFileMetadataObservation {
+        identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+        byte_len: metadata.len(),
+        mode: preserved_mode(&metadata),
+        link_count: Some(MetadataExt::nlink(&metadata)),
+    })
 }
 
 pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Result<(u64, u64)> {
@@ -2407,17 +2644,196 @@ pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Re
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FsOperation {
+    BootstrapWorkspace {
+        after: bool,
+    },
+    PublishWorkspaceOwnership {
+        after: bool,
+    },
+    AdoptBootstrapFinalizationSlot {
+        after: bool,
+    },
+    PrepareJournalPartial {
+        sequence: u64,
+        after: bool,
+    },
+    PublishJournalRecord {
+        sequence: u64,
+        after: bool,
+    },
+    LinkJournalAlias {
+        sequence: u64,
+        after: bool,
+    },
+    AdoptJournalPublication {
+        sequence: u64,
+        after: bool,
+    },
+    PrepareDirectoryOwner {
+        ordinal: u32,
+        after: bool,
+    },
+    DiscardDirectoryOwner {
+        ordinal: u32,
+        after: bool,
+    },
+    PlaceDirectoryOwner {
+        ordinal: u32,
+        after: bool,
+    },
+    CancelDirectoryPlacement {
+        ordinal: u32,
+        after: bool,
+    },
+    PrepareStage {
+        ordinal: u32,
+        after: bool,
+    },
+    DiscardStageOwner {
+        ordinal: u32,
+        after: bool,
+    },
+    PlaceStage {
+        ordinal: u32,
+        after: bool,
+    },
+    CancelStagePlacement {
+        ordinal: u32,
+        after: bool,
+    },
+    PrepareBackup {
+        ordinal: u32,
+        after: bool,
+    },
+    DiscardBackupOwner {
+        ordinal: u32,
+        after: bool,
+    },
+    PlaceBackup {
+        ordinal: u32,
+        after: bool,
+    },
+    CancelBackupPlacement {
+        ordinal: u32,
+        after: bool,
+    },
+    ReplaceTarget {
+        ordinal: u32,
+        after: bool,
+    },
+    RollbackCreatedTarget {
+        ordinal: u32,
+        after: bool,
+    },
+    RollbackBackup {
+        ordinal: u32,
+        after: bool,
+    },
+    CommitBoundary {
+        sequence: u64,
+        after: bool,
+    },
+    CleanupStage {
+        rollback: bool,
+        owned: bool,
+        ordinal: u32,
+        after: bool,
+    },
+    CleanupBackup {
+        rollback: bool,
+        owned: bool,
+        ordinal: u32,
+        after: bool,
+    },
+    CleanupCreatedDirectory {
+        rollback: bool,
+        ordinal: u32,
+        after: bool,
+    },
+    CleanupDirectoryCandidate {
+        rollback: bool,
+        ordinal: u32,
+        after: bool,
+    },
+    PublishFinalizationLease {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    PrepareFinalizationPartial {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    LinkFinalizationAlias {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    CertifyFinalizationPartial {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    AdoptFinalizationStage {
+        rollback: bool,
+        generation: u64,
+        stage: super::runtime::FinalizationAdoptionStage,
+        after: bool,
+    },
+    PublishFinalizationProgress {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    RemoveWorkspaceBootstrapIntent {
+        rollback: bool,
+        after: bool,
+    },
+    RemoveWorkspaceBootstrapOwner {
+        rollback: bool,
+        after: bool,
+    },
+    RemovePublishedJournalHistory {
+        rollback: bool,
+        sequence: u64,
+        after: bool,
+    },
+    RemovePartialJournalHistory {
+        rollback: bool,
+        sequence: u64,
+        after: bool,
+    },
+    RemoveTransactionWorkspace {
+        rollback: bool,
+        after: bool,
+    },
+    RemoveFinalizationLease {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
+    CleanupFinalizationPartial {
+        rollback: bool,
+        generation: u64,
+        after: bool,
+    },
     CreateDirectory,
     OpenCoordinationFile,
     InspectMetadata,
     ReadHandle,
     ObserveRegularFile,
+    ObserveRegularFileBounded,
+    ObserveRegularFileMetadata,
+    ObserveCreatedFileExact,
     ReadRegularFileExact,
     ObserveDirectory,
     OpenDirectoryExact,
     CreateDirectoryExact,
     InventoryDirectoryExact,
+    InventoryDirectoryExactBounded,
     CreateNewFile,
+    AcquireCreatedFileIdentity,
     CreateExclusiveCopy,
     #[cfg(windows)]
     OpenCleanupFile,
@@ -2434,21 +2850,364 @@ pub(crate) enum FsOperation {
     TryLock,
     HardLink,
     PublishAbsent,
-    PublishImmutable,
     RenameDirectoryNoReplace,
-    PublishDirectoryAbsent,
+    RelocateNoReplace,
+    ProbeRelocateNoReplace,
     RemoveFile,
     RemoveFileExact,
+    RemoveFileMetadataExact,
     BeforeExactUnlink,
     #[cfg(windows)]
     RemoveFileByHandle,
     RemoveDirectory,
     RemoveDirectoryExact,
+    BeforeMutationRebind,
     BeforeFinalRevalidation,
     AfterFinalRevalidation,
     Rename,
     ReplaceExisting,
     RenameJournal,
+}
+
+#[cfg(test)]
+impl FsOperation {
+    pub(crate) const fn is_semantic_transition(self) -> bool {
+        matches!(
+            self,
+            Self::BootstrapWorkspace { .. }
+                | Self::PublishWorkspaceOwnership { .. }
+                | Self::AdoptBootstrapFinalizationSlot { .. }
+                | Self::PrepareJournalPartial { .. }
+                | Self::PublishJournalRecord { .. }
+                | Self::LinkJournalAlias { .. }
+                | Self::AdoptJournalPublication { .. }
+                | Self::PrepareDirectoryOwner { .. }
+                | Self::DiscardDirectoryOwner { .. }
+                | Self::PlaceDirectoryOwner { .. }
+                | Self::CancelDirectoryPlacement { .. }
+                | Self::PrepareStage { .. }
+                | Self::DiscardStageOwner { .. }
+                | Self::PlaceStage { .. }
+                | Self::CancelStagePlacement { .. }
+                | Self::PrepareBackup { .. }
+                | Self::DiscardBackupOwner { .. }
+                | Self::PlaceBackup { .. }
+                | Self::CancelBackupPlacement { .. }
+                | Self::ReplaceTarget { .. }
+                | Self::RollbackCreatedTarget { .. }
+                | Self::RollbackBackup { .. }
+                | Self::CommitBoundary { .. }
+                | Self::CleanupStage { .. }
+                | Self::CleanupBackup { .. }
+                | Self::CleanupCreatedDirectory { .. }
+                | Self::CleanupDirectoryCandidate { .. }
+                | Self::PublishFinalizationLease { .. }
+                | Self::PrepareFinalizationPartial { .. }
+                | Self::LinkFinalizationAlias { .. }
+                | Self::CertifyFinalizationPartial { .. }
+                | Self::AdoptFinalizationStage { .. }
+                | Self::PublishFinalizationProgress { .. }
+                | Self::RemoveWorkspaceBootstrapIntent { .. }
+                | Self::RemoveWorkspaceBootstrapOwner { .. }
+                | Self::RemovePublishedJournalHistory { .. }
+                | Self::RemovePartialJournalHistory { .. }
+                | Self::RemoveTransactionWorkspace { .. }
+                | Self::RemoveFinalizationLease { .. }
+                | Self::CleanupFinalizationPartial { .. }
+        )
+    }
+}
+
+#[cfg(test)]
+fn semantic_operation(key: super::runtime::TransitionKey) -> FsOperation {
+    use super::runtime::{
+        CleanupObjectKind, JournalRecordKind, PreparationArtifactKind, RollbackAction,
+        TransactionOutcome, TransitionKey, TransitionWindow,
+    };
+
+    let after = |window| window == TransitionWindow::After;
+    let rollback = |outcome| outcome == TransactionOutcome::Rollback;
+    match key {
+        TransitionKey::BootstrapWorkspace { window } => FsOperation::BootstrapWorkspace {
+            after: after(window),
+        },
+        TransitionKey::PublishWorkspaceOwnership { window } => {
+            FsOperation::PublishWorkspaceOwnership {
+                after: after(window),
+            }
+        }
+        TransitionKey::AdoptBootstrapFinalizationSlot { window } => {
+            FsOperation::AdoptBootstrapFinalizationSlot {
+                after: after(window),
+            }
+        }
+        TransitionKey::PrepareJournalPartial { sequence, window } => {
+            FsOperation::PrepareJournalPartial {
+                sequence,
+                after: after(window),
+            }
+        }
+        TransitionKey::PublishJournalRecord { sequence, window } => {
+            FsOperation::PublishJournalRecord {
+                sequence,
+                after: after(window),
+            }
+        }
+        TransitionKey::LinkJournalAlias { sequence, window } => FsOperation::LinkJournalAlias {
+            sequence,
+            after: after(window),
+        },
+        TransitionKey::AdoptJournalPublication { sequence, window } => {
+            FsOperation::AdoptJournalPublication {
+                sequence,
+                after: after(window),
+            }
+        }
+        TransitionKey::OwnerPrepared {
+            artifact,
+            ordinal,
+            window,
+        } => match artifact {
+            PreparationArtifactKind::Directory => FsOperation::PrepareDirectoryOwner {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Stage => FsOperation::PrepareStage {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Backup => FsOperation::PrepareBackup {
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::DiscardOwner {
+            artifact,
+            ordinal,
+            window,
+        } => match artifact {
+            PreparationArtifactKind::Directory => FsOperation::DiscardDirectoryOwner {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Stage => FsOperation::DiscardStageOwner {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Backup => FsOperation::DiscardBackupOwner {
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::Placement {
+            artifact,
+            ordinal,
+            window,
+        } => match artifact {
+            PreparationArtifactKind::Directory => FsOperation::PlaceDirectoryOwner {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Stage => FsOperation::PlaceStage {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Backup => FsOperation::PlaceBackup {
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::CancelPlacement {
+            artifact,
+            ordinal,
+            window,
+        } => match artifact {
+            PreparationArtifactKind::Directory => FsOperation::CancelDirectoryPlacement {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Stage => FsOperation::CancelStagePlacement {
+                ordinal,
+                after: after(window),
+            },
+            PreparationArtifactKind::Backup => FsOperation::CancelBackupPlacement {
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::ReplaceTarget { ordinal, window } => FsOperation::ReplaceTarget {
+            ordinal,
+            after: after(window),
+        },
+        TransitionKey::RollbackTarget {
+            action,
+            ordinal,
+            window,
+        } => match action {
+            RollbackAction::RemoveCreatedTarget => FsOperation::RollbackCreatedTarget {
+                ordinal,
+                after: after(window),
+            },
+            RollbackAction::RestoreBackup => FsOperation::RollbackBackup {
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::CommitBoundary { sequence, window } => FsOperation::CommitBoundary {
+            sequence,
+            after: after(window),
+        },
+        TransitionKey::CleanupObject {
+            outcome,
+            kind,
+            ordinal,
+            window,
+        } => match kind {
+            CleanupObjectKind::OwnedStage => FsOperation::CleanupStage {
+                rollback: rollback(outcome),
+                owned: true,
+                ordinal,
+                after: after(window),
+            },
+            CleanupObjectKind::PlacedStage => FsOperation::CleanupStage {
+                rollback: rollback(outcome),
+                owned: false,
+                ordinal,
+                after: after(window),
+            },
+            CleanupObjectKind::OwnedBackup => FsOperation::CleanupBackup {
+                rollback: rollback(outcome),
+                owned: true,
+                ordinal,
+                after: after(window),
+            },
+            CleanupObjectKind::PlacedBackup => FsOperation::CleanupBackup {
+                rollback: rollback(outcome),
+                owned: false,
+                ordinal,
+                after: after(window),
+            },
+            CleanupObjectKind::CreatedDirectory => FsOperation::CleanupCreatedDirectory {
+                rollback: rollback(outcome),
+                ordinal,
+                after: after(window),
+            },
+            CleanupObjectKind::OwnedDirectory => FsOperation::CleanupDirectoryCandidate {
+                rollback: rollback(outcome),
+                ordinal,
+                after: after(window),
+            },
+        },
+        TransitionKey::PublishFinalizationLease {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::PublishFinalizationLease {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::PrepareFinalizationPartial {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::PrepareFinalizationPartial {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::LinkFinalizationAlias {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::LinkFinalizationAlias {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::CertifyFinalizationPartial {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::CertifyFinalizationPartial {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::AdoptFinalizationStage {
+            outcome,
+            generation,
+            stage,
+            window,
+        } => FsOperation::AdoptFinalizationStage {
+            rollback: rollback(outcome),
+            generation,
+            stage,
+            after: after(window),
+        },
+        TransitionKey::PublishFinalizationProgress {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::PublishFinalizationProgress {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::RemoveWorkspaceBootstrapIntent { outcome, window } => {
+            FsOperation::RemoveWorkspaceBootstrapIntent {
+                rollback: rollback(outcome),
+                after: after(window),
+            }
+        }
+        TransitionKey::RemoveWorkspaceBootstrapOwner { outcome, window } => {
+            FsOperation::RemoveWorkspaceBootstrapOwner {
+                rollback: rollback(outcome),
+                after: after(window),
+            }
+        }
+        TransitionKey::RemoveJournalHistory {
+            outcome,
+            kind,
+            sequence,
+            window,
+        } => match kind {
+            JournalRecordKind::Published => FsOperation::RemovePublishedJournalHistory {
+                rollback: rollback(outcome),
+                sequence,
+                after: after(window),
+            },
+            JournalRecordKind::Partial => FsOperation::RemovePartialJournalHistory {
+                rollback: rollback(outcome),
+                sequence,
+                after: after(window),
+            },
+        },
+        TransitionKey::RemoveTransactionWorkspace { outcome, window } => {
+            FsOperation::RemoveTransactionWorkspace {
+                rollback: rollback(outcome),
+                after: after(window),
+            }
+        }
+        TransitionKey::RemoveFinalizationLease {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::RemoveFinalizationLease {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+        TransitionKey::CleanupFinalizationPartial {
+            outcome,
+            generation,
+            window,
+        } => FsOperation::CleanupFinalizationPartial {
+            rollback: rollback(outcome),
+            generation,
+            after: after(window),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -2471,6 +3230,12 @@ enum FinalRevalidationMutation {
         moved_target: PathBuf,
         content: Vec<u8>,
     },
+    ReplaceFileOnChildMutation {
+        trigger_parent: PathBuf,
+        target: PathBuf,
+        moved_target: PathBuf,
+        content: Vec<u8>,
+    },
     #[cfg(unix)]
     ReplaceParentWithSymlink {
         target: PathBuf,
@@ -2481,6 +3246,12 @@ enum FinalRevalidationMutation {
     #[cfg(unix)]
     ReplaceParentWithDirectory {
         target: PathBuf,
+        parent: PathBuf,
+        moved_parent: PathBuf,
+    },
+    #[cfg(unix)]
+    ReplaceParentWithDirectoryOnChildMutation {
+        trigger_parent: PathBuf,
         parent: PathBuf,
         moved_parent: PathBuf,
     },
@@ -2497,14 +3268,19 @@ struct PauseAfterSuccess {
 
 #[cfg(test)]
 impl FinalRevalidationMutation {
-    fn target(&self) -> &Path {
+    fn matches_trigger(&self, path: &Path) -> bool {
         match self {
-            Self::WriteFile { target, .. } => target,
-            Self::ReplaceFile { target, .. } => target,
+            Self::WriteFile { target, .. } | Self::ReplaceFile { target, .. } => target == path,
+            Self::ReplaceFileOnChildMutation { trigger_parent, .. } => {
+                path.parent() == Some(trigger_parent.as_path())
+            }
             #[cfg(unix)]
-            Self::ReplaceParentWithSymlink { target, .. } => target,
+            Self::ReplaceParentWithSymlink { target, .. }
+            | Self::ReplaceParentWithDirectory { target, .. } => target == path,
             #[cfg(unix)]
-            Self::ReplaceParentWithDirectory { target, .. } => target,
+            Self::ReplaceParentWithDirectoryOnChildMutation { trigger_parent, .. } => {
+                path.parent() == Some(trigger_parent.as_path())
+            }
         }
     }
 
@@ -2515,6 +3291,12 @@ impl FinalRevalidationMutation {
                 target,
                 moved_target,
                 content,
+            }
+            | Self::ReplaceFileOnChildMutation {
+                target,
+                moved_target,
+                content,
+                ..
             } => {
                 fs::rename(&target, moved_target)?;
                 fs::write(target, content)
@@ -2534,6 +3316,11 @@ impl FinalRevalidationMutation {
                 parent,
                 moved_parent,
                 ..
+            }
+            | Self::ReplaceParentWithDirectoryOnChildMutation {
+                parent,
+                moved_parent,
+                ..
             } => {
                 fs::rename(&parent, moved_parent)?;
                 fs::create_dir(parent)
@@ -2546,9 +3333,12 @@ impl FinalRevalidationMutation {
 #[derive(Debug)]
 pub(crate) struct FaultFs {
     fail: std::sync::Mutex<Option<FaultMode>>,
+    fail_after_success: std::sync::Mutex<Option<FaultMode>>,
+    crash: std::sync::Mutex<Option<FaultMode>>,
     counts: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
     events: std::sync::Mutex<Vec<FsEvent>>,
     pauses_after_success: Vec<PauseAfterSuccess>,
+    mutation_rebind_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     final_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     post_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     exact_unlink_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
@@ -2568,13 +3358,32 @@ enum FaultMode {
 }
 
 #[cfg(test)]
+impl FaultMode {
+    fn matches(self, operation: FsOperation, ordinal: usize) -> bool {
+        match self {
+            Self::Once {
+                operation: target,
+                ordinal: target_ordinal,
+            } => target == operation && target_ordinal == ordinal,
+            Self::From {
+                operation: target,
+                ordinal: target_ordinal,
+            } => target == operation && ordinal >= target_ordinal,
+        }
+    }
+}
+
+#[cfg(test)]
 impl FaultFs {
     pub(crate) fn passthrough() -> Self {
         Self {
             fail: std::sync::Mutex::new(None),
+            fail_after_success: std::sync::Mutex::new(None),
+            crash: std::sync::Mutex::new(None),
             counts: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             events: std::sync::Mutex::new(Vec::new()),
             pauses_after_success: Vec::new(),
+            mutation_rebind_mutation: std::sync::Mutex::new(None),
             final_revalidation_mutation: std::sync::Mutex::new(None),
             post_revalidation_mutation: std::sync::Mutex::new(None),
             exact_unlink_mutation: std::sync::Mutex::new(None),
@@ -2592,6 +3401,51 @@ impl FaultFs {
         assert!(ordinal > 0, "fault ordinal is one-based");
         let fs = Self::passthrough();
         *fs.fail.lock().expect("fault lock") = Some(FaultMode::From { operation, ordinal });
+        fs
+    }
+
+    pub(crate) fn fail_after_success_nth(operation: FsOperation, ordinal: usize) -> Self {
+        assert!(ordinal > 0, "fault ordinal is one-based");
+        let fs = Self::passthrough();
+        *fs.fail_after_success.lock().expect("fault lock") =
+            Some(FaultMode::Once { operation, ordinal });
+        fs
+    }
+
+    /// Panics at one exact semantic protocol transition, modelling abrupt
+    /// process death without allowing in-process error reconciliation to run.
+    pub(crate) fn crash_nth(operation: FsOperation, ordinal: usize) -> Self {
+        assert!(
+            operation.is_semantic_transition(),
+            "semantic crashes require a protocol transition key"
+        );
+        assert!(ordinal > 0, "crash ordinal is one-based");
+        let fs = Self::passthrough();
+        *fs.crash.lock().expect("crash lock") = Some(FaultMode::Once { operation, ordinal });
+        fs
+    }
+
+    pub(crate) fn fail_nth_and_crash_nth(
+        failed_operation: FsOperation,
+        failed_ordinal: usize,
+        crash_operation: FsOperation,
+        crash_ordinal: usize,
+    ) -> Self {
+        assert!(failed_ordinal > 0, "fault ordinal is one-based");
+        assert!(
+            crash_operation.is_semantic_transition(),
+            "semantic crashes require a protocol transition key"
+        );
+        assert!(crash_ordinal > 0, "crash ordinal is one-based");
+        let fs = Self::passthrough();
+        *fs.fail.lock().expect("fault lock") = Some(FaultMode::Once {
+            operation: failed_operation,
+            ordinal: failed_ordinal,
+        });
+        *fs.crash.lock().expect("crash lock") = Some(FaultMode::Once {
+            operation: crash_operation,
+            ordinal: crash_ordinal,
+        });
         fs
     }
 
@@ -2646,6 +3500,32 @@ impl FaultFs {
         fs
     }
 
+    pub(crate) fn mutate_before_mutation_rebind(path: PathBuf, content: Vec<u8>) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::WriteFile {
+                target: path,
+                content,
+            });
+        fs
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn replace_parent_with_directory_before_mutation_rebind(
+        target: PathBuf,
+        parent: PathBuf,
+        moved_parent: PathBuf,
+    ) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::ReplaceParentWithDirectory {
+                target,
+                parent,
+                moved_parent,
+            });
+        fs
+    }
+
     pub(crate) fn mutate_after_final_revalidation(path: PathBuf, content: Vec<u8>) -> Self {
         let fs = Self::passthrough();
         *fs.post_revalidation_mutation.lock().expect("mutation lock") =
@@ -2668,6 +3548,39 @@ impl FaultFs {
                 moved_target,
                 content,
             });
+        fs
+    }
+
+    pub(crate) fn substitute_file_before_child_mutation(
+        trigger_parent: PathBuf,
+        target: PathBuf,
+        moved_target: PathBuf,
+        content: Vec<u8>,
+    ) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::ReplaceFileOnChildMutation {
+                trigger_parent,
+                target,
+                moved_target,
+                content,
+            });
+        fs
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn replace_parent_with_directory_before_child_mutation(
+        parent: PathBuf,
+        moved_parent: PathBuf,
+    ) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") = Some(
+            FinalRevalidationMutation::ReplaceParentWithDirectoryOnChildMutation {
+                trigger_parent: parent.clone(),
+                parent,
+                moved_parent,
+            },
+        );
         fs
     }
 
@@ -2730,32 +3643,12 @@ impl FaultFs {
         path: &Path,
         destination: Option<&Path>,
     ) -> io::Result<()> {
-        self.events.lock().expect("event lock").push(FsEvent {
-            operation,
-            path: path.to_path_buf(),
-            destination: destination.map(Path::to_path_buf),
-        });
-        let key = format!("{operation:?}");
-        let ordinal = {
-            let mut counts = self.counts.lock().expect("count lock");
-            let count = counts.entry(key).or_default();
-            *count += 1;
-            *count
-        };
+        let ordinal = self.record(operation, path, destination);
         if self
             .fail
             .lock()
             .expect("fault lock")
-            .is_some_and(|mode| match mode {
-                FaultMode::Once {
-                    operation: target,
-                    ordinal: target_ordinal,
-                } => target == operation && target_ordinal == ordinal,
-                FaultMode::From {
-                    operation: target,
-                    ordinal: target_ordinal,
-                } => target == operation && ordinal >= target_ordinal,
-            })
+            .is_some_and(|mode| mode.matches(operation, ordinal))
         {
             Err(io::Error::other(format!(
                 "injected {operation:?} failure at ordinal {ordinal}"
@@ -2763,6 +3656,37 @@ impl FaultFs {
         } else {
             Ok(())
         }
+    }
+
+    fn record(&self, operation: FsOperation, path: &Path, destination: Option<&Path>) -> usize {
+        self.events.lock().expect("event lock").push(FsEvent {
+            operation,
+            path: path.to_path_buf(),
+            destination: destination.map(Path::to_path_buf),
+        });
+        let key = format!("{operation:?}");
+        {
+            let mut counts = self.counts.lock().expect("count lock");
+            let count = counts.entry(key).or_default();
+            *count += 1;
+            *count
+        }
+    }
+
+    fn observe_semantic_transition(&self, key: super::runtime::TransitionKey) {
+        let operation = semantic_operation(key);
+        let path = Path::new("<semantic-transaction-transition>");
+        let ordinal = self.record(operation, path, None);
+        if self
+            .crash
+            .lock()
+            .expect("crash lock")
+            .is_some_and(|mode| mode.matches(operation, ordinal))
+        {
+            panic!("injected crash at {operation:?} occurrence {ordinal}");
+        }
+        self.after_success(operation, path)
+            .unwrap_or_else(|source| panic!("semantic transition barrier failed: {source}"));
     }
 
     fn after_success(&self, operation: FsOperation, path: &Path) -> io::Result<()> {
@@ -2773,6 +3697,16 @@ impl FaultFs {
             .get(&format!("{operation:?}"))
             .copied()
             .unwrap_or_default();
+        if self
+            .fail_after_success
+            .lock()
+            .expect("fault lock")
+            .is_some_and(|mode| mode.matches(operation, ordinal))
+        {
+            return Err(io::Error::other(format!(
+                "injected post-success {operation:?} failure at ordinal {ordinal}"
+            )));
+        }
         let Some(pause) = self
             .pauses_after_success
             .iter()
@@ -2800,7 +3734,7 @@ impl FaultFs {
             let mut mutation = self.exact_unlink_mutation.lock().expect("mutation lock");
             if mutation
                 .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
+                .is_some_and(|mutation| mutation.matches_trigger(path))
             {
                 mutation.take()
             } else {
@@ -2816,6 +3750,10 @@ impl FaultFs {
 
 #[cfg(test)]
 impl FsOps for FaultFs {
+    fn observe_transition(&self, key: super::runtime::TransitionKey) {
+        self.observe_semantic_transition(key);
+    }
+
     fn before_create_directory(&self, path: &Path) -> io::Result<()> {
         self.before(FsOperation::CreateDirectory, path, None)
     }
@@ -2836,6 +3774,7 @@ impl FsOps for FaultFs {
         self.before(FsOperation::ReadHandle, path, None)
     }
 
+    #[cfg(test)]
     fn observe_regular_file(
         &self,
         parent: &Dir,
@@ -2848,6 +3787,47 @@ impl FsOps for FaultFs {
         Ok(observation)
     }
 
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        self.before(FsOperation::ObserveRegularFileBounded, path, None)?;
+        let observation = SystemFs.observe_regular_file_bounded(parent, name, path, max_bytes)?;
+        self.after_success(FsOperation::ObserveRegularFileBounded, path)?;
+        Ok(observation)
+    }
+
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation> {
+        self.before(FsOperation::ObserveRegularFileMetadata, path, None)?;
+        let observation = SystemFs.observe_regular_file_metadata(parent, name, path, max_bytes)?;
+        self.after_success(FsOperation::ObserveRegularFileMetadata, path)?;
+        Ok(observation)
+    }
+
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        self.before(FsOperation::ObserveCreatedFileExact, path, None)?;
+        let observation =
+            SystemFs.observe_created_file_exact(parent, name, path, created, max_bytes)?;
+        self.after_success(FsOperation::ObserveCreatedFileExact, path)?;
+        Ok(observation)
+    }
+
     fn read_regular_file_exact(
         &self,
         parent: &Dir,
@@ -2857,6 +3837,19 @@ impl FsOps for FaultFs {
     ) -> io::Result<ExactFileRead> {
         self.before(FsOperation::ReadRegularFileExact, path, None)?;
         let read = SystemFs.read_regular_file_exact(parent, name, path, max_bytes)?;
+        self.after_success(FsOperation::ReadRegularFileExact, path)?;
+        Ok(read)
+    }
+
+    fn read_regular_file_bytes_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileBytesRead> {
+        self.before(FsOperation::ReadRegularFileExact, path, None)?;
+        let read = SystemFs.read_regular_file_bytes_exact(parent, name, path, max_bytes)?;
         self.after_success(FsOperation::ReadRegularFileExact, path)?;
         Ok(read)
     }
@@ -2897,6 +3890,7 @@ impl FsOps for FaultFs {
         Ok(directory)
     }
 
+    #[cfg(test)]
     fn inventory_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -2908,17 +3902,44 @@ impl FsOps for FaultFs {
         Ok(inventory)
     }
 
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
+    ) -> io::Result<ExactDirectoryInventory> {
+        self.before(
+            FsOperation::InventoryDirectoryExactBounded,
+            endpoint.path,
+            None,
+        )?;
+        let inventory =
+            SystemFs.inventory_directory_exact_bounded(endpoint, expected, max_entries)?;
+        self.after_success(FsOperation::InventoryDirectoryExactBounded, endpoint.path)?;
+        Ok(inventory)
+    }
+
     fn create_new_file(
         &self,
         parent: &Dir,
         name: &Path,
         path: &Path,
         mode: u32,
-    ) -> io::Result<CreatedFile> {
-        self.before(FsOperation::CreateNewFile, path, None)?;
-        let file = SystemFs.create_new_file(parent, name, path, mode)?;
-        self.after_success(FsOperation::CreateNewFile, path)?;
-        Ok(file)
+    ) -> ExclusiveCreateOutcome {
+        if let Err(source) = self.before(FsOperation::CreateNewFile, path, None) {
+            return ExclusiveCreateOutcome::NotCreated { source };
+        }
+        match create_new_file_impl(parent, name, path, mode, || {
+            self.before(FsOperation::AcquireCreatedFileIdentity, path, None)
+        }) {
+            ExclusiveCreateOutcome::CreatedVerified { created } => {
+                match self.after_success(FsOperation::CreateNewFile, path) {
+                    Ok(()) => ExclusiveCreateOutcome::CreatedVerified { created },
+                    Err(source) => ExclusiveCreateOutcome::CreatedUnverified { created, source },
+                }
+            }
+            outcome => outcome,
+        }
     }
 
     fn create_exclusive_copy(
@@ -2926,15 +3947,33 @@ impl FsOps for FaultFs {
         source: HardLinkEndpoint<'_>,
         expected_source: &ExactFileObservation,
         destination: HardLinkEndpoint<'_>,
-    ) -> io::Result<ExclusiveFileCopy> {
-        self.before(
+    ) -> ExclusiveFileCopyOutcome {
+        if let Err(source) = self.before(
             FsOperation::CreateExclusiveCopy,
             source.path,
             Some(destination.path),
-        )?;
-        let copy = create_exclusive_file_copy(self, source, expected_source, destination)?;
-        self.after_success(FsOperation::CreateExclusiveCopy, source.path)?;
-        Ok(copy)
+        ) {
+            return ExclusiveFileCopyOutcome::NotCreated { source };
+        }
+        let outcome = create_exclusive_file_copy(self, source, expected_source, destination);
+        let ExclusiveFileCopyOutcome::CreatedVerified { copy } = outcome else {
+            return outcome;
+        };
+        match self.after_success(FsOperation::CreateExclusiveCopy, source.path) {
+            Ok(()) => ExclusiveFileCopyOutcome::CreatedVerified { copy },
+            Err(source) => ExclusiveFileCopyOutcome::CreatedUnverified {
+                created: CreatedFile::verified(
+                    copy.file,
+                    ExactFileMetadataObservation {
+                        identity: copy.copy.identity,
+                        byte_len: copy.copy.byte_len,
+                        mode: copy.copy.mode,
+                        link_count: copy.copy.link_count,
+                    },
+                ),
+                source,
+            },
+        }
     }
 
     #[cfg(windows)]
@@ -3051,36 +4090,6 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::PublishAbsent, staged.path)
     }
 
-    fn publish_immutable(
-        &self,
-        partial: HardLinkEndpoint<'_>,
-        expected_partial: &ExactFileObservation,
-        target: HardLinkEndpoint<'_>,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        parent_sync_kind: ParentSyncKind,
-    ) -> ImmutablePublicationOutcome {
-        if let Err(source) = self.before(
-            FsOperation::PublishImmutable,
-            partial.path,
-            Some(target.path),
-        ) {
-            return ImmutablePublicationOutcome::NotPublished {
-                partial: None,
-                source,
-            };
-        }
-        publish_immutable_exact(
-            self,
-            partial,
-            expected_partial,
-            target,
-            target_parent,
-            expected_target_parent,
-            parent_sync_kind,
-        )
-    }
-
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
@@ -3106,34 +4115,45 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::RenameDirectoryNoReplace, candidate_path)
     }
 
-    fn publish_directory_absent(
+    fn relocate_noreplace(
         &self,
-        candidate: DirectoryEndpoint<'_>,
-        expected_candidate: &ExactDirectoryInventory,
-        target_parent: DirectoryEndpoint<'_>,
-        expected_target_parent: &ExactDirectoryObservation,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> DirectoryPublicationOutcome {
-        if let Err(source) = self.before(
-            FsOperation::PublishDirectoryAbsent,
-            candidate.path,
-            Some(target_path),
-        ) {
-            return DirectoryPublicationOutcome::NotPublished {
-                candidate: None,
-                source,
-            };
-        }
-        publish_directory_absent_exact(
-            self,
-            candidate,
-            expected_candidate,
-            target_parent,
-            expected_target_parent,
-            target_name,
-            target_path,
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError> {
+        self.before(
+            FsOperation::RelocateNoReplace,
+            owner_path,
+            Some(destination_path),
         )
+        .map_err(NoReplaceRelocationError::Io)?;
+        SystemFs.relocate_noreplace(
+            owner_parent,
+            owner_name,
+            owner_path,
+            destination_parent,
+            destination_name,
+            destination_path,
+            expected_source,
+        )?;
+        self.after_success(FsOperation::RelocateNoReplace, owner_path)
+            .map_err(NoReplaceRelocationError::Io)
+    }
+
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError> {
+        self.before(FsOperation::ProbeRelocateNoReplace, path, None)
+            .map_err(NoReplaceRelocationError::Io)?;
+        SystemFs.probe_noreplace_relocation(parent, path)?;
+        self.after_success(FsOperation::ProbeRelocateNoReplace, path)
+            .map_err(NoReplaceRelocationError::Io)
     }
 
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
@@ -3147,12 +4167,30 @@ impl FsOps for FaultFs {
         name: &Path,
         path: &Path,
         expected: &ExactFileObservation,
-    ) -> io::Result<()> {
-        self.before(FsOperation::RemoveFileExact, path, None)?;
+    ) -> Result<(), ExactRemovalError> {
+        self.before(FsOperation::RemoveFileExact, path, None)
+            .map_err(ExactRemovalError::not_mutated)?;
         remove_exact_file(parent, name, path, expected, || {
             self.before_exact_unlink(path)
         })?;
         self.after_success(FsOperation::RemoveFileExact, path)
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Absent, source))
+    }
+
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> Result<(), ExactRemovalError> {
+        self.before(FsOperation::RemoveFileMetadataExact, path, None)
+            .map_err(ExactRemovalError::not_mutated)?;
+        remove_exact_file_metadata(parent, name, path, expected, || {
+            self.before_exact_unlink(path)
+        })?;
+        self.after_success(FsOperation::RemoveFileMetadataExact, path)
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Absent, source))
     }
 
     #[cfg(windows)]
@@ -3172,12 +4210,33 @@ impl FsOps for FaultFs {
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
-    ) -> io::Result<()> {
-        self.before(FsOperation::RemoveDirectoryExact, endpoint.path, None)?;
+    ) -> Result<(), ExactRemovalError> {
+        self.before(FsOperation::RemoveDirectoryExact, endpoint.path, None)
+            .map_err(ExactRemovalError::not_mutated)?;
         remove_empty_directory_exact_impl(endpoint, expected, || {
             self.before_exact_unlink(endpoint.path)
         })?;
         self.after_success(FsOperation::RemoveDirectoryExact, endpoint.path)
+            .map_err(|source| ExactRemovalError::mutated(ExactRemovalPostName::Absent, source))
+    }
+
+    fn before_mutation_rebind(&self, path: &Path) -> io::Result<()> {
+        self.before(FsOperation::BeforeMutationRebind, path, None)?;
+        let mutation = {
+            let mut mutation = self.mutation_rebind_mutation.lock().expect("mutation lock");
+            if mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.matches_trigger(path))
+            {
+                mutation.take()
+            } else {
+                None
+            }
+        };
+        if let Some(mutation) = mutation {
+            mutation.apply()?;
+        }
+        Ok(())
     }
 
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()> {
@@ -3189,7 +4248,7 @@ impl FsOps for FaultFs {
                 .expect("mutation lock");
             if mutation
                 .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
+                .is_some_and(|mutation| mutation.matches_trigger(path))
             {
                 mutation.take()
             } else {
@@ -3211,7 +4270,7 @@ impl FsOps for FaultFs {
                 .expect("mutation lock");
             if mutation
                 .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
+                .is_some_and(|mutation| mutation.matches_trigger(path))
             {
                 mutation.take()
             } else {
@@ -3271,9 +4330,9 @@ mod exact_state_tests {
     use tempfile::TempDir;
 
     use super::{
-        DirectoryEndpoint, DirectoryPublicationOutcome, ExactDirectoryEntryKind,
-        ExactIdentitySupport, FsOperation, FsOps, HardLinkEndpoint, ImmutablePublicationOutcome,
-        ParentSyncKind, SystemFs, exact_identity_support,
+        DirectoryEndpoint, ExactDirectoryEntryKind, ExactIdentitySupport, ExclusiveCreateOutcome,
+        ExclusiveFileCopyOutcome, FaultFs, FsOperation, FsOps, HardLinkEndpoint, ParentSyncKind,
+        SystemFs, exact_identity_support,
     };
 
     struct Fixture {
@@ -3281,6 +4340,140 @@ mod exact_state_tests {
         root: Dir,
         files: Dir,
         files_path: PathBuf,
+    }
+
+    #[test]
+    fn mutation_rebind_hook_is_semantically_faultable() {
+        let fixture = Fixture::new();
+        fixture.write("target", b"planned bytes\n");
+        let target_path = fixture.path("target");
+        let fault = super::FaultFs::mutate_before_mutation_rebind(
+            target_path.clone(),
+            b"concurrent bytes\n".to_vec(),
+        );
+
+        fault
+            .before_mutation_rebind(&target_path)
+            .expect("run mutation rebind hook");
+
+        assert_eq!(
+            std::fs::read(&target_path).expect("read mutated target"),
+            b"concurrent bytes\n"
+        );
+        assert_eq!(
+            fault.events()[0].operation,
+            FsOperation::BeforeMutationRebind
+        );
+    }
+
+    #[test]
+    fn identity_acquisition_failure_retains_the_live_exclusive_create_capability() {
+        let fixture = Fixture::new();
+        let path = fixture.path("identity-failure");
+        let fault = super::FaultFs::fail_nth(FsOperation::AcquireCreatedFileIdentity, 1);
+
+        let ExclusiveCreateOutcome::CreatedUnverified {
+            mut created,
+            source,
+        } = fault.create_new_file(&fixture.files, Path::new("identity-failure"), &path, 0o600)
+        else {
+            panic!("post-open identity failure must retain an unverified capability");
+        };
+
+        assert!(source.to_string().contains("AcquireCreatedFileIdentity"));
+        assert!(created.exact_metadata().is_none());
+        let observed = fault
+            .observe_created_file_exact(
+                &fixture.files,
+                Path::new("identity-failure"),
+                &path,
+                &mut created,
+                0,
+            )
+            .expect("bind the retained empty file through its live handle");
+        assert_eq!(observed.identity, created.identity());
+        assert_eq!(observed.byte_len, 0);
+        assert_eq!(observed.link_count, Some(1));
+        assert_eq!(std::fs::read(path).expect("read residual"), b"");
+    }
+
+    #[test]
+    fn post_success_failure_retains_the_verified_exclusive_create_metadata() {
+        let fixture = Fixture::new();
+        let path = fixture.path("post-success-failure");
+        let fault = super::FaultFs::fail_after_success_nth(FsOperation::CreateNewFile, 1);
+
+        let ExclusiveCreateOutcome::CreatedUnverified {
+            mut created,
+            source,
+        } = fault.create_new_file(
+            &fixture.files,
+            Path::new("post-success-failure"),
+            &path,
+            0o600,
+        )
+        else {
+            panic!("post-success failure must retain the created capability");
+        };
+
+        assert!(source.to_string().contains("post-success CreateNewFile"));
+        let metadata = created
+            .exact_metadata()
+            .expect("metadata acquired before the injected post-success error");
+        let observed = fault
+            .observe_created_file_exact(
+                &fixture.files,
+                Path::new("post-success-failure"),
+                &path,
+                &mut created,
+                0,
+            )
+            .expect("rebind the retained verified handle");
+        assert_eq!(observed.identity, metadata.identity);
+        assert_eq!(observed.byte_len, metadata.byte_len);
+        assert_eq!(observed.mode, metadata.mode);
+        assert_eq!(observed.link_count, metadata.link_count);
+        assert_eq!(std::fs::read(path).expect("read residual"), b"");
+    }
+
+    #[test]
+    fn created_capability_pins_identity_across_controlled_metadata_changes() {
+        let fixture = Fixture::new();
+        let path = fixture.path("controlled-metadata-change");
+        let ExclusiveCreateOutcome::CreatedVerified { mut created } = super::SystemFs
+            .create_new_file(
+                &fixture.files,
+                Path::new("controlled-metadata-change"),
+                &path,
+                0o600,
+            )
+        else {
+            panic!("exclusive create must retain a verified capability");
+        };
+        let identity = created.identity();
+
+        super::SystemFs
+            .write_handle(&mut created.file, &path, b"owned bytes\n")
+            .expect("write through retained capability");
+        super::SystemFs
+            .flush_file(&created.file, &path)
+            .expect("flush retained capability");
+        let observed = super::SystemFs
+            .observe_created_file_exact(
+                &fixture.files,
+                Path::new("controlled-metadata-change"),
+                &path,
+                &mut created,
+                12,
+            )
+            .expect("metadata evolution must not look like identity substitution");
+
+        assert_eq!(observed.identity, identity);
+        assert_eq!(observed.byte_len, 12);
+        assert_eq!(
+            std::fs::read(path).expect("read created file"),
+            b"owned bytes\n"
+        );
     }
 
     impl Fixture {
@@ -3310,6 +4503,85 @@ mod exact_state_tests {
         fn endpoint<'a>(&'a self, name: &'a str, path: &'a Path) -> HardLinkEndpoint<'a> {
             HardLinkEndpoint::new(&self.files, Path::new(name), path)
         }
+    }
+
+    #[test]
+    fn exclusive_copy_retains_live_owner_after_post_success_failure() {
+        let fixture = Fixture::new();
+        fixture.write("source", b"retained copy bytes\n");
+        let source_path = fixture.path("source");
+        let source = SystemFs
+            .observe_regular_file(&fixture.files, Path::new("source"), &source_path)
+            .expect("observe source");
+        let copy_path = fixture.path("copy-post-success");
+        let fault = FaultFs::fail_after_success_nth(FsOperation::CreateExclusiveCopy, 1);
+
+        let ExclusiveFileCopyOutcome::CreatedUnverified {
+            mut created,
+            source: failure,
+        } = fault.create_exclusive_copy(
+            fixture.endpoint("source", &source_path),
+            &source,
+            fixture.endpoint("copy-post-success", &copy_path),
+        )
+        else {
+            panic!("post-success copy failure must retain the created owner capability");
+        };
+
+        assert!(
+            failure
+                .to_string()
+                .contains("post-success CreateExclusiveCopy")
+        );
+        let observed = SystemFs
+            .observe_created_file_exact(
+                &fixture.files,
+                Path::new("copy-post-success"),
+                &copy_path,
+                &mut created,
+                source.byte_len,
+            )
+            .expect("rebind the fully populated residual through its live owner handle");
+        assert_eq!(observed.content_hash, source.content_hash);
+        assert_eq!(observed.byte_len, source.byte_len);
+        assert_eq!(observed.mode, source.mode);
+    }
+
+    #[test]
+    fn exclusive_copy_retains_live_owner_after_population_failure() {
+        let fixture = Fixture::new();
+        fixture.write("source", b"partial copy bytes\n");
+        let source_path = fixture.path("source");
+        let source = SystemFs
+            .observe_regular_file(&fixture.files, Path::new("source"), &source_path)
+            .expect("observe source");
+        let copy_path = fixture.path("copy-partial");
+        let fault = FaultFs::fail_nth(FsOperation::WriteHandle, 1);
+
+        let ExclusiveFileCopyOutcome::CreatedUnverified {
+            mut created,
+            source: failure,
+        } = fault.create_exclusive_copy(
+            fixture.endpoint("source", &source_path),
+            &source,
+            fixture.endpoint("copy-partial", &copy_path),
+        )
+        else {
+            panic!("copy population failure must retain the created owner capability");
+        };
+
+        assert!(failure.to_string().contains("injected WriteHandle"));
+        let observed = SystemFs
+            .observe_created_file_exact(
+                &fixture.files,
+                Path::new("copy-partial"),
+                &copy_path,
+                &mut created,
+                source.byte_len,
+            )
+            .expect("rebind the partial residual through its live owner handle");
+        assert!(observed.byte_len < source.byte_len);
+        assert_eq!(observed.link_count, Some(1));
     }
 
     #[test]
@@ -3344,6 +4616,7 @@ mod exact_state_tests {
                 &source,
                 fixture.endpoint("copy", &copy_path),
             )
+            .into_verified()
             .expect("create independent copy");
         assert_eq!(copy.source, source);
         assert_ne!(copy.copy.identity, source.identity);
@@ -3445,406 +4718,6 @@ mod exact_state_tests {
     }
 
     #[test]
-    fn immutable_publication_reports_visibility_durability_and_partial_cleanup() {
-        let fixture = Fixture::new();
-        fixture.write("partial", b"immutable bytes\n");
-        let partial_path = fixture.path("partial");
-        let target_path = fixture.path("target");
-        let partial = SystemFs
-            .observe_regular_file(&fixture.files, Path::new("partial"), &partial_path)
-            .expect("observe immutable partial");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &fixture.root,
-            Path::new("files"),
-            &fixture.files,
-            &fixture.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe publication parent");
-        let outcome = SystemFs.publish_immutable(
-            fixture.endpoint("partial", &partial_path),
-            &partial,
-            fixture.endpoint("target", &target_path),
-            parent_endpoint,
-            &parent,
-            ParentSyncKind::Target,
-        );
-        let published = match outcome {
-            ImmutablePublicationOutcome::Durable { published } => published,
-            other => panic!("expected durable publication, got {other:?}"),
-        };
-        assert_eq!(published, partial);
-        assert!(!partial_path.exists());
-        assert_eq!(
-            std::fs::read(&target_path).expect("read durable target"),
-            b"immutable bytes\n"
-        );
-
-        let occupied = Fixture::new();
-        occupied.write("partial", b"immutable bytes\n");
-        occupied.write("target", b"application bytes\n");
-        let partial_path = occupied.path("partial");
-        let target_path = occupied.path("target");
-        let partial = SystemFs
-            .observe_regular_file(&occupied.files, Path::new("partial"), &partial_path)
-            .expect("observe no-clobber partial");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &occupied.root,
-            Path::new("files"),
-            &occupied.files,
-            &occupied.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe no-clobber parent");
-        match SystemFs.publish_immutable(
-            occupied.endpoint("partial", &partial_path),
-            &partial,
-            occupied.endpoint("target", &target_path),
-            parent_endpoint,
-            &parent,
-            ParentSyncKind::Target,
-        ) {
-            ImmutablePublicationOutcome::NotPublished {
-                partial: Some(observed),
-                source,
-            } => {
-                assert_eq!(observed, partial);
-                assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists);
-            }
-            other => panic!("expected no-clobber refusal, got {other:?}"),
-        }
-        assert_eq!(
-            std::fs::read(&target_path).expect("read preserved application target"),
-            b"application bytes\n"
-        );
-        assert!(partial_path.exists());
-
-        let uncertain = Fixture::new();
-        uncertain.write("partial", b"uncertain bytes\n");
-        let partial_path = uncertain.path("partial");
-        let target_path = uncertain.path("target");
-        let partial = SystemFs
-            .observe_regular_file(&uncertain.files, Path::new("partial"), &partial_path)
-            .expect("observe uncertain partial");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &uncertain.root,
-            Path::new("files"),
-            &uncertain.files,
-            &uncertain.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe uncertain parent");
-        let fault = super::FaultFs::fail_nth(FsOperation::SyncTargetParent, 1);
-        match fault.publish_immutable(
-            uncertain.endpoint("partial", &partial_path),
-            &partial,
-            uncertain.endpoint("target", &target_path),
-            parent_endpoint,
-            &parent,
-            ParentSyncKind::Target,
-        ) {
-            ImmutablePublicationOutcome::VisibleDurabilityUnknown {
-                partial,
-                published: Some(published),
-                source,
-            } => {
-                assert_eq!(partial.identity, published.identity);
-                assert!(source.to_string().contains("SyncTargetParent"));
-            }
-            other => panic!("expected visible durability uncertainty, got {other:?}"),
-        }
-        assert!(partial_path.exists());
-        assert!(target_path.exists());
-
-        let residual = Fixture::new();
-        residual.write("partial", b"residual bytes\n");
-        let partial_path = residual.path("partial");
-        let target_path = residual.path("target");
-        let partial = SystemFs
-            .observe_regular_file(&residual.files, Path::new("partial"), &partial_path)
-            .expect("observe residual partial");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &residual.root,
-            Path::new("files"),
-            &residual.files,
-            &residual.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe residual parent");
-        let fault = super::FaultFs::fail_nth(FsOperation::RemoveFileExact, 1);
-        match fault.publish_immutable(
-            residual.endpoint("partial", &partial_path),
-            &partial,
-            residual.endpoint("target", &target_path),
-            parent_endpoint,
-            &parent,
-            ParentSyncKind::Target,
-        ) {
-            ImmutablePublicationOutcome::DurableWithPartialResidual {
-                last_linked_published,
-                last_linked_partial,
-                partial_absent_in_process,
-                source,
-            } => {
-                assert_eq!(last_linked_partial.identity, last_linked_published.identity);
-                assert!(!partial_absent_in_process);
-                assert!(source.to_string().contains("RemoveFileExact"));
-            }
-            other => panic!("expected durable publication with residual, got {other:?}"),
-        }
-        assert!(partial_path.exists());
-        assert!(target_path.exists());
-
-        let cleanup_sync = Fixture::new();
-        cleanup_sync.write("partial", b"cleanup sync bytes\n");
-        let partial_path = cleanup_sync.path("partial");
-        let target_path = cleanup_sync.path("target");
-        let partial = SystemFs
-            .observe_regular_file(&cleanup_sync.files, Path::new("partial"), &partial_path)
-            .expect("observe cleanup-sync partial");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &cleanup_sync.root,
-            Path::new("files"),
-            &cleanup_sync.files,
-            &cleanup_sync.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe cleanup-sync parent");
-        let fault = super::FaultFs::fail_nth(FsOperation::SyncTargetParent, 2);
-        match fault.publish_immutable(
-            cleanup_sync.endpoint("partial", &partial_path),
-            &partial,
-            cleanup_sync.endpoint("target", &target_path),
-            parent_endpoint,
-            &parent,
-            ParentSyncKind::Target,
-        ) {
-            ImmutablePublicationOutcome::DurableWithPartialResidual {
-                partial_absent_in_process,
-                source,
-                ..
-            } => {
-                assert!(partial_absent_in_process);
-                assert!(source.to_string().contains("SyncTargetParent"));
-            }
-            other => panic!("expected conservative cleanup-sync residual, got {other:?}"),
-        }
-        assert!(!partial_path.exists());
-        assert!(target_path.exists());
-    }
-
-    #[test]
-    fn prepared_directory_publication_is_atomic_no_clobber_and_typed_for_durability() {
-        let fixture = Fixture::new();
-        let candidate_path = fixture.path("candidate");
-        let target_path = fixture.path("journal");
-        let candidate = SystemFs
-            .create_directory_exact(
-                &fixture.files,
-                Path::new("candidate"),
-                &candidate_path,
-                0o700,
-            )
-            .expect("create prepared directory candidate");
-        std::fs::write(candidate_path.join("record.json"), b"{\"prepared\":true}\n")
-            .expect("write prepared record");
-        let candidate_endpoint = DirectoryEndpoint::new(
-            &fixture.files,
-            Path::new("candidate"),
-            &candidate.directory,
-            &candidate_path,
-        );
-        let candidate_observation = SystemFs
-            .observe_directory(candidate_endpoint)
-            .expect("observe prepared candidate");
-        let candidate_inventory = SystemFs
-            .inventory_directory_exact(candidate_endpoint, &candidate_observation)
-            .expect("inventory prepared candidate");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &fixture.root,
-            Path::new("files"),
-            &fixture.files,
-            &fixture.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe directory-publication parent");
-        let published = match SystemFs.publish_directory_absent(
-            candidate_endpoint,
-            &candidate_inventory,
-            parent_endpoint,
-            &parent,
-            Path::new("journal"),
-            &target_path,
-        ) {
-            DirectoryPublicationOutcome::Durable { published } => published,
-            other => panic!("expected durable directory publication, got {other:?}"),
-        };
-        assert_eq!(published, candidate_inventory);
-        assert!(!candidate_path.exists());
-        assert_eq!(
-            std::fs::read(target_path.join("record.json")).expect("read published record"),
-            b"{\"prepared\":true}\n"
-        );
-
-        let occupied = Fixture::new();
-        let candidate_path = occupied.path("candidate");
-        let target_path = occupied.path("journal");
-        let candidate = SystemFs
-            .create_directory_exact(
-                &occupied.files,
-                Path::new("candidate"),
-                &candidate_path,
-                0o700,
-            )
-            .expect("create no-clobber candidate");
-        std::fs::create_dir(&target_path).expect("create existing logical directory");
-        let candidate_endpoint = DirectoryEndpoint::new(
-            &occupied.files,
-            Path::new("candidate"),
-            &candidate.directory,
-            &candidate_path,
-        );
-        let candidate_inventory = SystemFs
-            .inventory_directory_exact(candidate_endpoint, &candidate.observation)
-            .expect("inventory no-clobber candidate");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &occupied.root,
-            Path::new("files"),
-            &occupied.files,
-            &occupied.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe no-clobber directory parent");
-        match SystemFs.publish_directory_absent(
-            candidate_endpoint,
-            &candidate_inventory,
-            parent_endpoint,
-            &parent,
-            Path::new("journal"),
-            &target_path,
-        ) {
-            DirectoryPublicationOutcome::NotPublished {
-                candidate: Some(observed),
-                source,
-            } => {
-                assert_eq!(observed, candidate_inventory);
-                assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists);
-            }
-            other => panic!("expected atomic no-clobber refusal, got {other:?}"),
-        }
-        assert!(candidate_path.is_dir());
-        assert!(target_path.is_dir());
-
-        let uncertain = Fixture::new();
-        let candidate_path = uncertain.path("candidate");
-        let target_path = uncertain.path("journal");
-        let candidate = SystemFs
-            .create_directory_exact(
-                &uncertain.files,
-                Path::new("candidate"),
-                &candidate_path,
-                0o700,
-            )
-            .expect("create uncertain candidate");
-        let candidate_endpoint = DirectoryEndpoint::new(
-            &uncertain.files,
-            Path::new("candidate"),
-            &candidate.directory,
-            &candidate_path,
-        );
-        let candidate_inventory = SystemFs
-            .inventory_directory_exact(candidate_endpoint, &candidate.observation)
-            .expect("inventory uncertain candidate");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &uncertain.root,
-            Path::new("files"),
-            &uncertain.files,
-            &uncertain.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe uncertain directory parent");
-        let fault = super::FaultFs::fail_nth(FsOperation::SyncTargetParent, 1);
-        match fault.publish_directory_absent(
-            candidate_endpoint,
-            &candidate_inventory,
-            parent_endpoint,
-            &parent,
-            Path::new("journal"),
-            &target_path,
-        ) {
-            DirectoryPublicationOutcome::VisibleDurabilityUnknown {
-                published: Some(published),
-                source,
-                ..
-            } => {
-                assert_eq!(published, candidate_inventory);
-                assert!(source.to_string().contains("SyncTargetParent"));
-            }
-            other => panic!("expected directory durability uncertainty, got {other:?}"),
-        }
-        assert!(!candidate_path.exists());
-        assert!(target_path.is_dir());
-
-        let refused = Fixture::new();
-        let candidate_path = refused.path("candidate");
-        let target_path = refused.path("journal");
-        let candidate = SystemFs
-            .create_directory_exact(
-                &refused.files,
-                Path::new("candidate"),
-                &candidate_path,
-                0o700,
-            )
-            .expect("create refused candidate");
-        let candidate_endpoint = DirectoryEndpoint::new(
-            &refused.files,
-            Path::new("candidate"),
-            &candidate.directory,
-            &candidate_path,
-        );
-        let candidate_inventory = SystemFs
-            .inventory_directory_exact(candidate_endpoint, &candidate.observation)
-            .expect("inventory refused candidate");
-        let parent_endpoint = DirectoryEndpoint::new(
-            &refused.root,
-            Path::new("files"),
-            &refused.files,
-            &refused.files_path,
-        );
-        let parent = SystemFs
-            .observe_directory(parent_endpoint)
-            .expect("observe refused directory parent");
-        let fault = super::FaultFs::fail_nth(FsOperation::RenameDirectoryNoReplace, 1);
-        match fault.publish_directory_absent(
-            candidate_endpoint,
-            &candidate_inventory,
-            parent_endpoint,
-            &parent,
-            Path::new("journal"),
-            &target_path,
-        ) {
-            DirectoryPublicationOutcome::NotPublished {
-                candidate: Some(observed),
-                source,
-            } => {
-                assert_eq!(observed, candidate_inventory);
-                assert!(source.to_string().contains("RenameDirectoryNoReplace"));
-            }
-            other => panic!("expected pre-rename refusal, got {other:?}"),
-        }
-        assert!(candidate_path.is_dir());
-        assert!(!target_path.exists());
-    }
-
-    #[test]
     fn replacement_and_exact_removal_refuse_stale_recorded_states() {
         let fixture = Fixture::new();
         fixture.write("stage", b"desired\n");
@@ -3890,7 +4763,7 @@ mod exact_state_tests {
                 &cleanup,
             )
             .expect_err("stale exact state must not remove substitute");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.source_error().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             std::fs::read(cleanup_path).expect("read substitute"),
             b"substitute\n"
@@ -3994,7 +4867,10 @@ mod exact_state_tests {
         let error = SystemFs
             .remove_empty_directory_exact(endpoint, &after_child)
             .expect_err("nonempty exact directory is preserved");
-        assert_eq!(error.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+        assert_eq!(
+            error.source_error().kind(),
+            std::io::ErrorKind::DirectoryNotEmpty
+        );
 
         std::fs::remove_file(workspace_path.join("record.json")).expect("remove inventory child");
         let empty_again = SystemFs
@@ -4046,7 +4922,7 @@ mod exact_state_tests {
                 &expected,
             )
             .expect_err("boundary substitution must be rejected");
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.source_error().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
             std::fs::read(&cleanup_path).expect("read preserved substitute"),
             b"substitute\n"

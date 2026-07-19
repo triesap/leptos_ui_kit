@@ -12,7 +12,7 @@ use super::{
     KitConfigWriter, built_in_item_id, desired_builtin_item, load_or_empty_lock,
     plan_generated_source_file, plan_init_with_context, planned_or_existing_content,
     planned_or_existing_kit_config_content, ui_exports_for_item, upsert_planned_file,
-    upsert_preloaded_planned_file,
+    upsert_planned_install_lock, upsert_preloaded_planned_file,
 };
 use crate::digest::hash_bytes;
 use crate::path_safety::PlanningContext;
@@ -143,14 +143,13 @@ pub(crate) fn plan_sync_from_config(
 
     lock.validate_at_path(Path::new(&lock_path))?;
     let lock_json = lock_to_json_at_path(&lock, Path::new(&lock_path))?;
-    upsert_planned_file(
+    let force_lock_publication = !files.is_empty();
+    upsert_planned_install_lock(
         context,
         &mut files,
         &mut changes,
-        &lock_path,
         lock_json,
-        ChangeKind::WriteLockFile,
-        None,
+        force_lock_publication,
     )?;
 
     let paths = files

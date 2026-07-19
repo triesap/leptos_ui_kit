@@ -289,7 +289,7 @@ impl PlanningContext {
             return Ok(Some(identity));
         }
 
-        validate_relative_path(logical_path)?;
+        validate_controlled_relative_path(logical_path)?;
         let probe = format!("{logical_path}/directory-probe");
         let Some((directory, _)) = self.walk_parent(&probe, false)? else {
             return Ok(None);
@@ -451,7 +451,7 @@ impl PlanningContext {
                 source,
             });
         }
-        validate_relative_path(logical_path)?;
+        validate_controlled_relative_path(logical_path)?;
         let probe = format!("{logical_path}/directory-probe");
         self.walk_parent(&probe, false)?
             .map(|(directory, _)| directory)
@@ -459,6 +459,51 @@ impl PlanningContext {
                 path: self.project_root().join(logical_path),
                 source: io::Error::new(io::ErrorKind::NotFound, "directory is missing"),
             })
+    }
+
+    /// Freshly opens a logical directory and proves that it still has the
+    /// exact identity and mode recorded by the transaction journal.
+    pub(crate) fn reopen_exact_directory(
+        &self,
+        logical_path: &str,
+        expected_identity: (u64, u64),
+        expected_mode: PreservedFileMode,
+    ) -> Result<Dir, CodegenError> {
+        self.revalidate_project_root_identity()?;
+        let directory = if logical_path.is_empty() {
+            self.open_pinned_project_root()?
+        } else {
+            self.open_directory(logical_path)?
+        };
+        let metadata = directory
+            .dir_metadata()
+            .map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
+        ensure_directory_metadata(logical_path, &metadata)?;
+
+        let actual_identity = metadata_identity(&metadata);
+        if actual_identity != expected_identity {
+            return Err(CodegenError::PreimageConflict {
+                path: logical_path.to_owned(),
+                reason: format!(
+                    "controlled directory identity changed before mutation: expected {expected_identity:?}, found {actual_identity:?}"
+                ),
+            });
+        }
+
+        let actual_mode = preserved_mode(&metadata);
+        if actual_mode != expected_mode {
+            return Err(CodegenError::PreimageConflict {
+                path: logical_path.to_owned(),
+                reason: format!(
+                    "controlled directory mode changed before mutation: expected {expected_mode:?}, found {actual_mode:?}"
+                ),
+            });
+        }
+
+        Ok(directory)
     }
 
     pub(crate) fn open_auxiliary_file(
@@ -1054,6 +1099,16 @@ fn validate_relative_path(path: &str) -> Result<(), CodegenError> {
 }
 
 fn validate_controlled_relative_path(path: &str) -> Result<(), CodegenError> {
+    const TRANSACTION_NAMESPACE: &str = "src/components/ui/_kit/.transactions";
+    if path == TRANSACTION_NAMESPACE {
+        validate_relative_path("src/components/ui/_kit")?;
+        return Ok(());
+    }
+    if let Some(child) = path.strip_prefix("src/components/ui/_kit/.transactions/") {
+        validate_relative_path("src/components/ui/_kit")?;
+        validate_relative_path(child)?;
+        return Ok(());
+    }
     if !matches!(
         path,
         DEFAULT_KIT_WRITE_LOCK_PATH | DEFAULT_KIT_COORDINATION_IGNORE_PATH
@@ -1171,4 +1226,87 @@ fn is_allowed_write_path(path: &str) -> bool {
 
 fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlanningContext, metadata_identity, preserved_mode};
+
+    #[test]
+    fn reopen_exact_directory_returns_a_fresh_matching_capability() {
+        let temporary = tempfile::tempdir().expect("temporary project root");
+        std::fs::create_dir(temporary.path().join("styles")).expect("create styles directory");
+        let context = PlanningContext::open(temporary.path()).expect("open planning context");
+        let original = context
+            .open_directory("styles")
+            .expect("open original directory");
+        let metadata = original.dir_metadata().expect("observe original directory");
+        let expected_identity = metadata_identity(&metadata);
+        let expected_mode = preserved_mode(&metadata);
+
+        let rebound = context
+            .reopen_exact_directory("styles", expected_identity, expected_mode)
+            .expect("reopen exact directory");
+        let rebound_metadata = rebound.dir_metadata().expect("observe rebound directory");
+
+        assert_eq!(metadata_identity(&rebound_metadata), expected_identity);
+        assert_eq!(preserved_mode(&rebound_metadata), expected_mode);
+    }
+
+    #[test]
+    fn reopen_exact_directory_rejects_a_substituted_parent() {
+        let temporary = tempfile::tempdir().expect("temporary project root");
+        let styles = temporary.path().join("styles");
+        let moved_styles = temporary.path().join("styles-original");
+        std::fs::create_dir(&styles).expect("create styles directory");
+        let context = PlanningContext::open(temporary.path()).expect("open planning context");
+        let original = context
+            .open_directory("styles")
+            .expect("open original directory");
+        let metadata = original.dir_metadata().expect("observe original directory");
+        let expected_identity = metadata_identity(&metadata);
+        let expected_mode = preserved_mode(&metadata);
+        drop(original);
+
+        std::fs::rename(&styles, &moved_styles).expect("detach original directory");
+        std::fs::create_dir(&styles).expect("substitute directory");
+
+        let error = context
+            .reopen_exact_directory("styles", expected_identity, expected_mode)
+            .expect_err("substituted directory must be rejected");
+        assert!(matches!(
+            error,
+            crate::CodegenError::PreimageConflict { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopen_exact_directory_rejects_a_mode_change() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary project root");
+        let styles = temporary.path().join("styles");
+        std::fs::create_dir(&styles).expect("create styles directory");
+        let context = PlanningContext::open(temporary.path()).expect("open planning context");
+        let original = context
+            .open_directory("styles")
+            .expect("open original directory");
+        let metadata = original.dir_metadata().expect("observe original directory");
+        let expected_identity = metadata_identity(&metadata);
+        let expected_mode = preserved_mode(&metadata);
+        drop(original);
+
+        let changed_mode = expected_mode.posix_mode.expect("Unix mode") ^ 0o100;
+        std::fs::set_permissions(&styles, std::fs::Permissions::from_mode(changed_mode))
+            .expect("change directory mode");
+
+        let error = context
+            .reopen_exact_directory("styles", expected_identity, expected_mode)
+            .expect_err("mode change must be rejected");
+        assert!(matches!(
+            error,
+            crate::CodegenError::PreimageConflict { .. }
+        ));
+    }
 }

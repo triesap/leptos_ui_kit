@@ -607,6 +607,112 @@ fn sync_write_is_idempotent_when_declared_button_is_current() {
 }
 
 #[test]
+fn init_add_and_sync_republish_an_unchanged_lock_with_every_nonempty_cohort() {
+    let init_dir = tempfile::tempdir().expect("init tempdir");
+    let init_root = init_dir.path();
+    materialize_initialized_project(init_root);
+    let init_lock = fs::read_to_string(init_root.join(DEFAULT_KIT_LOCK_PATH)).expect("init lock");
+    fs::remove_file(init_root.join("src/components/mod.rs")).expect("remove init target");
+
+    let init = plan_init(init_root).expect("plan repairing init");
+
+    assert_exact_unchanged_install_lock_publication(&init.files, &init.changes, &init_lock);
+
+    let sync_dir = tempfile::tempdir().expect("sync tempdir");
+    let sync_root = sync_dir.path();
+    materialize_initialized_project(sync_root);
+    let sync_lock = fs::read_to_string(sync_root.join(DEFAULT_KIT_LOCK_PATH)).expect("sync lock");
+    fs::remove_file(sync_root.join("src/components/mod.rs")).expect("remove sync target");
+
+    let sync = plan_sync(sync_root).expect("plan repairing sync");
+
+    assert_exact_unchanged_install_lock_publication(&sync.files, &sync.changes, &sync_lock);
+
+    let add_dir = tempfile::tempdir().expect("add tempdir");
+    let add_root = add_dir.path();
+    materialize_initialized_project(add_root);
+    let first_add = plan_add(add_root, "button").expect("plan initial add");
+    materialize_planned_files(add_root, &first_add.files);
+    let add_lock = fs::read_to_string(add_root.join(DEFAULT_KIT_LOCK_PATH)).expect("add lock");
+    fs::remove_file(add_root.join("src/components/mod.rs")).expect("remove add target");
+
+    let add = plan_add(add_root, "button").expect("plan repairing add");
+
+    assert_exact_unchanged_install_lock_publication(&add.files, &add.changes, &add_lock);
+}
+
+#[test]
+fn init_add_and_sync_keep_truly_idempotent_commands_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    materialize_initialized_project(root);
+
+    let init = plan_init(root).expect("plan no-op init");
+    let sync = plan_sync(root).expect("plan no-op sync");
+    assert!(init.files.is_empty());
+    assert!(init.changes.is_empty());
+    assert!(sync.files.is_empty());
+    assert!(sync.changes.is_empty());
+
+    let first_add = plan_add(root, "button").expect("plan initial add");
+    materialize_planned_files(root, &first_add.files);
+    let add = plan_add(root, "button").expect("plan no-op add");
+
+    assert!(add.files.is_empty());
+    assert!(add.changes.is_empty());
+}
+
+#[test]
+fn init_add_and_sync_reject_malformed_and_noncanonical_existing_locks() {
+    #[derive(Clone, Copy)]
+    enum LockPayload {
+        Malformed,
+        Noncanonical,
+    }
+
+    for command in ["init", "add", "sync"] {
+        for payload in [LockPayload::Malformed, LockPayload::Noncanonical] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path();
+            materialize_initialized_project(root);
+            let canonical =
+                fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("canonical lock");
+            let replacement = match payload {
+                LockPayload::Malformed => "{\"schemaVersion\":\n".to_owned(),
+                LockPayload::Noncanonical => {
+                    let lock = parse_install_lock_str(&canonical).expect("parse canonical lock");
+                    serde_json::to_string(&lock).expect("serialize compact lock")
+                }
+            };
+            assert_ne!(replacement, canonical);
+            fs::write(root.join(DEFAULT_KIT_LOCK_PATH), replacement).expect("replace lock");
+
+            let error = match command {
+                "init" => plan_init(root).expect_err("init must reject invalid lock"),
+                "add" => plan_add(root, "button").expect_err("add must reject invalid lock"),
+                "sync" => plan_sync(root).expect_err("sync must reject invalid lock"),
+                _ => unreachable!("complete command matrix"),
+            };
+
+            match payload {
+                LockPayload::Malformed => assert!(
+                    matches!(error, CodegenError::LockParse { .. }),
+                    "{command} returned {error}"
+                ),
+                LockPayload::Noncanonical => assert!(
+                    matches!(
+                        error,
+                        CodegenError::InvalidLock { reason, .. }
+                            if reason.contains("canonical JSON serialization")
+                    ),
+                    "{command} did not reject noncanonical lock bytes"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
 fn pinned_theme_migration_fixtures_match_the_compatibility_authority() {
     assert_eq!(PINNED_BUTTON_CSS.len(), 3_721);
     assert_eq!(PINNED_SPINNER_CSS.len(), 1_121);
@@ -916,6 +1022,70 @@ fn setup_empty_project(root: &Path) {
         "<html><head></head><body></body></html>\n",
     )
     .expect("write index");
+}
+
+fn materialize_initialized_project(root: &Path) {
+    setup_empty_project(root);
+    let init = plan_init(root).expect("plan initial project");
+    materialize_planned_files(root, &init.files);
+}
+
+fn materialize_planned_files(root: &Path, files: &[PlannedFile]) {
+    for file in files {
+        let path = root.join(&file.path);
+        fs::create_dir_all(path.parent().expect("planned parent")).expect("create planned parent");
+        fs::write(path, &file.content).expect("materialize planned file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let coordination_parent = root.join("src/components/ui/_kit");
+        if coordination_parent.is_dir() {
+            fs::set_permissions(&coordination_parent, fs::Permissions::from_mode(0o700))
+                .expect("secure coordination parent");
+        }
+    }
+}
+
+fn assert_exact_unchanged_install_lock_publication(
+    files: &[PlannedFile],
+    changes: &[ChangeRecord],
+    expected_content: &str,
+) {
+    assert!(
+        files.len() > 1,
+        "the command cohort must contain another target"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.path == DEFAULT_KIT_LOCK_PATH)
+            .count(),
+        1
+    );
+    let lock_file = files.last().expect("final planned install lock");
+    assert_eq!(lock_file.path, DEFAULT_KIT_LOCK_PATH);
+    assert_eq!(lock_file.action, PlannedFileAction::Update);
+    assert_eq!(lock_file.content, expected_content);
+    let parsed = parse_install_lock_str(&lock_file.content).expect("parse planned install lock");
+    assert_eq!(
+        lock_to_json(&parsed).expect("canonicalize planned install lock"),
+        lock_file.content
+    );
+
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|change| change.kind == ChangeKind::WriteLockFile)
+            .count(),
+        1
+    );
+    let marker = changes.last().expect("final install-lock marker");
+    assert_eq!(marker.kind, ChangeKind::WriteLockFile);
+    assert_eq!(marker.path, DEFAULT_KIT_LOCK_PATH);
+    assert!(marker.tracked);
+    assert!(marker.item.is_none());
 }
 
 fn write_alternate_tool_provenance(root: &Path, request_button: bool) {
@@ -2368,7 +2538,7 @@ fn first_use_publishes_only_an_initialized_and_locked_inode() {
         "Windows candidate guard must exist before its owner and be consumed only after publication: {operations:?}"
     );
     assert_exact_persistent_coordination(root);
-    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert!(root.join("src/components/ui/_kit/.transactions").is_dir());
     drop(lock);
 }
 
@@ -2614,7 +2784,7 @@ fn stale_cleanup_removes_every_duplicate_hard_link_alias_before_success() {
     drop(recovered);
 
     assert!(transaction_candidate_paths(root).is_empty());
-    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert!(root.join("src/components/ui/_kit/.transactions").is_dir());
     assert_only_verified_coordination_residuals(root);
     assert_exact_persistent_coordination(root);
 }
@@ -2656,9 +2826,9 @@ fn stale_cleanup_rescans_and_removes_a_candidate_that_arrives_during_cleanup() {
     assert_eq!(coordination_lock_identity(&project), lock_identity);
     assert!(transaction_candidate_paths(&project).is_empty());
     assert!(
-        !project
+        project
             .join("src/components/ui/_kit/.transactions")
-            .exists()
+            .is_dir()
     );
     assert_only_verified_coordination_residuals(&project);
     assert_exact_persistent_coordination(&project);
@@ -2681,7 +2851,7 @@ fn stale_cleanup_recovers_owner_restrictive_modes_but_rejects_external_aliases()
             .unwrap_or_else(|error| panic!("recover mode {mode:04o} candidate: {error}"));
         assert_eq!(coordination_lock_identity(root), lock_identity);
         drop(recovered);
-        assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+        assert!(root.join("src/components/ui/_kit/.transactions").is_dir());
         assert_only_verified_coordination_residuals(root);
         assert_exact_persistent_coordination(root);
     }
@@ -2756,7 +2926,7 @@ fn persistent_stale_candidate_removal_failure_surfaces_then_recovers() {
     let recovered = WriteLock::acquire(root).expect("next writer recovers stale candidate");
     assert_eq!(coordination_lock_identity(root), lock_identity);
     drop(recovered);
-    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert!(root.join("src/components/ui/_kit/.transactions").is_dir());
     assert_only_verified_coordination_residuals(root);
     assert_exact_persistent_coordination(root);
 }
@@ -3682,12 +3852,7 @@ fn whole_cohort_preimage_conflict_aborts_before_target_writes() {
     assert!(
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "index.html")
     );
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| { event.operation == FsOperation::Rename })
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
     assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
 }
 
@@ -3723,12 +3888,7 @@ fn malformed_cohort_missing_a_later_preimage_aborts_before_target_transaction_io
     assert!(
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/second.css")
     );
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| { event.operation == FsOperation::Rename })
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("first target"),
         b"first-before\n"
@@ -3785,10 +3945,7 @@ fn exact_preimages_conflict_on_same_length_change_deletion_and_appearance() {
             "{case}: {error}"
         );
         assert!(
-            !fault_fs
-                .events()
-                .iter()
-                .any(|event| { event.operation == FsOperation::Rename }),
+            !fault_fs.events().iter().any(is_target_replacement_event),
             "{case}"
         );
     }
@@ -3825,12 +3982,7 @@ fn target_swap_after_cohort_validation_is_caught_before_rename() {
         matches!(error, CodegenError::PreimageConflict { ref path, .. } if path == "styles/kit.css")
     );
     assert_eq!(fs::read(&target).expect("read raced target"), b"raced\n");
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| event.operation == FsOperation::Rename)
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
 }
 
 #[test]
@@ -3884,10 +4036,7 @@ fn target_changes_after_final_revalidation_are_caught_before_rename() {
             "{case}"
         );
         assert!(
-            !fault_fs
-                .events()
-                .iter()
-                .any(|event| event.operation == FsOperation::Rename),
+            !fault_fs.events().iter().any(is_target_replacement_event),
             "{case}"
         );
     }
@@ -3932,12 +4081,7 @@ fn parent_swap_after_cohort_validation_is_caught_before_rename() {
         fs::read(outside_target).expect("outside target"),
         b"outside\n"
     );
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| event.operation == FsOperation::Rename)
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
 }
 
 #[cfg(unix)]
@@ -3982,12 +4126,7 @@ fn parent_swap_after_final_revalidation_is_caught_before_rename() {
         fs::read(outside_target).expect("outside target"),
         b"outside\n"
     );
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| event.operation == FsOperation::Rename)
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
 }
 
 #[cfg(unix)]
@@ -4031,16 +4170,11 @@ fn newly_created_parent_identity_is_bound_through_commit() {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-v2-"))
         })
         .collect::<Vec<_>>();
     assert!(staged_paths.is_empty(), "rollback removes detached stages");
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| event.operation == FsOperation::Rename)
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
 }
 
 #[cfg(unix)]
@@ -4073,12 +4207,7 @@ fn mode_only_preimage_change_conflicts_before_target_writes() {
             .expect_err("mode-only change must conflict");
 
     assert!(matches!(error, CodegenError::PreimageConflict { .. }));
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| { event.operation == FsOperation::Rename })
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
 }
 
 #[cfg(unix)]
@@ -4115,12 +4244,7 @@ fn retargeted_project_alias_conflicts_after_coordination_but_before_target_io() 
             .expect_err("retargeted root must conflict");
 
     assert!(matches!(error, CodegenError::ProjectRootChanged { .. }));
-    assert!(
-        !fault_fs
-            .events()
-            .iter()
-            .any(|event| { event.operation == FsOperation::Rename })
-    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
     assert_eq!(
         fs::read(second.join("styles/kit.css")).expect("second target"),
         b"second\n"
@@ -4129,15 +4253,112 @@ fn retargeted_project_alias_conflicts_after_coordination_but_before_target_io() 
 }
 
 #[test]
+fn advisory_lock_substitution_at_mutation_rebind_blocks_before_target_change() {
+    let directory = tempfile::tempdir().expect("lock-rebind tempdir");
+    let root = directory.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    fs::write(root.join("styles/kit.css"), b"before\n").expect("seed target");
+    bootstrap_transaction_coordination(root);
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture target");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "after\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let lock_path = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
+    let moved_lock = root.join("src/components/ui/_kit/.write.lock-acquired-inode");
+    let fault_fs = Arc::new(FaultFs::substitute_file_before_child_mutation(
+        root.join("styles"),
+        lock_path.clone(),
+        moved_lock.clone(),
+        KIT_ADVISORY_LOCK_CONTENT.to_vec(),
+    ));
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("substituted advisory lock must revoke mutation authority");
+
+    assert!(matches!(
+        error,
+        CodegenError::UnsafePath { .. }
+            | CodegenError::InvalidCoordinationState { .. }
+            | CodegenError::RecoveryRequired { .. }
+    ));
+    assert_eq!(
+        fs::read(root.join("styles/kit.css")).expect("unchanged target"),
+        b"before\n"
+    );
+    assert!(lock_path.exists(), "substitute remains visible as evidence");
+    assert!(
+        moved_lock.exists(),
+        "held inode remains preserved as evidence"
+    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
+}
+
+#[cfg(unix)]
+#[test]
+fn target_parent_substitution_at_mutation_rebind_blocks_before_target_change() {
+    let directory = tempfile::tempdir().expect("parent-rebind tempdir");
+    let root = directory.path();
+    let parent = root.join("styles");
+    let moved_parent = root.join("styles-planned-inode");
+    fs::create_dir(&parent).expect("styles");
+    fs::write(parent.join("kit.css"), b"before\n").expect("seed target");
+    bootstrap_transaction_coordination(root);
+    let snapshot = capture_plan_snapshot(root, ["styles/kit.css"]).expect("capture target");
+    let files = vec![PlannedFile {
+        path: "styles/kit.css".to_owned(),
+        action: PlannedFileAction::Update,
+        content: "after\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::UpdateFile,
+        "styles/kit.css",
+        true,
+    )];
+    let fault_fs = Arc::new(
+        FaultFs::replace_parent_with_directory_before_child_mutation(
+            parent.clone(),
+            moved_parent.clone(),
+        ),
+    );
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("substituted target parent must revoke mutation authority");
+
+    assert!(matches!(
+        error,
+        CodegenError::PreimageConflict { .. }
+            | CodegenError::UnsafePath { .. }
+            | CodegenError::RecoveryRequired { .. }
+    ));
+    assert!(!parent.join("kit.css").exists());
+    assert_eq!(
+        fs::read(moved_parent.join("kit.css")).expect("detached original target"),
+        b"before\n"
+    );
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
+}
+
+#[test]
 fn transaction_stages_the_complete_sorted_cohort_and_commits_the_install_lock_last() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
+    bootstrap_transaction_coordination(root);
+    let install_lock = test_install_lock_json();
     let files = vec![
         PlannedFile {
             path: DEFAULT_KIT_LOCK_PATH.to_owned(),
             action: PlannedFileAction::Create,
-            content: "lock\n".to_owned(),
+            content: install_lock,
         },
         PlannedFile {
             path: "styles/first.css".to_owned(),
@@ -4163,45 +4384,48 @@ fn transaction_stages_the_complete_sorted_cohort_and_commits_the_install_lock_la
     let last_stage = events
         .iter()
         .rposition(|event| {
-            event.operation == FsOperation::CreateNewFile
-                && event
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+            matches!(
+                event.operation,
+                FsOperation::PrepareStage { after: true, .. }
+            )
         })
         .expect("complete cohort staging");
-    let first_rename = events
+    let first_replacement = events
         .iter()
-        .position(|event| event.operation == FsOperation::Rename)
-        .expect("first commit rename");
-    assert!(last_stage < first_rename);
-    let renames = events
-        .into_iter()
-        .filter(|event| event.operation == FsOperation::Rename)
-        .collect::<Vec<FsEvent>>();
-    assert_eq!(renames.len(), 3);
+        .position(|event| {
+            matches!(
+                event.operation,
+                FsOperation::ReplaceTarget { after: false, .. }
+            )
+        })
+        .expect("first target replacement");
+    assert!(last_stage < first_replacement);
+    let replacements = events
+        .iter()
+        .filter_map(|event| match event.operation {
+            FsOperation::ReplaceTarget {
+                ordinal,
+                after: true,
+            } => Some(ordinal),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replacements, vec![0, 1, 2]);
     assert_eq!(
-        renames[0].destination.as_deref(),
-        Some(root.join("styles/first.css").as_path())
-    );
-    assert_eq!(
-        renames[1].destination.as_deref(),
-        Some(root.join("styles/second.css").as_path())
-    );
-    assert_eq!(
-        renames[2].destination.as_deref(),
-        Some(root.join(DEFAULT_KIT_LOCK_PATH).as_path())
+        fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("installed lock"),
+        test_install_lock_json()
     );
 }
 
 #[test]
-fn atomic_write_ignores_a_predictable_legacy_temporary_path() {
+fn atomic_write_preserves_precreated_predictable_legacy_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
-    let predictable = root.join("styles/kit.leptos-ui-kit.tmp");
-    fs::write(&predictable, b"preexisting\n").expect("seed predictable path");
+    let predictable_stage = root.join("styles/kit.leptos-ui-kit.tmp");
+    let predictable_backup = root.join("styles/kit.leptos-ui-kit.bak");
+    fs::write(&predictable_stage, b"preexisting stage\n").expect("seed predictable stage path");
+    fs::write(&predictable_backup, b"preexisting backup\n").expect("seed predictable backup path");
 
     write_file_atomic(root, "styles/kit.css", b"replacement\n").expect("atomic write");
 
@@ -4210,8 +4434,12 @@ fn atomic_write_ignores_a_predictable_legacy_temporary_path() {
         b"replacement\n"
     );
     assert_eq!(
-        fs::read(predictable).expect("legacy temporary remains application-owned"),
-        b"preexisting\n"
+        fs::read(predictable_stage).expect("legacy stage remains application-owned"),
+        b"preexisting stage\n"
+    );
+    assert_eq!(
+        fs::read(predictable_backup).expect("legacy backup remains application-owned"),
+        b"preexisting backup\n"
     );
 }
 
@@ -4237,6 +4465,7 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
     fs::create_dir_all(root.join("styles")).expect("styles");
     fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
     fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    bootstrap_transaction_coordination(root);
     let files = vec![
         PlannedFile {
             path: "styles/second.css".to_owned(),
@@ -4248,10 +4477,16 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
             action: PlannedFileAction::Update,
             content: "first-after\n".to_owned(),
         },
+        PlannedFile {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            action: PlannedFileAction::Create,
+            content: test_install_lock_json(),
+        },
     ];
     let changes = vec![
         ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
         ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
+        ChangeRecord::new(ChangeKind::WriteLockFile, DEFAULT_KIT_LOCK_PATH, true),
     ];
     let fault_fs = Arc::new(FaultFs::passthrough());
 
@@ -4260,17 +4495,23 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
     let events = fault_fs.events();
     let last_backup = events
         .iter()
-        .rposition(|event| event.operation == FsOperation::HardLink)
-        .expect("backup hard links");
-    let first_rename = events
+        .rposition(|event| {
+            matches!(
+                event.operation,
+                FsOperation::PrepareBackup { after: true, .. }
+            )
+        })
+        .expect("independent backups");
+    let first_replacement = events
         .iter()
-        .position(|event| event.operation == FsOperation::Rename)
-        .expect("first rename");
-    assert!(last_backup < first_rename);
-    assert_eq!(
-        events[first_rename].destination.as_deref(),
-        Some(root.join("styles/first.css").as_path())
-    );
+        .position(|event| {
+            matches!(
+                event.operation,
+                FsOperation::ReplaceTarget { after: false, .. }
+            )
+        })
+        .expect("first target replacement");
+    assert!(last_backup < first_replacement);
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("first result"),
         b"first-after\n"
@@ -4288,18 +4529,19 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
                     .file_name()
                     .to_str()
                     .is_some_and(|name| {
-                        name.starts_with(".leptos-ui-kit-stage-")
-                            || name.starts_with(".leptos-ui-kit-backup-")
+                        name.starts_with(".leptos-ui-kit-stage-v2-")
+                            || name.starts_with(".leptos-ui-kit-backup-v2-")
                     })
             })
     );
 }
 
 #[test]
-fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state() {
+fn middle_no_clobber_publication_failure_rolls_back_the_complete_cohort() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("styles")).expect("styles");
+    bootstrap_transaction_coordination(root);
     let files = vec![
         PlannedFile {
             path: "styles/first.css".to_owned(),
@@ -4311,20 +4553,26 @@ fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state()
             action: PlannedFileAction::Create,
             content: "second\n".to_owned(),
         },
+        PlannedFile {
+            path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+            action: PlannedFileAction::Create,
+            content: test_install_lock_json(),
+        },
     ];
     let changes = vec![
         ChangeRecord::new(ChangeKind::CreateFile, "styles/first.css", true),
         ChangeRecord::new(ChangeKind::CreateFile, "styles/second.css", true),
+        ChangeRecord::new(ChangeKind::WriteLockFile, DEFAULT_KIT_LOCK_PATH, true),
     ];
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::Rename, 2));
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::PublishAbsent, 2));
 
     let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("second rename must fail");
+        .expect_err("second expected-absent publication must fail");
 
     assert!(matches!(
         error,
         CodegenError::FilesystemOperation {
-            operation: "replace target",
+            operation: "publish absent target",
             ..
         }
     ));
@@ -4336,243 +4584,37 @@ fn rename_failure_rolls_back_the_complete_cohort_and_removes_transaction_state()
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-"))
+                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-v2-"))
         })
         .collect::<Vec<_>>();
     assert!(stages.is_empty());
-    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
+    assert!(transaction_workspace_paths(root).is_empty());
     assert_exact_persistent_coordination(root);
 }
 
 #[test]
-fn failed_rollback_retains_a_strict_recovery_required_journal() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    fs::create_dir_all(root.join("styles")).expect("styles");
-    fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
-    fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
-    let files = vec![
-        PlannedFile {
-            path: "styles/first.css".to_owned(),
-            action: PlannedFileAction::Update,
-            content: "first-after\n".to_owned(),
-        },
-        PlannedFile {
-            path: "styles/second.css".to_owned(),
-            action: PlannedFileAction::Update,
-            content: "second-after\n".to_owned(),
-        },
-    ];
-    let changes = vec![
-        ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
-        ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
-    ];
-    let fault_fs = Arc::new(FaultFs::fail_from(FsOperation::Rename, 2));
-
-    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("commit and rollback renames must fail persistently");
-
-    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
-    assert_eq!(
-        fs::read(root.join("styles/first.css")).expect("first target"),
-        b"first-after\n"
-    );
-    assert_eq!(
-        fs::read(root.join("styles/second.css")).expect("second target"),
-        b"second-before\n"
-    );
-    let transactions = root.join("src/components/ui/_kit/.transactions");
-    let journals = fs::read_dir(&transactions)
-        .expect("recovery directory")
-        .map(|entry| entry.expect("journal entry").path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(journals.len(), 1);
-    let value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&journals[0]).expect("read journal"))
-            .expect("strict valid journal JSON");
-    assert_eq!(
-        value.get("version").and_then(|value| value.as_u64()),
-        Some(1)
-    );
-    assert_eq!(
-        value
-            .pointer("/state/kind")
-            .and_then(|value| value.as_str()),
-        Some("rollingBack")
-    );
-    assert_eq!(
-        value
-            .get("entries")
-            .and_then(|value| value.as_array())
-            .map(Vec::len),
-        Some(2)
-    );
-    let recovered =
-        recover_pending_for_test(root).expect("next writer recovers durable transaction");
-    drop(recovered);
-    assert_eq!(
-        fs::read(root.join("styles/first.css")).expect("recovered first target"),
-        b"first-before\n"
-    );
-    assert_eq!(
-        fs::read(root.join("styles/second.css")).expect("recovered second target"),
-        b"second-before\n"
-    );
-    assert!(!transactions.exists());
-    assert_exact_persistent_coordination(root);
-}
-
-#[test]
-fn rollback_removes_every_transaction_created_target_directory() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    let files = vec![
-        PlannedFile {
-            path: "src/components/ui/generated/first.rs".to_owned(),
-            action: PlannedFileAction::Create,
-            content: "pub struct First;\n".to_owned(),
-        },
-        PlannedFile {
-            path: "src/components/ui/generated/nested/second.rs".to_owned(),
-            action: PlannedFileAction::Create,
-            content: "pub struct Second;\n".to_owned(),
-        },
-    ];
-    let changes = vec![
-        ChangeRecord::new(
-            ChangeKind::CreateFile,
-            "src/components/ui/generated/first.rs",
-            true,
-        ),
-        ChangeRecord::new(
-            ChangeKind::CreateFile,
-            "src/components/ui/generated/nested/second.rs",
-            true,
-        ),
-    ];
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::Rename, 2));
-
-    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("second commit rename fails");
-
-    assert!(matches!(
-        error,
-        CodegenError::FilesystemOperation {
-            operation: "replace target",
-            ..
-        }
-    ));
-    assert!(!root.join("src/components/ui/generated").exists());
-    assert!(!root.join("src/components/ui/_kit/.transactions").exists());
-    assert_exact_persistent_coordination(root);
-}
-
-#[test]
-fn third_state_application_edits_block_recovery_without_mutating_evidence() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    let journal = seed_failed_rollback_journal(root);
-    fs::write(root.join("styles/first.css"), b"application edit\n").expect("write third state");
+fn legacy_v1_journal_evidence_is_preserved_and_fails_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path();
+    setup_empty_project(root);
+    let namespace = root.join("src/components/ui/_kit/.transactions");
+    fs::create_dir_all(&namespace).expect("create legacy journal namespace");
+    let evidence = namespace.join("transaction-deadbeef.json");
+    let bytes = br#"{"version":1,"state":{"kind":"prepared"}}\n"#;
+    fs::write(&evidence, bytes).expect("seed legacy journal evidence");
     let before = snapshot_project_files(root);
 
-    let error = recover_pending_for_test(root).expect_err("third state blocks recovery");
+    let error = plan_init(root).expect_err("journal-v1 evidence must fail closed");
 
-    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
-    assert_eq!(snapshot_project_files(root), before);
-    assert_eq!(
-        fs::read(root.join("styles/first.css")).expect("third-state target"),
-        b"application edit\n"
-    );
-    assert!(journal.exists());
-}
-
-#[test]
-fn invalid_wrong_project_and_unsupported_journals_block_without_mutation() {
-    for case in ["corrupt", "wrong-project", "unsupported", "unknown-field"] {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path();
-        let journal = seed_failed_rollback_journal(root);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&journal).expect("read journal"))
-                .expect("parse seeded journal");
-        match case {
-            "corrupt" => fs::write(&journal, b"not json\n").expect("corrupt journal"),
-            "wrong-project" => {
-                let device = value
-                    .pointer_mut("/project/device")
-                    .expect("project device");
-                *device =
-                    serde_json::Value::from(device.as_u64().expect("numeric project device") + 1);
-                fs::write(
-                    &journal,
-                    serde_json::to_vec_pretty(&value).expect("serialize wrong project"),
-                )
-                .expect("write wrong project");
-            }
-            "unsupported" => {
-                value["version"] = serde_json::Value::from(2);
-                fs::write(
-                    &journal,
-                    serde_json::to_vec_pretty(&value).expect("serialize version"),
-                )
-                .expect("write version");
-            }
-            "unknown-field" => {
-                value["unexpected"] = serde_json::Value::Bool(true);
-                fs::write(
-                    &journal,
-                    serde_json::to_vec_pretty(&value).expect("serialize unknown field"),
-                )
-                .expect("write unknown field");
-            }
-            _ => unreachable!("known invalid-journal case"),
-        }
-        let before = snapshot_project_files(root);
-
-        let error = recover_pending_for_test(root).expect_err(case);
-
-        assert!(matches!(
+    assert!(
+        matches!(
             error,
-            CodegenError::InvalidCoordinationState { .. }
-        ));
-        assert_eq!(snapshot_project_files(root), before, "{case}");
-    }
-}
-
-#[test]
-fn dry_run_reports_pending_recovery_without_mutating_the_project() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    seed_failed_rollback_journal(root);
-    let before = snapshot_project_files(root);
-
-    let error = plan_init(root).expect_err("dry run reports pending recovery");
-
-    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
+            CodegenError::RecoveryRequired { .. } | CodegenError::InvalidCoordinationState { .. }
+        ),
+        "unexpected legacy-journal diagnostic: {error}"
+    );
     assert_eq!(snapshot_project_files(root), before);
-}
-
-fn seed_failed_rollback_journal(root: &Path) -> PathBuf {
-    let (files, changes) = setup_two_file_update(root);
-    let fault_fs = Arc::new(FaultFs::fail_from(FsOperation::Rename, 2));
-    let error = apply_planned_files_with(root, &files, &changes, fault_fs)
-        .expect_err("seed failed rollback");
-    assert!(matches!(error, CodegenError::RecoveryRequired { .. }));
-    let journals = transaction_journal_paths(root);
-    assert_eq!(journals.len(), 1);
-    journals.into_iter().next().expect("journal path")
-}
-
-fn recover_pending_for_test(root: &Path) -> Result<WriteLock, CodegenError> {
-    let context = PlanningContext::open(root)?;
-    let lock = WriteLock::acquire_with_context(&context)?;
-    recover_pending_locked(&context, &lock)?;
-    Ok(lock)
+    assert_eq!(fs::read(evidence).expect("read preserved evidence"), bytes);
 }
 
 #[test]
@@ -4583,17 +4625,19 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
     apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
         .expect("baseline transaction");
     let operations = [
-        FsOperation::CreateDirectory,
+        FsOperation::CreateDirectoryExact,
         FsOperation::CreateNewFile,
+        FsOperation::CreateExclusiveCopy,
         FsOperation::WriteHandle,
         FsOperation::SetFileMode,
         FsOperation::SyncHandle,
         FsOperation::SyncDirectory,
-        FsOperation::HardLink,
-        FsOperation::RenameJournal,
-        FsOperation::Rename,
-        FsOperation::RemoveFile,
-        FsOperation::RemoveDirectory,
+        FsOperation::SyncTargetParent,
+        FsOperation::SyncJournalParent,
+        FsOperation::PublishAbsent,
+        FsOperation::ReplaceExisting,
+        FsOperation::RemoveFileExact,
+        FsOperation::RemoveDirectoryExact,
     ];
 
     for operation in operations {
@@ -4608,17 +4652,16 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
             let (files, changes) = setup_two_file_update(root);
             let fault_fs = Arc::new(FaultFs::fail_nth(operation, ordinal));
 
-            let result = apply_planned_files_with(root, &files, &changes, fault_fs);
+            let result = apply_planned_files_with(root, &files, &changes, fault_fs.clone());
 
-            let first = fs::read(root.join("styles/first.css")).expect("first target");
-            let second = fs::read(root.join("styles/second.css")).expect("second target");
-            let exact_before = first == b"first-before\n" && second == b"second-before\n";
-            let exact_after = first == b"first-after\n" && second == b"second-after\n";
-            assert!(
-                exact_before || exact_after,
-                "partial state after {operation:?} fault {ordinal}: {result:?}"
-            );
-            if exact_before {
+            let commit_complete = fault_fs.events().iter().any(|event| {
+                matches!(
+                    event.operation,
+                    FsOperation::CommitBoundary { after: true, .. }
+                )
+            });
+            assert_two_file_cohort_state(root, commit_complete);
+            if !commit_complete {
                 assert!(result.is_err(), "rolled-back fault must surface");
             }
             for journal in transaction_journal_paths(root) {
@@ -4635,10 +4678,188 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
 }
 
 #[test]
+fn post_open_create_errors_recover_exact_empty_journal_and_finalization_residuals() {
+    #[derive(Clone, Copy)]
+    enum Injection {
+        IdentityAcquisition,
+        PostSuccess,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Preparation {
+        Journal,
+        Finalization,
+    }
+
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let (files, changes) = setup_two_file_update(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
+        .expect("baseline transaction");
+    let baseline_events = baseline_fs.events();
+    let preparation_path_matches = |path: &Path, preparation: Preparation| {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        match preparation {
+            Preparation::Journal => {
+                name.starts_with("transaction-v2-") && name.ends_with(".json.partial")
+            }
+            Preparation::Finalization => {
+                name.starts_with("finalization-v2-") && name.ends_with(".json.partial")
+            }
+        }
+    };
+
+    for preparation in [Preparation::Journal, Preparation::Finalization] {
+        for injection in [Injection::IdentityAcquisition, Injection::PostSuccess] {
+            let operation = match injection {
+                Injection::IdentityAcquisition => FsOperation::AcquireCreatedFileIdentity,
+                Injection::PostSuccess => FsOperation::CreateNewFile,
+            };
+            let ordinal = baseline_events
+                .iter()
+                .filter(|event| event.operation == operation)
+                .position(|event| preparation_path_matches(&event.path, preparation))
+                .map(|index| index + 1)
+                .expect("baseline contains the selected preparation create");
+            let directory = tempfile::tempdir().expect("fault tempdir");
+            let root = directory.path();
+            let (files, changes) = setup_two_file_update(root);
+            let fault_fs = Arc::new(match injection {
+                Injection::IdentityAcquisition => FaultFs::fail_nth(operation, ordinal),
+                Injection::PostSuccess => FaultFs::fail_after_success_nth(operation, ordinal),
+            });
+
+            let error = apply_planned_files_with(root, &files, &changes, fault_fs.clone())
+                .expect_err("post-open create uncertainty must surface");
+            assert!(
+                matches!(error, CodegenError::RecoveryRequired { .. }),
+                "typed post-open create failure returned {error}"
+            );
+            let events = fault_fs.events();
+            let residual = events
+                .iter()
+                .filter(|event| event.operation == operation)
+                .nth(ordinal - 1)
+                .expect("selected create event")
+                .path
+                .clone();
+            assert!(
+                preparation_path_matches(&residual, preparation),
+                "selected residual path was {}",
+                residual.display()
+            );
+            assert_eq!(
+                fs::read(&residual).expect("read exact created residual"),
+                b"",
+                "post-open failure must leave the exact empty created object"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| match (preparation, event.operation) {
+                        (
+                            Preparation::Journal,
+                            FsOperation::PrepareJournalPartial { after: true, .. },
+                        )
+                        | (
+                            Preparation::Finalization,
+                            FsOperation::PrepareFinalizationPartial { after: true, .. },
+                        ) => true,
+                        _ => false,
+                    }),
+                "a failed preparation emitted a truthful-success transition"
+            );
+
+            apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+                .unwrap_or_else(|recovery| {
+                    panic!(
+                        "recover exact empty {} residual after {operation:?} {ordinal}: {recovery}",
+                        residual.display()
+                    )
+                });
+            assert_two_file_cohort_state(root, matches!(preparation, Preparation::Finalization));
+            assert!(transaction_workspace_paths(root).is_empty());
+        }
+    }
+}
+
+#[test]
+fn semantic_crashes_recover_to_the_side_selected_by_commit_complete() {
+    let baseline = tempfile::tempdir().expect("semantic baseline tempdir");
+    let (baseline_files, baseline_changes) = setup_two_file_update(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(
+        baseline.path(),
+        &baseline_files,
+        &baseline_changes,
+        baseline_fs.clone(),
+    )
+    .expect("semantic baseline transaction");
+    let commit_complete = baseline_fs
+        .events()
+        .into_iter()
+        .find_map(|event| match event.operation {
+            operation @ FsOperation::CommitBoundary { after: true, .. } => Some(operation),
+            _ => None,
+        })
+        .expect("durable CommitComplete transition");
+
+    for (transition, expect_desired) in [
+        (
+            FsOperation::PrepareStage {
+                ordinal: 0,
+                after: false,
+            },
+            false,
+        ),
+        (commit_complete, true),
+    ] {
+        let directory = tempfile::tempdir().expect("semantic crash tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update(root);
+        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+        let crash = std::panic::catch_unwind(|| {
+            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+        });
+        assert!(crash.is_err(), "{transition:?} did not terminate execution");
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
+        assert_two_file_cohort_state(root, expect_desired);
+        assert!(transaction_workspace_paths(root).is_empty());
+    }
+}
+
+#[test]
+fn crash_after_stage_sync_before_progress_publication_is_recoverable() {
+    let directory = tempfile::tempdir().expect("stage-progress crash tempdir");
+    let root = directory.path();
+    let (files, changes) = setup_two_file_update(root);
+    let transition = FsOperation::PrepareStage {
+        ordinal: 0,
+        after: true,
+    };
+    let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+    let crash = std::panic::catch_unwind(|| {
+        let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+    });
+    assert!(crash.is_err(), "stage-sync transition did not crash");
+
+    apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+        .expect("recover a synced predeclared stage");
+    assert_two_file_cohort_state(root, false);
+    assert!(transaction_workspace_paths(root).is_empty());
+}
+
+#[test]
 fn transaction_io_errors_name_the_operation_and_logical_project_path() {
     for (operation, expected_operation) in [
-        (FsOperation::WriteHandle, "write transaction stage"),
-        (FsOperation::Rename, "replace target"),
+        (FsOperation::CreateExclusiveCopy, "create backup"),
+        (FsOperation::ReplaceExisting, "replace target"),
     ] {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path();
@@ -4680,6 +4901,7 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
     fs::create_dir_all(root.join("styles")).expect("styles");
     fs::write(root.join("styles/first.css"), b"first-before\n").expect("seed first");
     fs::write(root.join("styles/second.css"), b"second-before\n").expect("seed second");
+    bootstrap_transaction_coordination(root);
     (
         vec![
             PlannedFile {
@@ -4692,25 +4914,88 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
                 action: PlannedFileAction::Update,
                 content: "second-after\n".to_owned(),
             },
+            PlannedFile {
+                path: DEFAULT_KIT_LOCK_PATH.to_owned(),
+                action: PlannedFileAction::Create,
+                content: test_install_lock_json(),
+            },
         ],
         vec![
             ChangeRecord::new(ChangeKind::UpdateFile, "styles/first.css", true),
             ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
+            ChangeRecord::new(ChangeKind::WriteLockFile, DEFAULT_KIT_LOCK_PATH, true),
         ],
     )
 }
 
-fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
-    let directory = root.join("src/components/ui/_kit/.transactions");
-    let Ok(entries) = fs::read_dir(directory) else {
+fn assert_two_file_cohort_state(root: &Path, desired: bool) {
+    let (first, second) = if desired {
+        (b"first-after\n".as_slice(), b"second-after\n".as_slice())
+    } else {
+        (b"first-before\n".as_slice(), b"second-before\n".as_slice())
+    };
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("first target"),
+        first
+    );
+    assert_eq!(
+        fs::read(root.join("styles/second.css")).expect("second target"),
+        second
+    );
+    if desired {
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("desired install lock"),
+            test_install_lock_json()
+        );
+    } else {
+        assert!(!root.join(DEFAULT_KIT_LOCK_PATH).exists());
+    }
+}
+
+fn bootstrap_transaction_coordination(root: &Path) {
+    let lock = WriteLock::acquire(root).expect("bootstrap transaction coordination");
+    drop(lock);
+}
+
+fn is_target_replacement_event(event: &FsEvent) -> bool {
+    matches!(event.operation, FsOperation::ReplaceTarget { .. })
+}
+
+fn test_install_lock_json() -> String {
+    lock_to_json(&InstallLock::empty(hash_bytes(b"test config")))
+        .expect("serialize test install lock")
+}
+
+fn transaction_workspace_paths(root: &Path) -> Vec<PathBuf> {
+    let kit = root.join("src/components/ui/_kit/.transactions");
+    let Ok(entries) = fs::read_dir(kit) else {
         return Vec::new();
     };
     entries
-        .map(|entry| entry.expect("transaction entry").path())
+        .map(|entry| entry.expect("transaction workspace entry"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("transaction-v2-"))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
+    transaction_workspace_paths(root)
+        .into_iter()
+        .flat_map(|workspace| {
+            fs::read_dir(workspace)
+                .expect("read transaction-v2 workspace")
+                .map(|entry| entry.expect("transaction-v2 record").path())
+        })
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
+                .is_some_and(|name| name.starts_with("transaction-v2-") && name.ends_with(".json"))
         })
         .collect()
 }
@@ -4848,6 +5133,7 @@ fn assert_only_verified_coordination_residuals(root: &Path) {
         "src/components",
         "src/components/ui",
         "src/components/ui/_kit",
+        "src/components/ui/_kit/.transactions",
     ]);
     let allowed_files = BTreeMap::from([
         (DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT),
@@ -4875,7 +5161,10 @@ fn assert_only_verified_coordination_residuals(root: &Path) {
                     "unexpected residual directory {logical_path}"
                 );
                 #[cfg(unix)]
-                if logical_path == "src/components/ui/_kit" {
+                if matches!(
+                    logical_path.as_str(),
+                    "src/components/ui/_kit" | "src/components/ui/_kit/.transactions"
+                ) {
                     use std::os::unix::fs::PermissionsExt;
 
                     assert_eq!(

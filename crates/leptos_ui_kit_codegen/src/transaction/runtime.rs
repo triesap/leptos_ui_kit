@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::panic::{RefUnwindSafe, UnwindSafe};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::fs::{FsOps, SystemFs};
+use super::journal::ValidatedJournalEnvelopeV2;
 
 /// The semantic reason a transaction requests unpredictable bytes.
 ///
@@ -68,6 +70,18 @@ pub(crate) enum JournalRecordKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum FinalizationAdoptionStage {
+    CompleteManifest,
+    IntentRemoved,
+    OwnershipRemoved,
+    PartialRemoved,
+    HistoryRemoving { remaining_records: usize },
+    WorkspaceEmpty,
+    WorkspaceRemoved,
+    RetiredPrefix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RollbackAction {
     RemoveCreatedTarget,
     RestoreBackup,
@@ -75,10 +89,19 @@ pub(crate) enum RollbackAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CleanupObjectKind {
+    OwnedStage,
+    PlacedStage,
+    OwnedBackup,
+    PlacedBackup,
+    CreatedDirectory,
+    OwnedDirectory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum PreparationArtifactKind {
+    Directory,
     Stage,
     Backup,
-    CreatedDirectory,
-    DirectoryCandidate,
 }
 
 /// Stable semantic observation points for the transaction crash-window
@@ -92,6 +115,9 @@ pub(crate) enum TransitionKey {
     PublishWorkspaceOwnership {
         window: TransitionWindow,
     },
+    AdoptBootstrapFinalizationSlot {
+        window: TransitionWindow,
+    },
     PrepareJournalPartial {
         sequence: u64,
         window: TransitionWindow,
@@ -100,19 +126,31 @@ pub(crate) enum TransitionKey {
         sequence: u64,
         window: TransitionWindow,
     },
-    CreateDirectoryCandidate {
+    LinkJournalAlias {
+        sequence: u64,
+        window: TransitionWindow,
+    },
+    AdoptJournalPublication {
+        sequence: u64,
+        window: TransitionWindow,
+    },
+    OwnerPrepared {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
-    PublishDirectoryCandidate {
+    DiscardOwner {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
-    PrepareStage {
+    Placement {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
-    PrepareBackup {
+    CancelPlacement {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
@@ -143,12 +181,37 @@ pub(crate) enum TransitionKey {
         generation: u64,
         window: TransitionWindow,
     },
+    PrepareFinalizationPartial {
+        outcome: TransactionOutcome,
+        generation: u64,
+        window: TransitionWindow,
+    },
+    LinkFinalizationAlias {
+        outcome: TransactionOutcome,
+        generation: u64,
+        window: TransitionWindow,
+    },
+    CertifyFinalizationPartial {
+        outcome: TransactionOutcome,
+        generation: u64,
+        window: TransitionWindow,
+    },
+    AdoptFinalizationStage {
+        outcome: TransactionOutcome,
+        generation: u64,
+        stage: FinalizationAdoptionStage,
+        window: TransitionWindow,
+    },
     PublishFinalizationProgress {
         outcome: TransactionOutcome,
         generation: u64,
         window: TransitionWindow,
     },
-    RemoveWorkspaceOwnership {
+    RemoveWorkspaceBootstrapIntent {
+        outcome: TransactionOutcome,
+        window: TransitionWindow,
+    },
+    RemoveWorkspaceBootstrapOwner {
         outcome: TransactionOutcome,
         window: TransitionWindow,
     },
@@ -163,6 +226,11 @@ pub(crate) enum TransitionKey {
         window: TransitionWindow,
     },
     RemoveFinalizationLease {
+        outcome: TransactionOutcome,
+        generation: u64,
+        window: TransitionWindow,
+    },
+    CleanupFinalizationPartial {
         outcome: TransactionOutcome,
         generation: u64,
         window: TransitionWindow,
@@ -194,6 +262,7 @@ pub(crate) struct TransactionRuntime {
     fs: Arc<dyn FsOps>,
     entropy: Arc<dyn EntropySource>,
     transition_observer: Arc<dyn TransitionObserver>,
+    validated_journal_envelopes: Arc<Mutex<BTreeMap<String, Arc<ValidatedJournalEnvelopeV2>>>>,
 }
 
 impl TransactionRuntime {
@@ -214,6 +283,7 @@ impl TransactionRuntime {
             fs,
             entropy,
             transition_observer,
+            validated_journal_envelopes: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -250,7 +320,32 @@ impl TransactionRuntime {
     }
 
     pub(crate) fn observe(&self, key: TransitionKey) {
+        #[cfg(test)]
+        self.fs.observe_transition(key);
         self.transition_observer.observe(key);
+    }
+
+    pub(super) fn cached_journal_envelope(
+        &self,
+        content_hash: &str,
+    ) -> Option<Arc<ValidatedJournalEnvelopeV2>> {
+        self.validated_journal_envelopes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(content_hash)
+            .cloned()
+    }
+
+    pub(super) fn cache_journal_envelope(
+        &self,
+        content_hash: String,
+        envelope: Arc<ValidatedJournalEnvelopeV2>,
+    ) {
+        self.validated_journal_envelopes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(content_hash)
+            .or_insert(envelope);
     }
 }
 
@@ -762,24 +857,49 @@ mod tests {
             TransitionKey::PublishWorkspaceOwnership { .. } => {
                 TransitionKey::PublishWorkspaceOwnership { window }
             }
+            TransitionKey::AdoptBootstrapFinalizationSlot { .. } => {
+                TransitionKey::AdoptBootstrapFinalizationSlot { window }
+            }
             TransitionKey::PrepareJournalPartial { sequence, .. } => {
                 TransitionKey::PrepareJournalPartial { sequence, window }
             }
             TransitionKey::PublishJournalRecord { sequence, .. } => {
                 TransitionKey::PublishJournalRecord { sequence, window }
             }
-            TransitionKey::CreateDirectoryCandidate { ordinal, .. } => {
-                TransitionKey::CreateDirectoryCandidate { ordinal, window }
+            TransitionKey::LinkJournalAlias { sequence, .. } => {
+                TransitionKey::LinkJournalAlias { sequence, window }
             }
-            TransitionKey::PublishDirectoryCandidate { ordinal, .. } => {
-                TransitionKey::PublishDirectoryCandidate { ordinal, window }
+            TransitionKey::AdoptJournalPublication { sequence, .. } => {
+                TransitionKey::AdoptJournalPublication { sequence, window }
             }
-            TransitionKey::PrepareStage { ordinal, .. } => {
-                TransitionKey::PrepareStage { ordinal, window }
-            }
-            TransitionKey::PrepareBackup { ordinal, .. } => {
-                TransitionKey::PrepareBackup { ordinal, window }
-            }
+            TransitionKey::OwnerPrepared {
+                artifact, ordinal, ..
+            } => TransitionKey::OwnerPrepared {
+                artifact,
+                ordinal,
+                window,
+            },
+            TransitionKey::DiscardOwner {
+                artifact, ordinal, ..
+            } => TransitionKey::DiscardOwner {
+                artifact,
+                ordinal,
+                window,
+            },
+            TransitionKey::Placement {
+                artifact, ordinal, ..
+            } => TransitionKey::Placement {
+                artifact,
+                ordinal,
+                window,
+            },
+            TransitionKey::CancelPlacement {
+                artifact, ordinal, ..
+            } => TransitionKey::CancelPlacement {
+                artifact,
+                ordinal,
+                window,
+            },
             TransitionKey::ReplaceTarget { ordinal, .. } => {
                 TransitionKey::ReplaceTarget { ordinal, window }
             }
@@ -813,6 +933,44 @@ mod tests {
                 generation,
                 window,
             },
+            TransitionKey::PrepareFinalizationPartial {
+                outcome,
+                generation,
+                ..
+            } => TransitionKey::PrepareFinalizationPartial {
+                outcome,
+                generation,
+                window,
+            },
+            TransitionKey::LinkFinalizationAlias {
+                outcome,
+                generation,
+                ..
+            } => TransitionKey::LinkFinalizationAlias {
+                outcome,
+                generation,
+                window,
+            },
+            TransitionKey::CertifyFinalizationPartial {
+                outcome,
+                generation,
+                ..
+            } => TransitionKey::CertifyFinalizationPartial {
+                outcome,
+                generation,
+                window,
+            },
+            TransitionKey::AdoptFinalizationStage {
+                outcome,
+                generation,
+                stage,
+                ..
+            } => TransitionKey::AdoptFinalizationStage {
+                outcome,
+                generation,
+                stage,
+                window,
+            },
             TransitionKey::PublishFinalizationProgress {
                 outcome,
                 generation,
@@ -822,8 +980,11 @@ mod tests {
                 generation,
                 window,
             },
-            TransitionKey::RemoveWorkspaceOwnership { outcome, .. } => {
-                TransitionKey::RemoveWorkspaceOwnership { outcome, window }
+            TransitionKey::RemoveWorkspaceBootstrapIntent { outcome, .. } => {
+                TransitionKey::RemoveWorkspaceBootstrapIntent { outcome, window }
+            }
+            TransitionKey::RemoveWorkspaceBootstrapOwner { outcome, .. } => {
+                TransitionKey::RemoveWorkspaceBootstrapOwner { outcome, window }
             }
             TransitionKey::RemoveJournalHistory {
                 outcome,
@@ -848,6 +1009,15 @@ mod tests {
                 generation,
                 window,
             },
+            TransitionKey::CleanupFinalizationPartial {
+                outcome,
+                generation,
+                ..
+            } => TransitionKey::CleanupFinalizationPartial {
+                outcome,
+                generation,
+                window,
+            },
         }
     }
 
@@ -856,6 +1026,7 @@ mod tests {
         let mut points = vec![
             TransitionKey::BootstrapWorkspace { window: before },
             TransitionKey::PublishWorkspaceOwnership { window: before },
+            TransitionKey::AdoptBootstrapFinalizationSlot { window: before },
             TransitionKey::PrepareJournalPartial {
                 sequence: 0,
                 window: before,
@@ -864,19 +1035,51 @@ mod tests {
                 sequence: 0,
                 window: before,
             },
-            TransitionKey::CreateDirectoryCandidate {
+            TransitionKey::LinkJournalAlias {
+                sequence: 0,
+                window: before,
+            },
+            TransitionKey::AdoptJournalPublication {
+                sequence: 0,
+                window: before,
+            },
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Directory,
                 ordinal: 1,
                 window: before,
             },
-            TransitionKey::PublishDirectoryCandidate {
-                ordinal: 1,
-                window: before,
-            },
-            TransitionKey::PrepareStage {
+            TransitionKey::DiscardOwner {
+                artifact: PreparationArtifactKind::Stage,
                 ordinal: 2,
                 window: before,
             },
-            TransitionKey::PrepareBackup {
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Directory,
+                ordinal: 1,
+                window: before,
+            },
+            TransitionKey::CancelPlacement {
+                artifact: PreparationArtifactKind::Directory,
+                ordinal: 1,
+                window: before,
+            },
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Stage,
+                ordinal: 2,
+                window: before,
+            },
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Stage,
+                ordinal: 2,
+                window: before,
+            },
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Backup,
+                ordinal: 2,
+                window: before,
+            },
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Backup,
                 ordinal: 2,
                 window: before,
             },
@@ -902,10 +1105,12 @@ mod tests {
 
         for outcome in [TransactionOutcome::Commit, TransactionOutcome::Rollback] {
             for (kind, ordinal) in [
-                (CleanupObjectKind::Stage, 6),
-                (CleanupObjectKind::Backup, 7),
-                (CleanupObjectKind::CreatedDirectory, 8),
-                (CleanupObjectKind::DirectoryCandidate, 9),
+                (CleanupObjectKind::OwnedStage, 6),
+                (CleanupObjectKind::PlacedStage, 7),
+                (CleanupObjectKind::OwnedBackup, 8),
+                (CleanupObjectKind::PlacedBackup, 9),
+                (CleanupObjectKind::CreatedDirectory, 10),
+                (CleanupObjectKind::OwnedDirectory, 11),
             ] {
                 points.push(TransitionKey::CleanupObject {
                     outcome,
@@ -919,7 +1124,50 @@ mod tests {
                 generation: 0,
                 window: before,
             });
-            points.push(TransitionKey::RemoveWorkspaceOwnership {
+            points.push(TransitionKey::PrepareFinalizationPartial {
+                outcome,
+                generation: 0,
+                window: before,
+            });
+            points.push(TransitionKey::LinkFinalizationAlias {
+                outcome,
+                generation: 0,
+                window: before,
+            });
+            points.push(TransitionKey::CertifyFinalizationPartial {
+                outcome,
+                generation: 0,
+                window: before,
+            });
+            for stage in [
+                FinalizationAdoptionStage::CompleteManifest,
+                FinalizationAdoptionStage::IntentRemoved,
+                FinalizationAdoptionStage::OwnershipRemoved,
+                FinalizationAdoptionStage::PartialRemoved,
+                FinalizationAdoptionStage::HistoryRemoving {
+                    remaining_records: 1,
+                },
+                FinalizationAdoptionStage::WorkspaceEmpty,
+                FinalizationAdoptionStage::WorkspaceRemoved,
+                FinalizationAdoptionStage::RetiredPrefix,
+            ] {
+                points.push(TransitionKey::AdoptFinalizationStage {
+                    outcome,
+                    generation: 0,
+                    stage,
+                    window: before,
+                });
+            }
+            points.push(TransitionKey::CleanupFinalizationPartial {
+                outcome,
+                generation: 0,
+                window: before,
+            });
+            points.push(TransitionKey::RemoveWorkspaceBootstrapIntent {
+                outcome,
+                window: before,
+            });
+            points.push(TransitionKey::RemoveWorkspaceBootstrapOwner {
                 outcome,
                 window: before,
             });
@@ -956,7 +1204,7 @@ mod tests {
     #[test]
     fn transition_key_surface_covers_every_protocol_mutation_before_and_after() {
         let points = protocol_transition_points();
-        assert_eq!(points.len(), 34);
+        assert_eq!(points.len(), 71);
 
         let expected = points
             .into_iter()
@@ -974,7 +1222,7 @@ mod tests {
 
         assert_eq!(observer.wait_for_count(expected.len()), expected);
         assert_eq!(observer.events(), expected);
-        assert_eq!(expected.len(), 68);
+        assert_eq!(expected.len(), 142);
         for pair in expected.chunks_exact(2) {
             assert_eq!(pair[0], at_window(pair[0], TransitionWindow::Before));
             assert_eq!(pair[1], at_window(pair[0], TransitionWindow::After));
