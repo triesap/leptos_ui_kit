@@ -215,6 +215,7 @@ pub(super) struct ObjectIdentityV2 {
 }
 
 impl ObjectIdentityV2 {
+    #[cfg(test)]
     pub(super) const fn new(device: u64, inode: u64) -> Self {
         Self::from_u128(device as u128, inode as u128)
     }
@@ -232,14 +233,6 @@ impl ObjectIdentityV2 {
 
     pub(super) const fn object(self) -> u128 {
         u128::from_le_bytes(self.object)
-    }
-
-    pub(super) const fn device(self) -> u64 {
-        self.namespace() as u64
-    }
-
-    pub(super) const fn inode(self) -> u64 {
-        self.object() as u64
     }
 
     fn hash_parts(&self) -> (&[u8], &[u8]) {
@@ -272,12 +265,12 @@ impl FileStateV2 {
         })
     }
 
-    pub(super) fn content_hash(&self) -> &Sha256Digest {
-        &self.content_hash
-    }
-
     pub(super) const fn byte_len(&self) -> u64 {
         self.byte_len
+    }
+
+    pub(super) fn content_hash(&self) -> &Sha256Digest {
+        &self.content_hash
     }
 
     pub(super) const fn readonly(&self) -> bool {
@@ -323,16 +316,8 @@ impl PlannedFileStateV2 {
         })
     }
 
-    pub(super) fn content_hash(&self) -> &Sha256Digest {
-        &self.content_hash
-    }
-
     pub(super) const fn byte_len(&self) -> u64 {
         self.byte_len
-    }
-
-    pub(super) const fn mode_policy(&self) -> FileModePolicyV2 {
-        self.mode_policy
     }
 
     fn validate(&self) -> Result<(), JournalModelError> {
@@ -526,10 +511,6 @@ impl WorkspaceBindingV2 {
         &self.exact
     }
 
-    pub(super) fn owner_tag(&self) -> &Sha256Digest {
-        &self.owner_tag
-    }
-
     fn validate(
         &self,
         transaction_id: &TransactionId,
@@ -597,6 +578,10 @@ pub(super) struct ProjectBindingV2 {
 }
 
 impl ProjectBindingV2 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the immutable project binding keeps every exact authority input explicit"
+    )]
     pub(super) fn new(
         transaction_id: &TransactionId,
         canonical_root_hash: Sha256Digest,
@@ -635,10 +620,6 @@ impl ProjectBindingV2 {
         &self.canonical_root_hash
     }
 
-    pub(super) fn root_preimage(&self) -> &ExactDirectoryStateV2 {
-        &self.root_preimage
-    }
-
     pub(super) fn root_current(&self) -> &ExactDirectoryStateV2 {
         &self.root_current
     }
@@ -649,10 +630,6 @@ impl ProjectBindingV2 {
 
     pub(super) fn coordination_parent(&self) -> &ExactDirectoryStateV2 {
         &self.coordination_parent
-    }
-
-    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
-        &self.workspace_parent_preimage
     }
 
     pub(super) fn workspace_parent_after_workspace(&self) -> &ExactDirectoryStateV2 {
@@ -762,13 +739,6 @@ impl PreimageV2 {
             Self::Regular { exact } => PresenceV2::Present(exact.clone()),
         }
     }
-
-    pub(super) const fn as_exact(&self) -> Option<&ExactFileStateV2> {
-        match self {
-            Self::Absent => None,
-            Self::Regular { exact } => Some(exact),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -806,10 +776,6 @@ impl ArtifactV2 {
 
     pub(super) fn owner_current(&self) -> &PresenceV2<ExactFileStateV2> {
         &self.owner_current
-    }
-
-    pub(super) fn prepared(&self) -> Option<&ExactFileStateV2> {
-        self.prepared.as_ref()
     }
 }
 
@@ -871,10 +837,6 @@ impl JournalEntryV2 {
 
     pub(super) const fn action(&self) -> EntryActionV2 {
         self.action
-    }
-
-    pub(super) const fn role(&self) -> EntryRoleV2 {
-        self.role
     }
 
     pub(super) fn preimage(&self) -> &PreimageV2 {
@@ -1083,10 +1045,6 @@ impl JournalDirectoryV2 {
         self.planned_mode
     }
 
-    pub(super) fn preimage(&self) -> &PresenceV2<ExactDirectoryStateV2> {
-        &self.preimage
-    }
-
     pub(super) fn current(&self) -> &PresenceV2<ExactDirectoryStateV2> {
         &self.current
     }
@@ -1097,10 +1055,6 @@ impl JournalDirectoryV2 {
 
     pub(super) fn candidate_current(&self) -> &PresenceV2<ExactDirectoryStateV2> {
         &self.candidate_current
-    }
-
-    pub(super) fn created_exact(&self) -> Option<&ExactDirectoryStateV2> {
-        self.created_exact.as_ref()
     }
 
     pub(super) fn managed_children(&self) -> &[ManagedChildV2] {
@@ -1371,14 +1325,6 @@ impl FilePlacementIntentV2 {
     pub(super) fn expected_owner(&self) -> &ExactFileStateV2 {
         &self.expected_owner
     }
-
-    pub(super) const fn parent(&self) -> DirectoryParentV2 {
-        self.parent
-    }
-
-    pub(super) fn parent_before(&self) -> &ExactDirectoryStateV2 {
-        &self.parent_before
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1419,14 +1365,6 @@ impl DirectoryPublishIntentV2 {
     pub(super) fn expected_owner(&self) -> &ExactDirectoryStateV2 {
         &self.expected_candidate
     }
-
-    pub(super) const fn parent(&self) -> DirectoryParentV2 {
-        self.parent
-    }
-
-    pub(super) fn parent_before(&self) -> &ExactDirectoryStateV2 {
-        &self.parent_before
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1447,6 +1385,10 @@ pub(super) enum PreparationPlacementIntentV2 {
     tag = "kind",
     content = "intent",
     rename_all = "camelCase"
+)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the protocol vocabulary deliberately distinguishes owner creation, discard, and placement"
 )]
 pub(super) enum PreparationPendingIntentV2 {
     CreateOwner(OwnerCreationIntentV2),
@@ -1489,12 +1431,6 @@ impl FilePlacementObservationV2 {
             parent_after,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum PreparationPlacementObservationV2 {
-    Directory(DirectoryPublicationObservationV2),
-    File(FilePlacementObservationV2),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1746,22 +1682,6 @@ impl WorkspaceBootstrapIntentEnvelopeV2 {
         Ok(bytes)
     }
 
-    pub(super) fn transaction_id(&self) -> &TransactionId {
-        &self.transaction_id
-    }
-
-    pub(super) fn canonical_root_hash(&self) -> &Sha256Digest {
-        &self.canonical_root_hash
-    }
-
-    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
-        &self.workspace_parent_preimage
-    }
-
-    pub(super) fn workspace_name(&self) -> &str {
-        &self.workspace_name
-    }
-
     fn validate(&self) -> Result<(), JournalModelError> {
         if self.magic != BOOTSTRAP_INTENT_MAGIC
             || self.version != JOURNAL_VERSION
@@ -1909,10 +1829,6 @@ impl WorkspaceBootstrapEnvelopeV2 {
         &self.owner_tag
     }
 
-    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
-        &self.workspace_parent_preimage
-    }
-
     pub(super) fn workspace_parent_after_workspace(&self) -> &ExactDirectoryStateV2 {
         &self.workspace_parent_after_workspace
     }
@@ -2018,10 +1934,6 @@ impl WorkspaceBootstrapBindingV2 {
         };
         binding.validate_exact_file()?;
         Ok(binding)
-    }
-
-    pub(super) fn name(&self) -> &str {
-        &self.name
     }
 
     pub(super) fn intent(&self) -> &WorkspaceBootstrapIntentBindingV2 {
@@ -2341,20 +2253,12 @@ impl JournalSnapshotV2 {
         Ok(bytes)
     }
 
-    pub(super) const fn version(&self) -> u32 {
-        self.version
-    }
-
     pub(super) fn transaction_id(&self) -> &TransactionId {
         &self.transaction_id
     }
 
     pub(super) const fn sequence(&self) -> u64 {
         self.sequence
-    }
-
-    pub(super) const fn operation(&self) -> JournalOperationV2 {
-        self.operation
     }
 
     pub(super) fn project(&self) -> &ProjectBindingV2 {
@@ -2453,22 +2357,6 @@ impl JournalSnapshotV2 {
                 .filter(|entry| entry.backup.is_some())
                 .count()
                 * 2
-    }
-
-    pub(super) fn next_preparation_slot(&self) -> Result<PreparationSlot, JournalModelError> {
-        let JournalPhaseV2::Preparing {
-            completed,
-            pending: None | Some(PreparationPendingIntentV2::CreateOwner(_)),
-        } = &self.phase
-        else {
-            return Err(JournalModelError::new(
-                "next preparation slot requires an unarmed or CreateOwner Preparing phase",
-            ));
-        };
-        self.preparation_slot(
-            usize::try_from(*completed)
-                .map_err(|_| JournalModelError::new("preparation counter does not fit usize"))?,
-        )
     }
 
     pub(super) fn arm_owner_creation(
@@ -4020,13 +3908,12 @@ impl JournalSnapshotV2 {
                         let index = index_of(*ordinal, self.entries.len())?;
                         let entry = &mut self.entries[index];
                         entry.stage.current = PresenceV2::Missing;
-                        if entry.action == EntryActionV2::Create {
-                            if let PresenceV2::Present(target) = &entry.current_target {
-                                if target.identity == expected.identity && target.link_count == 2 {
-                                    entry.current_target =
-                                        PresenceV2::Present(target.with_link_count(1)?);
-                                }
-                            }
+                        if entry.action == EntryActionV2::Create
+                            && let PresenceV2::Present(target) = &entry.current_target
+                            && target.identity == expected.identity
+                            && target.link_count == 2
+                        {
+                            entry.current_target = PresenceV2::Present(target.with_link_count(1)?);
                         }
                     }
                     CleanupTargetV2::OwnedBackup { ordinal } => {
@@ -4155,16 +4042,6 @@ impl JournalSnapshotV2 {
             }
         }
         Ok(())
-    }
-
-    fn validate_and_set_parent_after_creation(
-        &mut self,
-        parent: DirectoryParentV2,
-        after: ExactDirectoryStateV2,
-    ) -> Result<(), JournalModelError> {
-        let before = self.parent_current(parent)?.clone();
-        validate_parent_creation_transition(&before, &after)?;
-        self.set_parent_current(parent, after)
     }
 
     fn managed_children_are_missing(
@@ -4792,12 +4669,12 @@ impl JournalSnapshotV2 {
                 ));
             }
         }
-        if let Some(previous) = &self.previous_record {
-            if !identities.insert(previous.exact.identity) {
-                return Err(JournalModelError::new(
-                    "previous journal record aliases a protected live object",
-                ));
-            }
+        if let Some(previous) = &self.previous_record
+            && !identities.insert(previous.exact.identity)
+        {
+            return Err(JournalModelError::new(
+                "previous journal record aliases a protected live object",
+            ));
         }
         for directory in &self.directories {
             if let PresenceV2::Present(current) = &directory.current {
@@ -4814,24 +4691,24 @@ impl JournalSnapshotV2 {
                     ));
                 }
             }
-            if let PresenceV2::Present(candidate) = &directory.candidate_current {
-                if !identities.insert(candidate.identity) {
-                    return Err(JournalModelError::new(
-                        "live directory candidate aliases an unrelated protected object",
-                    ));
-                }
+            if let PresenceV2::Present(candidate) = &directory.candidate_current
+                && !identities.insert(candidate.identity)
+            {
+                return Err(JournalModelError::new(
+                    "live directory candidate aliases an unrelated protected object",
+                ));
             }
         }
         for entry in &self.entries {
             let target = entry.current_target.as_present();
             let stage_owner = entry.stage.owner_current.as_present();
             let stage = entry.stage.current.as_present();
-            if let Some(target) = target {
-                if !identities.insert(target.identity) {
-                    return Err(JournalModelError::new(
-                        "live target aliases an unrelated protected object",
-                    ));
-                }
+            if let Some(target) = target
+                && !identities.insert(target.identity)
+            {
+                return Err(JournalModelError::new(
+                    "live target aliases an unrelated protected object",
+                ));
             }
             if let Some(owner) = stage_owner
                 && !identities.insert(owner.identity)
@@ -4854,12 +4731,11 @@ impl JournalSnapshotV2 {
                 .backup
                 .as_ref()
                 .and_then(|backup| backup.current.as_present())
+                && !identities.insert(backup.identity)
             {
-                if !identities.insert(backup.identity) {
-                    return Err(JournalModelError::new(
-                        "live backup is not an independent exact file",
-                    ));
-                }
+                return Err(JournalModelError::new(
+                    "live backup is not an independent exact file",
+                ));
             }
             if let Some(owner) = entry
                 .backup
@@ -5912,14 +5788,6 @@ impl PartialEnvelopeHeaderV2 {
         Ok(header)
     }
 
-    pub(super) fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub(super) fn owner_tag(&self) -> &Sha256Digest {
-        &self.owner_tag
-    }
-
     pub(super) const fn payload_len(&self) -> u64 {
         self.payload_len
     }
@@ -6134,12 +6002,12 @@ impl PartialEnvelopeHeaderV2 {
                 "incomplete partial header payload length exceeds u64",
             ));
         }
-        if let Some(index) = close {
-            if index + 1 != number_tail.len() {
-                return Err(JournalModelError::new(
-                    "incomplete partial header has bytes after its canonical closing brace",
-                ));
-            }
+        if let Some(index) = close
+            && index + 1 != number_tail.len()
+        {
+            return Err(JournalModelError::new(
+                "incomplete partial header has bytes after its canonical closing brace",
+            ));
         }
         Ok(())
     }
@@ -6441,28 +6309,12 @@ impl FinalizationLeaseV2 {
         &self.canonical_root_hash
     }
 
-    pub(super) fn owner_tag(&self) -> &Sha256Digest {
-        &self.owner_tag
-    }
-
     pub(super) const fn outcome(&self) -> FinalizationOutcomeV2 {
         self.outcome
     }
 
-    pub(super) const fn terminal_sequence(&self) -> u64 {
-        self.terminal_sequence
-    }
-
-    pub(super) fn workspace_parent_before(&self) -> &ExactDirectoryStateV2 {
-        &self.workspace_parent_before
-    }
-
     pub(super) fn workspace_parent_current(&self) -> &ExactDirectoryStateV2 {
         &self.workspace_parent_current
-    }
-
-    pub(super) fn workspace_name(&self) -> &str {
-        &self.workspace_name
     }
 
     pub(super) fn workspace(&self) -> &PresenceV2<ExactDirectoryStateV2> {
@@ -6471,14 +6323,6 @@ impl FinalizationLeaseV2 {
 
     pub(super) fn bootstrap(&self) -> &WorkspaceBootstrapBindingV2 {
         &self.bootstrap
-    }
-
-    pub(super) fn bootstrap_intent_current(&self) -> &PresenceV2<ExactFileStateV2> {
-        &self.bootstrap_intent_current
-    }
-
-    pub(super) fn bootstrap_current(&self) -> &PresenceV2<ExactFileStateV2> {
-        &self.bootstrap_current
     }
 
     pub(super) fn record_name(&self) -> String {
@@ -6723,16 +6567,15 @@ impl FinalizationLeaseV2 {
                         "finalization inventory does not end at its terminal sequence",
                     ));
                 }
-                if let Some(partial) = &self.partial {
-                    if partial.sequence != self.terminal_sequence.saturating_add(1)
+                if let Some(partial) = &self.partial
+                    && (partial.sequence != self.terminal_sequence.saturating_add(1)
                         || partial.name
                             != journal_partial_name(&self.transaction_id, partial.sequence)
-                        || !identities.insert(partial.exact.identity)
-                    {
-                        return Err(JournalModelError::new(
-                            "finalization partial is not the exact independent next candidate",
-                        ));
-                    }
+                        || !identities.insert(partial.exact.identity))
+                {
+                    return Err(JournalModelError::new(
+                        "finalization partial is not the exact independent next candidate",
+                    ));
                 }
             }
             FinalizationStateV2::WorkspaceRemoved => {

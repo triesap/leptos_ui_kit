@@ -50,6 +50,9 @@ pub(super) fn check_pending_recovery_v1(project_root: &Path) -> Result<(), Codeg
 }
 
 #[cfg(test)]
+pub(crate) use test_seam::{apply_planned_files_with, apply_planned_files_with_snapshot};
+
+#[cfg(test)]
 mod test_seam {
     use std::{path::Path, sync::Arc};
 
@@ -114,6 +117,3 @@ mod test_seam {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) use test_seam::{apply_planned_files_with, apply_planned_files_with_snapshot};

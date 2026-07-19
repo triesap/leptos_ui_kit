@@ -267,6 +267,10 @@ fn observe_regular_child(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recovery capture keeps every bounded observation authority explicit"
+)]
 fn observe_regular_owner_child(
     context: &PlanningContext,
     fs: &dyn FsOps,

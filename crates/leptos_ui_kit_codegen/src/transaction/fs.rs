@@ -49,6 +49,7 @@ impl CreatedFile {
     }
 
     #[cfg(test)]
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) const fn exact_metadata(&self) -> Option<ExactFileMetadataObservation> {
         self.exact_metadata
     }
@@ -127,6 +128,7 @@ pub(crate) enum ExclusiveFileCopyOutcome {
 
 impl ExclusiveFileCopyOutcome {
     #[cfg(test)]
+    #[cfg_attr(windows, allow(dead_code))]
     fn into_verified(self) -> Result<ExclusiveFileCopy, ExclusiveCreateFailure> {
         match self {
             Self::CreatedVerified { copy } => Ok(copy),
@@ -190,6 +192,7 @@ impl<'a> DirectoryEndpoint<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactIdentitySupport {
     Complete,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Unsupported,
 }
 
@@ -251,6 +254,7 @@ pub(crate) enum ExactDirectoryEntryKind {
     RegularFile,
     Directory,
     Symlink,
+    #[cfg_attr(not(windows), allow(dead_code))]
     ReparsePoint,
     Other,
 }
@@ -318,6 +322,7 @@ impl NoReplaceRelocationError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactRemovalPostName {
+    #[cfg(test)]
     Absent,
     Substituted,
     Unknown,
@@ -344,13 +349,6 @@ impl ExactRemovalError {
 
     fn mutated(post_name: ExactRemovalPostName, source: io::Error) -> Self {
         Self::Mutated { post_name, source }
-    }
-
-    pub(crate) const fn post_name(&self) -> Option<ExactRemovalPostName> {
-        match self {
-            Self::NotMutated(_) => None,
-            Self::Mutated { post_name, .. } => Some(*post_name),
-        }
     }
 
     pub(crate) const fn mutation_may_have_completed(&self) -> bool {
@@ -397,6 +395,7 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     fn before_inspect_metadata(&self, path: &Path) -> io::Result<()>;
     fn before_read_handle(&self, path: &Path) -> io::Result<()>;
     #[cfg(test)]
+    #[cfg_attr(windows, allow(dead_code))]
     fn observe_regular_file(
         &self,
         parent: &Dir,
@@ -458,6 +457,7 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         mode: u32,
     ) -> io::Result<ExactDirectoryHandle>;
     #[cfg(test)]
+    #[cfg_attr(windows, allow(dead_code))]
     fn inventory_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -528,15 +528,10 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         expected_stage: &ExactFileObservation,
         target: HardLinkEndpoint<'_>,
     ) -> io::Result<()>;
-    fn rename_directory_noreplace(
-        &self,
-        candidate_parent: &Dir,
-        candidate_name: &Path,
-        candidate_path: &Path,
-        target_parent: &Dir,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> io::Result<()>;
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the filesystem boundary keeps both capability-relative endpoints explicit"
+    )]
     fn relocate_noreplace(
         &self,
         owner_parent: &Dir,
@@ -552,6 +547,7 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         parent: &Dir,
         path: &Path,
     ) -> Result<(), NoReplaceRelocationError>;
+    #[cfg_attr(windows, allow(dead_code))]
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
     fn remove_file_exact(
         &self,
@@ -578,30 +574,12 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     fn before_mutation_rebind(&self, path: &Path) -> io::Result<()>;
     fn before_final_revalidation(&self, path: &Path) -> io::Result<()>;
     fn after_final_revalidation(&self, path: &Path) -> io::Result<()>;
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()>;
     fn replace_existing(
         &self,
         staged: HardLinkEndpoint<'_>,
         expected_stage: &ExactFileObservation,
         target: HardLinkEndpoint<'_>,
         expected_target: &ExactFileObservation,
-    ) -> io::Result<()>;
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
     ) -> io::Result<()>;
 }
 
@@ -928,25 +906,6 @@ impl FsOps for SystemFs {
             .hard_link(staged.name, target.parent, target.name)
     }
 
-    fn rename_directory_noreplace(
-        &self,
-        candidate_parent: &Dir,
-        candidate_name: &Path,
-        candidate_path: &Path,
-        target_parent: &Dir,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> io::Result<()> {
-        rename_directory_noreplace_impl(
-            candidate_parent,
-            candidate_name,
-            candidate_path,
-            target_parent,
-            target_name,
-            target_path,
-        )
-    }
-
     fn relocate_noreplace(
         &self,
         owner_parent: &Dir,
@@ -1036,18 +995,6 @@ impl FsOps for SystemFs {
         Ok(())
     }
 
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        _from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        _to: &Path,
-    ) -> io::Result<()> {
-        from_parent.rename(from_name, to_parent, to_name)
-    }
-
     fn replace_existing(
         &self,
         staged: HardLinkEndpoint<'_>,
@@ -1061,18 +1008,6 @@ impl FsOps for SystemFs {
         staged
             .parent
             .rename(staged.name, target.parent, target.name)
-    }
-
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.rename(from_parent, from_name, from, to_parent, to_name, to)
     }
 }
 
@@ -1335,6 +1270,7 @@ fn exact_metadata_observation(state: RegularMetadataState) -> ExactFileMetadataO
 }
 
 #[cfg(test)]
+#[cfg_attr(windows, allow(dead_code))]
 fn observe_regular_file_exact(
     parent: &Dir,
     name: &Path,
@@ -1665,6 +1601,7 @@ fn directory_names_bounded(directory: &Dir, max_entries: usize) -> io::Result<Ve
 }
 
 #[cfg(test)]
+#[cfg_attr(windows, allow(dead_code))]
 fn inventory_directory_exact_impl(
     endpoint: DirectoryEndpoint<'_>,
     expected: &ExactDirectoryObservation,
@@ -1831,33 +1768,6 @@ fn require_name_absent(parent: &Dir, name: &Path, path: &Path) -> io::Result<()>
             format!("{} is still present", path.display()),
         )),
     }
-}
-
-fn rename_directory_noreplace_impl(
-    candidate_parent: &Dir,
-    candidate_name: &Path,
-    candidate_path: &Path,
-    target_parent: &Dir,
-    target_name: &Path,
-    target_path: &Path,
-) -> io::Result<()> {
-    let metadata = candidate_parent.symlink_metadata(candidate_name)?;
-    let state = directory_metadata_state(&metadata, candidate_path)?;
-    let expected = ExactRelocationSource::EmptyDirectory(ExactDirectoryObservation {
-        identity: state.identity,
-        mode: state.mode,
-        link_count: state.link_count,
-    });
-    relocate_noreplace_impl(
-        candidate_parent,
-        candidate_name,
-        candidate_path,
-        target_parent,
-        target_name,
-        target_path,
-        &expected,
-    )
-    .map_err(NoReplaceRelocationError::into_io)
 }
 
 fn relocate_noreplace_impl(
@@ -2642,30 +2552,6 @@ fn opened_regular_file_metadata(file: &File) -> io::Result<ExactFileMetadataObse
     })
 }
 
-pub(crate) fn current_regular_file_identity(
-    parent: &Dir,
-    name: &Path,
-) -> io::Result<ObjectIdentity> {
-    let metadata = parent.symlink_metadata(name)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "controlled path is not a regular file",
-        ));
-    }
-    #[cfg(windows)]
-    if cap_fs_ext::OsMetadataExt::file_attributes(&metadata) & 0x0000_0400 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "controlled path is a Windows reparse point",
-        ));
-    }
-    Ok(ObjectIdentity::from_u64(
-        MetadataExt::dev(&metadata),
-        MetadataExt::ino(&metadata),
-    ))
-}
-
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FsOperation {
@@ -2847,6 +2733,7 @@ pub(crate) enum FsOperation {
     OpenCoordinationFile,
     InspectMetadata,
     ReadHandle,
+    #[cfg_attr(windows, allow(dead_code))]
     ObserveRegularFile,
     ObserveRegularFileBounded,
     ObserveRegularFileMetadata,
@@ -2876,9 +2763,9 @@ pub(crate) enum FsOperation {
     TryLock,
     HardLink,
     PublishAbsent,
-    RenameDirectoryNoReplace,
     RelocateNoReplace,
     ProbeRelocateNoReplace,
+    #[cfg_attr(windows, allow(dead_code))]
     RemoveFile,
     RemoveFileExact,
     RemoveFileMetadataExact,
@@ -2890,9 +2777,7 @@ pub(crate) enum FsOperation {
     BeforeMutationRebind,
     BeforeFinalRevalidation,
     AfterFinalRevalidation,
-    Rename,
     ReplaceExisting,
-    RenameJournal,
 }
 
 #[cfg(test)]
@@ -3251,6 +3136,7 @@ enum FinalRevalidationMutation {
         target: PathBuf,
         content: Vec<u8>,
     },
+    #[cfg_attr(windows, allow(dead_code))]
     ReplaceFile {
         target: PathBuf,
         moved_target: PathBuf,
@@ -3451,30 +3337,6 @@ impl FaultFs {
         fs
     }
 
-    pub(crate) fn fail_nth_and_crash_nth(
-        failed_operation: FsOperation,
-        failed_ordinal: usize,
-        crash_operation: FsOperation,
-        crash_ordinal: usize,
-    ) -> Self {
-        assert!(failed_ordinal > 0, "fault ordinal is one-based");
-        assert!(
-            crash_operation.is_semantic_transition(),
-            "semantic crashes require a protocol transition key"
-        );
-        assert!(crash_ordinal > 0, "crash ordinal is one-based");
-        let fs = Self::passthrough();
-        *fs.fail.lock().expect("fault lock") = Some(FaultMode::Once {
-            operation: failed_operation,
-            ordinal: failed_ordinal,
-        });
-        *fs.crash.lock().expect("crash lock") = Some(FaultMode::Once {
-            operation: crash_operation,
-            ordinal: crash_ordinal,
-        });
-        fs
-    }
-
     pub(crate) fn events(&self) -> Vec<FsEvent> {
         self.events.lock().expect("event lock").clone()
     }
@@ -3526,28 +3388,13 @@ impl FaultFs {
         fs
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn mutate_before_mutation_rebind(path: PathBuf, content: Vec<u8>) -> Self {
         let fs = Self::passthrough();
         *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::WriteFile {
                 target: path,
                 content,
-            });
-        fs
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn replace_parent_with_directory_before_mutation_rebind(
-        target: PathBuf,
-        parent: PathBuf,
-        moved_parent: PathBuf,
-    ) -> Self {
-        let fs = Self::passthrough();
-        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
-            Some(FinalRevalidationMutation::ReplaceParentWithDirectory {
-                target,
-                parent,
-                moved_parent,
             });
         fs
     }
@@ -3562,6 +3409,7 @@ impl FaultFs {
         fs
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn substitute_before_exact_unlink(
         target: PathBuf,
         moved_target: PathBuf,
@@ -4116,31 +3964,6 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::PublishAbsent, staged.path)
     }
 
-    fn rename_directory_noreplace(
-        &self,
-        candidate_parent: &Dir,
-        candidate_name: &Path,
-        candidate_path: &Path,
-        target_parent: &Dir,
-        target_name: &Path,
-        target_path: &Path,
-    ) -> io::Result<()> {
-        self.before(
-            FsOperation::RenameDirectoryNoReplace,
-            candidate_path,
-            Some(target_path),
-        )?;
-        SystemFs.rename_directory_noreplace(
-            candidate_parent,
-            candidate_name,
-            candidate_path,
-            target_parent,
-            target_name,
-            target_path,
-        )?;
-        self.after_success(FsOperation::RenameDirectoryNoReplace, candidate_path)
-    }
-
     fn relocate_noreplace(
         &self,
         owner_parent: &Dir,
@@ -4309,19 +4132,6 @@ impl FsOps for FaultFs {
         Ok(())
     }
 
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.before(FsOperation::Rename, from, Some(to))?;
-        SystemFs.rename(from_parent, from_name, from, to_parent, to_name, to)
-    }
-
     fn replace_existing(
         &self,
         staged: HardLinkEndpoint<'_>,
@@ -4332,19 +4142,6 @@ impl FsOps for FaultFs {
         self.before(FsOperation::ReplaceExisting, staged.path, Some(target.path))?;
         SystemFs.replace_existing(staged, expected_stage, target, expected_target)?;
         self.after_success(FsOperation::ReplaceExisting, staged.path)
-    }
-
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.before(FsOperation::RenameJournal, from, Some(to))?;
-        SystemFs.rename_journal(from_parent, from_name, from, to_parent, to_name, to)
     }
 }
 

@@ -236,15 +236,6 @@ pub(super) enum JournalTopLevelNamespace {
     Transaction(TopLevelTransaction),
 }
 
-impl JournalTopLevelNamespace {
-    pub(super) fn transaction_id(&self) -> Option<&TransactionId> {
-        match self {
-            Self::Empty => None,
-            Self::Transaction(transaction) => Some(&transaction.transaction_id),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TopLevelTransaction {
     transaction_id: TransactionId,
@@ -275,7 +266,7 @@ struct DiscoveredWorkspace {
 /// identifier or workspace name from an independent filename scan.
 pub(super) enum DiscoveredJournalNamespace<'a> {
     Empty,
-    Transaction(DiscoveredJournalTransaction<'a>),
+    Transaction(Box<DiscoveredJournalTransaction<'a>>),
 }
 
 pub(super) struct DiscoveredJournalTransaction<'a> {
@@ -454,12 +445,12 @@ impl<'a> JournalRecoveryStore<'a> {
         match before.top_level.namespace {
             JournalTopLevelNamespace::Empty => Ok(DiscoveredJournalNamespace::Empty),
             JournalTopLevelNamespace::Transaction(top_level) => Ok(
-                DiscoveredJournalNamespace::Transaction(DiscoveredJournalTransaction {
+                DiscoveredJournalNamespace::Transaction(Box::new(DiscoveredJournalTransaction {
                     runtime,
                     canonical_root_hash,
                     capabilities,
                     top_level,
-                }),
+                })),
             ),
         }
     }
@@ -551,9 +542,11 @@ impl<'a> JournalRecoveryStore<'a> {
                     Ok(JournalNamespace::Bootstrap(LoadedBootstrap { bootstrap }))
                 } else {
                     match self.load_active()? {
-                        ActiveJournalLoad::Stable(lineage) => Ok(JournalNamespace::Active(lineage)),
+                        ActiveJournalLoad::Stable(lineage) => {
+                            Ok(JournalNamespace::Active(*lineage))
+                        }
                         ActiveJournalLoad::ReconciliationRequired(reconciliation) => {
-                            Ok(JournalNamespace::ActiveReconciliation(reconciliation))
+                            Ok(JournalNamespace::ActiveReconciliation(*reconciliation))
                         }
                     }
                 }
@@ -751,7 +744,7 @@ impl<'a> JournalRecoveryStore<'a> {
                             &bootstrap,
                             &partial.path,
                         )?;
-                        Some(completed)
+                        Some(*completed)
                     }
                     PartialLoad::Incomplete(world) => {
                         // Inventory stability alone does not prove content
@@ -775,13 +768,13 @@ impl<'a> JournalRecoveryStore<'a> {
                                 "journal partial changed during stable ownership classification",
                             ));
                         }
-                        return Ok(ActiveJournalLoad::ReconciliationRequired(
+                        return Ok(ActiveJournalLoad::ReconciliationRequired(Box::new(
                             ActiveReconciliation {
                                 sequence: partial.sequence,
                                 stable_record_count: records.len(),
                                 world,
                             },
-                        ));
+                        )));
                     }
                 }
             }
@@ -814,21 +807,21 @@ impl<'a> JournalRecoveryStore<'a> {
                 )
             })?;
             self.recapture_matches(&before, true)?;
-            return Ok(ActiveJournalLoad::ReconciliationRequired(
+            return Ok(ActiveJournalLoad::ReconciliationRequired(Box::new(
                 ActiveReconciliation {
                     sequence: partial_entry.sequence,
                     stable_record_count,
                     world,
                 },
-            ));
+            )));
         }
 
         self.recapture_matches(&before, true)?;
-        Ok(ActiveJournalLoad::Stable(LoadedJournal {
+        Ok(ActiveJournalLoad::Stable(Box::new(LoadedJournal {
             snapshots,
             records,
             partial,
-        }))
+        })))
     }
 
     /// Crosses only the published-alias parent durability barrier. The linked
@@ -909,7 +902,8 @@ impl<'a> JournalRecoveryStore<'a> {
                     source,
                 )
             })?;
-        if self.load_active()? != ActiveJournalLoad::ReconciliationRequired(reconciliation.clone())
+        if self.load_active()?
+            != ActiveJournalLoad::ReconciliationRequired(Box::new(reconciliation.clone()))
         {
             return Err(JournalStoreError::invalid(
                 self.workspace_path(),
@@ -1031,7 +1025,9 @@ impl<'a> JournalRecoveryStore<'a> {
                 )
             })?;
         let rediscovered = match self.load_active()? {
-            ActiveJournalLoad::Stable(rediscovered) if &rediscovered == loaded => rediscovered,
+            ActiveJournalLoad::Stable(rediscovered) if rediscovered.as_ref() == loaded => {
+                rediscovered
+            }
             _ => {
                 return Err(JournalStoreError::invalid(
                     self.workspace_path(),
@@ -1044,7 +1040,7 @@ impl<'a> JournalRecoveryStore<'a> {
                 sequence: record.sequence(),
                 window: TransitionWindow::After,
             });
-        Ok((rediscovered, record))
+        Ok((*rediscovered, record))
     }
 
     pub(super) fn certify_bootstrap_finalization_slot(
@@ -1334,7 +1330,7 @@ impl<'a> JournalRecoveryStore<'a> {
             )),
             Ok(ActiveJournalLoad::ReconciliationRequired(current)) => {
                 Ok(ActiveReconciliationDisposition::ReconcileRequired {
-                    reconciliation: ActiveMutationReconciliation {
+                    reconciliation: Box::new(ActiveMutationReconciliation {
                         action: ActiveReconciliationAction::AdoptPublished,
                         sequence: reconciliation.sequence,
                         durability: DurabilityKnowledge::DurableRecord,
@@ -1344,7 +1340,7 @@ impl<'a> JournalRecoveryStore<'a> {
                             io::ErrorKind::Interrupted,
                             "adopted record still requires exact lineage reconciliation",
                         ),
-                    },
+                    }),
                 })
             }
             Err(error) => Ok(self.active_reconciliation_observation_unavailable(
@@ -1483,7 +1479,7 @@ impl<'a> JournalRecoveryStore<'a> {
             )),
             Ok(ActiveJournalLoad::ReconciliationRequired(current)) => {
                 Ok(ActiveReconciliationDisposition::ReconcileRequired {
-                    reconciliation: ActiveMutationReconciliation {
+                    reconciliation: Box::new(ActiveMutationReconciliation {
                         action: ActiveReconciliationAction::DiscardPartial,
                         sequence,
                         durability: DurabilityKnowledge::NotPublished,
@@ -1493,7 +1489,7 @@ impl<'a> JournalRecoveryStore<'a> {
                             io::ErrorKind::Interrupted,
                             "partial discard still requires exact lineage reconciliation",
                         ),
-                    },
+                    }),
                 })
             }
             Err(error) => Ok(self.active_reconciliation_observation_unavailable(
@@ -1515,14 +1511,14 @@ impl<'a> JournalRecoveryStore<'a> {
         source: io::Error,
     ) -> ActiveReconciliationDisposition {
         ActiveReconciliationDisposition::ReconcileRequired {
-            reconciliation: ActiveMutationReconciliation {
+            reconciliation: Box::new(ActiveMutationReconciliation {
                 action,
                 sequence,
                 durability,
                 mutation,
                 world: self.probe_active_sequence(sequence),
                 source,
-            },
+            }),
         }
     }
 
@@ -1534,7 +1530,7 @@ impl<'a> JournalRecoveryStore<'a> {
         reason: &str,
     ) -> ActiveReconciliationDisposition {
         ActiveReconciliationDisposition::ReconcileRequired {
-            reconciliation: ActiveMutationReconciliation {
+            reconciliation: Box::new(ActiveMutationReconciliation {
                 action,
                 sequence,
                 durability,
@@ -1545,7 +1541,7 @@ impl<'a> JournalRecoveryStore<'a> {
                     published: None,
                 },
                 source: io::Error::new(io::ErrorKind::InvalidData, reason),
-            },
+            }),
         }
     }
 
@@ -1559,7 +1555,7 @@ impl<'a> JournalRecoveryStore<'a> {
     ) -> ActiveReconciliationDisposition {
         let reason = error.to_string();
         ActiveReconciliationDisposition::ReconcileRequired {
-            reconciliation: ActiveMutationReconciliation {
+            reconciliation: Box::new(ActiveMutationReconciliation {
                 action,
                 sequence,
                 durability,
@@ -1568,7 +1564,7 @@ impl<'a> JournalRecoveryStore<'a> {
                     reason: reason.clone(),
                 },
                 source: io::Error::other(reason),
-            },
+            }),
         }
     }
 
@@ -2523,7 +2519,7 @@ impl<'a> JournalRecoveryStore<'a> {
             PrepareFinalizationDisposition::Durable => {}
             PrepareFinalizationDisposition::ReconcileRequired(reconciliation) => {
                 return Ok(FinalizationPreparationDisposition::ReconcileRequired {
-                    reconciliation,
+                    reconciliation: Box::new(reconciliation),
                 });
             }
         }
@@ -3394,23 +3390,22 @@ impl<'a> JournalRecoveryStore<'a> {
             Path::new(name),
             &path,
             &before.observation,
-        ) {
-            if !error.mutation_may_have_completed() {
-                return Ok(ExactRemovalDisposition::ReconcileRequired(
-                    RemovalReconciliation {
-                        object,
-                        outcome,
-                        mutation: RemovalMutation::RemoveExact,
-                        world: self.probe_file_removal(parent, name, expected, max_bytes),
-                        source: io::Error::other(error),
-                    },
-                ));
-            }
-            // The expected inode was unlinked. Continue through a fresh parent
-            // observation, durability sync, and exact absence inventory even
-            // when the low-level post-unlink check reported substitution or
-            // another uncertain after-world.
+        ) && !error.mutation_may_have_completed()
+        {
+            return Ok(ExactRemovalDisposition::ReconcileRequired(
+                RemovalReconciliation {
+                    object,
+                    outcome,
+                    mutation: RemovalMutation::RemoveExact,
+                    world: self.probe_file_removal(parent, name, expected, max_bytes),
+                    source: io::Error::other(error),
+                },
+            ));
         }
+        // The expected inode was unlinked. Continue through a fresh parent
+        // observation, durability sync, and exact absence inventory even when
+        // the low-level post-unlink check reported substitution or another
+        // uncertain after-world.
         let parent_observation = match self.runtime.fs().observe_directory(parent) {
             Ok(observation) => observation,
             Err(source) => {
@@ -3675,21 +3670,20 @@ impl<'a> JournalRecoveryStore<'a> {
             .runtime
             .fs()
             .remove_empty_directory_exact(workspace, &observed)
+            && !error.mutation_may_have_completed()
         {
-            if !error.mutation_may_have_completed() {
-                return Ok(WorkspaceRemovalDisposition::ReconcileRequired(
-                    RemovalReconciliation {
-                        object,
-                        outcome,
-                        mutation: RemovalMutation::RemoveExact,
-                        world: self.probe_workspace_removal(expected),
-                        source: io::Error::other(error),
-                    },
-                ));
-            }
-            // A successful rmdir followed by a post-name fault still requires
-            // the same fresh parent sync and bounded absence proof below.
+            return Ok(WorkspaceRemovalDisposition::ReconcileRequired(
+                RemovalReconciliation {
+                    object,
+                    outcome,
+                    mutation: RemovalMutation::RemoveExact,
+                    world: self.probe_workspace_removal(expected),
+                    source: io::Error::other(error),
+                },
+            ));
         }
+        // A successful rmdir followed by a post-name fault still requires the
+        // same fresh parent sync and bounded absence proof below.
         let parent = self.capabilities.workspace_parent;
         let parent_after = match self.runtime.fs().observe_directory(parent) {
             Ok(observation) => observation,
@@ -3917,7 +3911,7 @@ impl<'a> JournalRecoveryStore<'a> {
                 PrepareDisposition::Durable => {}
                 PrepareDisposition::ReconcileRequired(reconciliation) => {
                     return Ok(SnapshotPreparationDisposition::ReconcileRequired {
-                        reconciliation,
+                        reconciliation: Box::new(reconciliation),
                     });
                 }
             },
@@ -3934,7 +3928,7 @@ impl<'a> JournalRecoveryStore<'a> {
                 Ok(SnapshotPreparationDisposition::Durable { prepared })
             }
             ActiveJournalLoad::Stable(_) => Ok(SnapshotPreparationDisposition::ReconcileRequired {
-                reconciliation: self.prepare_reconciliation(
+                reconciliation: Box::new(self.prepare_reconciliation(
                     candidate,
                     publication_boundary(candidate),
                     StoreMutation::VerifyPartial,
@@ -3943,11 +3937,11 @@ impl<'a> JournalRecoveryStore<'a> {
                         io::ErrorKind::InvalidData,
                         "prepared journal partial did not survive exact lineage rediscovery",
                     ),
-                ),
+                )),
             }),
             ActiveJournalLoad::ReconciliationRequired(reconciliation) => {
                 Ok(SnapshotPreparationDisposition::ReconcileRequired {
-                    reconciliation: PublicationReconciliation {
+                    reconciliation: Box::new(PublicationReconciliation {
                         boundary: publication_boundary(candidate),
                         durability: DurabilityKnowledge::NotPublished,
                         mutation: StoreMutation::VerifyPartial,
@@ -3956,7 +3950,7 @@ impl<'a> JournalRecoveryStore<'a> {
                             io::ErrorKind::Interrupted,
                             "prepared journal partial requires exact reconciliation",
                         ),
-                    },
+                    }),
                 })
             }
         }
@@ -4022,7 +4016,9 @@ impl<'a> JournalRecoveryStore<'a> {
                     sequence: candidate.sequence(),
                     window: TransitionWindow::After,
                 });
-                Ok(SnapshotLinkDisposition::Linked { reconciliation })
+                Ok(SnapshotLinkDisposition::Linked {
+                    reconciliation: *reconciliation,
+                })
             }
             observed => {
                 let source = link_result.err().unwrap_or_else(|| {
@@ -5462,11 +5458,11 @@ impl<'a> JournalRecoveryStore<'a> {
                 }));
             }
         };
-        Ok(PartialLoad::Complete(CompletedPartial {
+        Ok(PartialLoad::Complete(Box::new(CompletedPartial {
             snapshot: candidate,
             binding,
             observation: read.observation,
-        }))
+        })))
     }
 
     fn observe_overlap_world(
@@ -5631,8 +5627,8 @@ impl<'a> JournalRecoveryStore<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ActiveJournalLoad {
-    Stable(LoadedJournal),
-    ReconciliationRequired(ActiveReconciliation),
+    Stable(Box<LoadedJournal>),
+    ReconciliationRequired(Box<ActiveReconciliation>),
 }
 
 #[derive(Debug)]
@@ -5695,10 +5691,6 @@ pub(super) struct IncompleteFinalizationPartial {
 }
 
 impl IncompleteFinalizationPartial {
-    pub(super) const fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub(super) const fn outcome(&self) -> FinalizationOutcomeV2 {
         self.outcome
     }
@@ -5715,10 +5707,6 @@ pub(super) struct FinalizationRecord {
 impl FinalizationRecord {
     pub(super) fn lease(&self) -> &FinalizationLeaseV2 {
         &self.lease
-    }
-
-    pub(super) fn exact(&self) -> &ExactFileStateV2 {
-        &self.exact
     }
 
     pub(super) fn name(&self) -> &str {
@@ -5838,10 +5826,10 @@ pub(super) struct CompletedPartial {
 #[derive(Debug)]
 pub(super) enum SnapshotPreparationDisposition {
     Durable {
-        prepared: LoadedJournal,
+        prepared: Box<LoadedJournal>,
     },
     ReconcileRequired {
-        reconciliation: PublicationReconciliation,
+        reconciliation: Box<PublicationReconciliation>,
     },
 }
 
@@ -5858,10 +5846,10 @@ pub(super) enum SnapshotLinkDisposition {
 #[derive(Debug)]
 pub(super) enum ActiveReconciliationDisposition {
     Durable {
-        loaded: LoadedJournal,
+        loaded: Box<LoadedJournal>,
     },
     ReconcileRequired {
-        reconciliation: ActiveMutationReconciliation,
+        reconciliation: Box<ActiveMutationReconciliation>,
     },
 }
 
@@ -5909,8 +5897,6 @@ pub(super) enum ActiveReconciliationAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ActiveReconciliationMutation {
-    ObservePublishedParent,
-    SyncPublishedParent,
     RemovePartial,
     ObserveCleanupParent,
     SyncCleanupParent,
@@ -5922,7 +5908,7 @@ pub(super) enum ActiveReconciliationMutation {
 pub(super) enum FinalizationPreparationDisposition {
     Durable,
     ReconcileRequired {
-        reconciliation: FinalizationReconciliation,
+        reconciliation: Box<FinalizationReconciliation>,
     },
 }
 
@@ -5968,8 +5954,16 @@ impl RemovalReconciliation {
         self.mutation
     }
 
+    pub(super) const fn outcome(&self) -> TransactionOutcome {
+        self.outcome
+    }
+
     pub(super) fn world(&self) -> &RemovalWorld {
         &self.world
+    }
+
+    pub(super) fn source(&self) -> &io::Error {
+        &self.source
     }
 }
 
@@ -5998,6 +5992,16 @@ pub(super) enum RemovalWorld {
     Missing,
     Conflict { reason: String },
     ObservationUnavailable { reason: String },
+}
+
+impl RemovalWorld {
+    pub(super) fn description(&self) -> &str {
+        match self {
+            Self::PresentExact => "the exact object remains present",
+            Self::Missing => "the exact object is absent",
+            Self::Conflict { reason } | Self::ObservationUnavailable { reason } => reason,
+        }
+    }
 }
 
 impl FinalizationReconciliation {
@@ -6080,7 +6084,6 @@ pub(super) enum StoreMutation {
     VerifyPartial,
     ObservePartialParent,
     SyncPartialParent,
-    PreparePublication,
     LinkPublication,
 }
 
@@ -6143,16 +6146,28 @@ pub(super) enum ObservedCandidateWorld {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "partial validation preserves one exact observed world without adding allocations to every failed bounded read"
+)]
 enum PartialLoad {
-    Complete(CompletedPartial),
+    Complete(Box<CompletedPartial>),
     Incomplete(ObservedCandidateWorld),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the cold recovery-required branch preserves complete typed reconciliation evidence"
+)]
 enum PrepareFinalizationDisposition {
     Durable,
     ReconcileRequired(FinalizationReconciliation),
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the cold recovery-required branch preserves complete typed reconciliation evidence"
+)]
 enum PrepareDisposition {
     Durable,
     ReconcileRequired(PublicationReconciliation),

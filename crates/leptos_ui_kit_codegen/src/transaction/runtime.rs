@@ -15,8 +15,11 @@ use super::journal::ValidatedJournalEnvelopeV2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum EntropyPurpose {
     TransactionId,
+    #[cfg(test)]
     LockBootstrapCandidate,
+    #[cfg(test)]
     IgnoreBootstrapCandidate,
+    #[cfg(test)]
     CapabilityProbeCandidate,
 }
 
@@ -24,8 +27,11 @@ impl fmt::Display for EntropyPurpose {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::TransactionId => "transaction identifier",
+            #[cfg(test)]
             Self::LockBootstrapCandidate => "write-lock bootstrap candidate",
+            #[cfg(test)]
             Self::IgnoreBootstrapCandidate => "coordination-ignore bootstrap candidate",
+            #[cfg(test)]
             Self::CapabilityProbeCandidate => "filesystem-capability probe candidate",
         })
     }
@@ -293,22 +299,27 @@ impl TransactionRuntime {
         self.fs.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn fs_arc(&self) -> Arc<dyn FsOps> {
         Arc::clone(&self.fs)
     }
 
+    #[cfg(test)]
     pub(crate) fn entropy(&self) -> &dyn EntropySource {
         self.entropy.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn entropy_arc(&self) -> Arc<dyn EntropySource> {
         Arc::clone(&self.entropy)
     }
 
+    #[cfg(test)]
     pub(crate) fn transition_observer(&self) -> &dyn TransitionObserver {
         self.transition_observer.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn transition_observer_arc(&self) -> Arc<dyn TransitionObserver> {
         Arc::clone(&self.transition_observer)
     }
@@ -506,17 +517,17 @@ mod test_support {
                     ),
                 ));
             }
-            if let QueuedEntropy::Bytes { bytes, .. } = next {
-                if bytes.len() != destination.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "queued {purpose} entropy has {} bytes, but {} were requested",
-                            bytes.len(),
-                            destination.len()
-                        ),
-                    ));
-                }
+            if let QueuedEntropy::Bytes { bytes, .. } = next
+                && bytes.len() != destination.len()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "queued {purpose} entropy has {} bytes, but {} were requested",
+                        bytes.len(),
+                        destination.len()
+                    ),
+                ));
             }
 
             match queue.pop_front().expect("front entry exists") {

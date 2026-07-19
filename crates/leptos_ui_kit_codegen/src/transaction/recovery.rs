@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::sync::Arc;
 use std::{io, path::Path};
 
 use cap_fs_ext::MetadataExt;
@@ -12,8 +10,6 @@ use super::engine::{
     BoundedRecoveryStep, RecoveryBarrierCertificate, derive_recovery_adoption_plan,
     recover_loaded_transaction_step,
 };
-#[cfg(test)]
-use super::fs::FsOps;
 use super::fs::{DirectoryEndpoint, ExactDirectoryObservation, HardLinkEndpoint};
 use super::journal::{FinalizationOutcomeV2, TransactionId, canonical_root_hash};
 use super::lock::{DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT, WriteLock};
@@ -23,8 +19,6 @@ use super::recovery_policy::{
     assess_loaded_recovery, classify_phase, classify_record_reconciliation,
 };
 use super::replace::check_pending_recovery_v1;
-#[cfg(test)]
-use super::runtime::{NoopTransitionObserver, SystemEntropy};
 use super::runtime::{TransactionOutcome, TransactionRuntime};
 use super::store::{
     ActiveJournalLoad, ActiveReconciliation, ActiveReconciliationDisposition,
@@ -42,14 +36,14 @@ const MAX_RECOVERY_MUTATION_PASSES: usize = MAX_RECORDS * 2 + 32;
 enum RecoveryLoopStep {
     Complete,
     DurableProgress,
-    BarrierCertified(RecoveryPassCertificate),
+    BarrierCertified(Box<RecoveryPassCertificate>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecoveryPassCertificate {
     BootstrapFinalizationSlot {
         transaction_id: TransactionId,
-        loaded: LoadedBootstrap,
+        loaded: Box<LoadedBootstrap>,
     },
     Transaction(RecoveryBarrierCertificate),
     ActivePublication {
@@ -58,11 +52,11 @@ enum RecoveryPassCertificate {
     },
     FinalizationPublication {
         transaction_id: TransactionId,
-        loaded: LoadedFinalization,
+        loaded: Box<LoadedFinalization>,
     },
     FinalizationWorld {
         transaction_id: TransactionId,
-        loaded: LoadedFinalization,
+        loaded: Box<LoadedFinalization>,
     },
 }
 
@@ -210,20 +204,6 @@ pub(crate) fn recover_pending_locked(
     recover_pending_locked_with_runtime(context, lock, &runtime)
 }
 
-#[cfg(test)]
-pub(crate) fn recover_pending_locked_with_fs(
-    context: &PlanningContext,
-    lock: &WriteLock,
-    fs: Arc<dyn FsOps>,
-) -> Result<(), CodegenError> {
-    let runtime = TransactionRuntime::new(
-        fs,
-        Arc::new(SystemEntropy),
-        Arc::new(NoopTransitionObserver),
-    );
-    recover_pending_locked_with_runtime(context, lock, &runtime)
-}
-
 fn recover_pending_locked_with_runtime(
     context: &PlanningContext,
     lock: &WriteLock,
@@ -264,7 +244,7 @@ fn recover_pending_locked_with_runtime(
                             .to_owned(),
                     });
                 }
-                barrier_certificate = Some(certificate);
+                barrier_certificate = Some(*certificate);
             }
         }
     }
@@ -338,17 +318,18 @@ fn recover_v2_step(
                     store
                         .certify_bootstrap_finalization_slot(&loaded)
                         .map_err(store_error)?;
-                    return Ok(RecoveryLoopStep::BarrierCertified(
+                    return Ok(RecoveryLoopStep::BarrierCertified(Box::new(
                         RecoveryPassCertificate::BootstrapFinalizationSlot {
                             transaction_id: store.transaction_id().clone(),
-                            loaded,
+                            loaded: Box::new(loaded),
                         },
-                    ));
+                    )));
                 }
                 Some(RecoveryPassCertificate::BootstrapFinalizationSlot {
                     transaction_id,
                     loaded: certified,
-                }) if transaction_id == store.transaction_id() && certified == &loaded => {}
+                }) if transaction_id == store.transaction_id()
+                    && certified.as_ref() == &loaded => {}
                 Some(_) => {
                     return Err(CodegenError::RecoveryRequired {
                         journal_path: workspace_path,
@@ -408,7 +389,7 @@ fn recover_v2_step(
                             lock,
                             runtime,
                             &store,
-                            loaded,
+                            *loaded,
                             &workspace_path,
                             None,
                         ),
@@ -433,7 +414,7 @@ fn recover_v2_step(
                     lock.validate_context(context)?;
                     require_active_reconciled(
                         store.discard_active_partial(
-                            &ActiveJournalLoad::ReconciliationRequired(reconciliation),
+                            &ActiveJournalLoad::ReconciliationRequired(Box::new(reconciliation)),
                             TransactionOutcome::Rollback,
                         ),
                         &workspace_path,
@@ -447,12 +428,12 @@ fn recover_v2_step(
                             store
                                 .certify_active_publication(&reconciliation)
                                 .map_err(store_error)?;
-                            Ok(RecoveryLoopStep::BarrierCertified(
+                            Ok(RecoveryLoopStep::BarrierCertified(Box::new(
                                 RecoveryPassCertificate::ActivePublication {
                                     transaction_id: store.transaction_id().clone(),
                                     reconciliation,
                                 },
-                            ))
+                            )))
                         }
                         Some(RecoveryPassCertificate::ActivePublication {
                             transaction_id,
@@ -498,7 +479,7 @@ fn recover_active_step(
     workspace_path: &Path,
     barrier_certificate: Option<&RecoveryBarrierCertificate>,
 ) -> Result<RecoveryLoopStep, CodegenError> {
-    let load = ActiveJournalLoad::Stable(loaded.clone());
+    let load = ActiveJournalLoad::Stable(Box::new(loaded.clone()));
     let observed = loaded
         .latest()
         .map(|snapshot| capture_stable_recovery_world(context, runtime, snapshot, workspace_path))
@@ -554,7 +535,7 @@ fn recover_active_step(
                             .to_owned(),
                 });
             };
-            if rediscovered != loaded {
+            if rediscovered.as_ref() != &loaded {
                 return Err(CodegenError::RecoveryRequired {
                     journal_path: workspace_path.to_path_buf(),
                     reason: "stable active lineage changed across same-pass recovery adoption"
@@ -615,9 +596,9 @@ fn recover_active_step(
             )? {
                 BoundedRecoveryStep::Advanced => {}
                 BoundedRecoveryStep::BarrierCertified(certificate) => {
-                    return Ok(RecoveryLoopStep::BarrierCertified(
-                        RecoveryPassCertificate::Transaction(certificate),
-                    ));
+                    return Ok(RecoveryLoopStep::BarrierCertified(Box::new(
+                        RecoveryPassCertificate::Transaction(*certificate),
+                    )));
                 }
                 BoundedRecoveryStep::ReadyForFinalization(outcome) => {
                     let latest = loaded.latest().ok_or_else(|| CodegenError::RecoveryRequired {
@@ -746,10 +727,11 @@ fn require_active_reconciled(
             Err(CodegenError::RecoveryRequired {
                 journal_path: journal_path.to_path_buf(),
                 reason: format!(
-                    "journal sequence {} requires another exact {:?} pass at {:?}: {} ({:?})",
+                    "journal sequence {} requires another exact {:?} pass at {:?} with {:?} durability: {} ({:?})",
                     reconciliation.sequence(),
                     reconciliation.action(),
                     reconciliation.mutation(),
+                    reconciliation.durability(),
                     reconciliation.source(),
                     reconciliation.world(),
                 ),
@@ -778,17 +760,18 @@ fn recover_finalization_step(
                     store
                         .certify_finalization_world(loaded)
                         .map_err(store_error)?;
-                    Ok(RecoveryLoopStep::BarrierCertified(
+                    Ok(RecoveryLoopStep::BarrierCertified(Box::new(
                         RecoveryPassCertificate::FinalizationWorld {
                             transaction_id: store.transaction_id().clone(),
-                            loaded: loaded.clone(),
+                            loaded: Box::new(loaded.clone()),
                         },
-                    ))
+                    )))
                 }
                 Some(RecoveryPassCertificate::FinalizationWorld {
                     transaction_id,
                     loaded: certified,
-                }) if transaction_id == store.transaction_id() && certified == loaded => {
+                }) if transaction_id == store.transaction_id()
+                    && certified.as_ref() == loaded => {
                     store
                         .link_finalization_publication(loaded)
                         .map_err(store_error)?;
@@ -813,17 +796,18 @@ fn recover_finalization_step(
                     store
                         .certify_finalization_publication(loaded)
                         .map_err(store_error)?;
-                    Ok(RecoveryLoopStep::BarrierCertified(
+                    Ok(RecoveryLoopStep::BarrierCertified(Box::new(
                         RecoveryPassCertificate::FinalizationPublication {
                             transaction_id: store.transaction_id().clone(),
-                            loaded: loaded.clone(),
+                            loaded: Box::new(loaded.clone()),
                         },
-                    ))
+                    )))
                 }
                 Some(RecoveryPassCertificate::FinalizationPublication {
                     transaction_id,
                     loaded: certified,
-                }) if transaction_id == store.transaction_id() && certified == loaded => {
+                }) if transaction_id == store.transaction_id()
+                    && certified.as_ref() == loaded => {
                     require_removed(
                         store.remove_finalization_partial(partial, outcome),
                         kit_path,
@@ -868,17 +852,17 @@ fn recover_finalization_step(
                     store
                         .certify_finalization_world(loaded)
                         .map_err(store_error)?;
-                    return Ok(RecoveryLoopStep::BarrierCertified(
+                    return Ok(RecoveryLoopStep::BarrierCertified(Box::new(
                         RecoveryPassCertificate::FinalizationWorld {
                             transaction_id: store.transaction_id().clone(),
-                            loaded: loaded.clone(),
+                            loaded: Box::new(loaded.clone()),
                         },
-                    ));
+                    )));
                 }
                 Some(RecoveryPassCertificate::FinalizationWorld {
                     transaction_id,
                     loaded: certified,
-                }) if transaction_id == store.transaction_id() && certified == loaded => {}
+                }) if transaction_id == store.transaction_id() && certified.as_ref() == loaded => {}
                 Some(_) => {
                     return Err(CodegenError::RecoveryRequired {
                         journal_path: kit_path.to_path_buf(),
@@ -966,23 +950,18 @@ fn recover_finalization_step(
                             store.prepare_finalization_publication(Some(loaded), &closed),
                             kit_path,
                         )
+                    } else if let Some(initial) = loaded.history().first()
+                        && initial.lease().generation() != latest.lease().generation()
+                    {
+                        // Remove generation zero first and rediscover before
+                        // retiring the closed tombstone. Each pass performs
+                        // exactly one durable namespace mutation.
+                        require_removed(
+                            store.remove_finalization_record(initial, outcome),
+                            kit_path,
+                        )
                     } else {
-                        if let Some(initial) = loaded.history().first()
-                            && initial.lease().generation() != latest.lease().generation()
-                        {
-                            // Remove generation zero first and rediscover before
-                            // retiring the closed tombstone. Each pass performs
-                            // exactly one durable namespace mutation.
-                            require_removed(
-                                store.remove_finalization_record(initial, outcome),
-                                kit_path,
-                            )
-                        } else {
-                            require_removed(
-                                store.remove_finalization_record(latest, outcome),
-                                kit_path,
-                            )
-                        }
+                        require_removed(store.remove_finalization_record(latest, outcome), kit_path)
                     }
                 }
                 FinalizationCleanupStage::RetiredPrefix => {
@@ -1047,8 +1026,11 @@ fn require_finalization_prepared(
             Err(CodegenError::RecoveryRequired {
                 journal_path: journal_path.to_path_buf(),
                 reason: format!(
-                    "finalization partial preparation requires exact recovery after {:?}: {} ({:?})",
+                    "finalization generation {} {:?} preparation requires exact recovery after {:?} with {:?} durability: {} ({:?})",
+                    reconciliation.generation(),
+                    reconciliation.outcome(),
                     reconciliation.mutation(),
+                    reconciliation.durability(),
                     reconciliation.source(),
                     reconciliation.world(),
                 ),
@@ -1060,7 +1042,10 @@ fn require_finalization_prepared(
 fn reconciliation_error(journal_path: &Path, world: &super::store::RemovalWorld) -> CodegenError {
     CodegenError::RecoveryRequired {
         journal_path: journal_path.to_path_buf(),
-        reason: format!("exact cleanup requires another recovery pass: {world:?}"),
+        reason: format!(
+            "exact cleanup requires another recovery pass: {} ({world:?})",
+            world.description()
+        ),
     }
 }
 

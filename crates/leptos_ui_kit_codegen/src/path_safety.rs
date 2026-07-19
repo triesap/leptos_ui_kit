@@ -50,6 +50,7 @@ impl ObjectIdentity {
     }
 
     #[cfg(windows)]
+    #[allow(dead_code)]
     pub(crate) const fn from_windows(
         identity: leptos_ui_kit_codegen_platform::FileIdentity,
     ) -> Self {
@@ -142,13 +143,6 @@ impl PlanSnapshot {
         self.observations.is_empty()
     }
 
-    pub(crate) fn regular_file_identity(&self, logical_path: &str) -> Option<ObjectIdentity> {
-        self.observations
-            .get(logical_path)
-            .and_then(|observation| observation.regular_file)
-            .map(|regular_file| regular_file.identity)
-    }
-
     pub(crate) fn byte_len(&self, logical_path: &str) -> Option<u64> {
         self.observations
             .get(logical_path)
@@ -161,14 +155,6 @@ impl PlanSnapshot {
             return Some(self.root.identity);
         }
         self.directories.get(logical_path).copied()
-    }
-
-    pub(crate) fn directory_identities(&self) -> impl Iterator<Item = (&str, ObjectIdentity)> + '_ {
-        std::iter::once(("", self.root.identity)).chain(
-            self.directories
-                .iter()
-                .map(|(path, identity)| (path.as_str(), *identity)),
-        )
     }
 
     pub(crate) fn revalidate_all(&self, context: &PlanningContext) -> Result<(), CodegenError> {
@@ -312,43 +298,6 @@ impl PlanningContext {
         (&self.root.canonical_root, self.root.identity)
     }
 
-    pub(crate) fn inspect_directory_identity(
-        &self,
-        logical_path: &str,
-    ) -> Result<Option<ObjectIdentity>, CodegenError> {
-        self.revalidate_project_root_identity()?;
-        if logical_path.is_empty() {
-            let metadata = self.dir.dir_metadata().map_err(|source| CodegenError::Io {
-                path: self.root.canonical_root.clone(),
-                source,
-            })?;
-            ensure_directory_metadata(".", &metadata)?;
-            let identity = metadata_identity(&metadata);
-            if identity != self.root.identity {
-                return Err(CodegenError::ProjectRootChanged {
-                    path: self.root.canonical_root.clone(),
-                    reason: "held project-root capability no longer has the opened identity"
-                        .to_owned(),
-                });
-            }
-            return Ok(Some(identity));
-        }
-
-        validate_controlled_relative_path(logical_path)?;
-        let probe = format!("{logical_path}/directory-probe");
-        let Some((directory, _)) = self.walk_parent(&probe, false)? else {
-            return Ok(None);
-        };
-        let metadata = directory
-            .dir_metadata()
-            .map_err(|source| CodegenError::Io {
-                path: self.root.canonical_root.join(logical_path),
-                source,
-            })?;
-        ensure_directory_metadata(logical_path, &metadata)?;
-        Ok(Some(metadata_identity(&metadata)))
-    }
-
     pub(crate) fn open_pinned_project_root(&self) -> Result<Dir, CodegenError> {
         let directory = Dir::open_ambient_dir(&self.root.canonical_root, ambient_authority())
             .map_err(|source| CodegenError::Io {
@@ -435,13 +384,6 @@ impl PlanningContext {
 
     pub(crate) fn observe_path(&self, logical_path: &str) -> Result<PathPreimage, CodegenError> {
         Ok(self.observe(logical_path)?.preimage)
-    }
-
-    pub(crate) fn inspect_path_uncached(
-        &self,
-        logical_path: &str,
-    ) -> Result<PathPreimage, CodegenError> {
-        Ok(self.inspect_uncached(logical_path)?.preimage)
     }
 
     pub(crate) fn finish_snapshot(&self) -> PlanSnapshot {

@@ -779,8 +779,11 @@ impl<'a> ImmutableJournalStore<'a> {
                         Err(CodegenError::RecoveryRequired {
                             journal_path: self.kit_path.clone(),
                             reason: format!(
-                                "finalization partial preparation requires exact recovery after {:?}: {} ({:?})",
+                                "finalization generation {} {:?} preparation requires exact recovery after {:?} with {:?} durability: {} ({:?})",
+                                reconciliation.generation(),
+                                reconciliation.outcome(),
                                 reconciliation.mutation(),
+                                reconciliation.durability(),
                                 reconciliation.source(),
                                 reconciliation.world(),
                             ),
@@ -923,7 +926,14 @@ impl<'a> ImmutableJournalStore<'a> {
     ) -> CodegenError {
         CodegenError::RecoveryRequired {
             journal_path: self.kit_path.clone(),
-            reason: format!("{label} removal requires exact reconciliation: {reconciliation:?}"),
+            reason: format!(
+                "{label} {:?} {:?} removal requires exact reconciliation after {:?}: {} ({})",
+                reconciliation.object(),
+                reconciliation.outcome(),
+                reconciliation.mutation(),
+                reconciliation.source(),
+                reconciliation.world().description(),
+            ),
         }
     }
 
@@ -944,7 +954,7 @@ impl<'a> ImmutableJournalStore<'a> {
         let (certified_loaded, adopted) =
             self.with_strict_store(true, &self.workspace_path, |store| {
             let loaded = match store.load_active().map_err(strict_store_error)? {
-                ActiveJournalLoad::Stable(loaded) => loaded,
+                ActiveJournalLoad::Stable(loaded) => *loaded,
                 ActiveJournalLoad::ReconciliationRequired(reconciliation) => {
                     return Err(CodegenError::RecoveryRequired {
                         journal_path: self.workspace_path.clone(),
@@ -976,9 +986,10 @@ impl<'a> ImmutableJournalStore<'a> {
                 return Err(CodegenError::RecoveryRequired {
                     journal_path: self.workspace_path.clone(),
                     reason: format!(
-                        "journal partial preparation at {:?} requires exact recovery after {:?}: {} ({:?})",
+                        "journal partial preparation at {:?} requires exact recovery after {:?} with {:?} durability: {} ({:?})",
                         reconciliation.boundary(),
                         reconciliation.mutation(),
+                        reconciliation.durability(),
                         reconciliation.source(),
                         reconciliation.world(),
                     ),
@@ -1000,9 +1011,10 @@ impl<'a> ImmutableJournalStore<'a> {
             return Err(CodegenError::RecoveryRequired {
                 journal_path: self.workspace_path.clone(),
                 reason: format!(
-                    "journal publication at {:?} requires exact recovery after {:?}: {} ({:?})",
+                    "journal publication at {:?} requires exact recovery after {:?} with {:?} durability: {} ({:?})",
                     reconciliation.boundary(),
                     reconciliation.mutation(),
+                    reconciliation.durability(),
                     reconciliation.source(),
                     reconciliation.world(),
                 ),
@@ -1043,8 +1055,9 @@ impl<'a> ImmutableJournalStore<'a> {
                 Err(CodegenError::RecoveryRequired {
                     journal_path: self.workspace_path.clone(),
                     reason: format!(
-                        "certified journal partial retirement requires exact recovery after {:?}: {} ({:?})",
+                        "certified journal partial retirement requires exact recovery after {:?} with {:?} durability: {} ({:?})",
                         reconciliation.mutation(),
+                        reconciliation.durability(),
                         reconciliation.source(),
                         reconciliation.world(),
                     ),

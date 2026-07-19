@@ -4828,19 +4828,16 @@ fn post_open_create_errors_recover_exact_empty_journal_and_finalization_residual
                 "post-open failure must leave the exact empty created object"
             );
             assert!(
-                !events
-                    .iter()
-                    .any(|event| match (preparation, event.operation) {
-                        (
-                            Preparation::Journal,
-                            FsOperation::PrepareJournalPartial { after: true, .. },
-                        )
-                        | (
-                            Preparation::Finalization,
-                            FsOperation::PrepareFinalizationPartial { after: true, .. },
-                        ) => true,
-                        _ => false,
-                    }),
+                !events.iter().any(|event| matches!(
+                    (preparation, event.operation),
+                    (
+                        Preparation::Journal,
+                        FsOperation::PrepareJournalPartial { after: true, .. },
+                    ) | (
+                        Preparation::Finalization,
+                        FsOperation::PrepareFinalizationPartial { after: true, .. },
+                    )
+                )),
                 "a failed preparation emitted a truthful-success transition"
             );
 

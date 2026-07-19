@@ -185,10 +185,6 @@ impl ExactRecoveryWorld {
         }
     }
 
-    pub(super) fn objects(&self) -> &BTreeMap<RecoveryObjectKey, ExactRecoveryObject> {
-        &self.objects
-    }
-
     pub(super) fn inventories(&self) -> &BTreeMap<RecoveryObjectKey, ExactRecoveryInventory> {
         &self.inventories
     }
@@ -961,20 +957,17 @@ fn classify_pending_cleanup(
             after
                 .objects
                 .insert(cleanup_key(*target), ExactRecoveryObject::Missing);
-            if let CleanupTargetV2::PlacedStage { ordinal } = target {
-                if let Some(ExactRecoveryObject::File(current_target)) =
+            if let CleanupTargetV2::PlacedStage { ordinal } = target
+                && let Some(ExactRecoveryObject::File(current_target)) =
                     after.objects.get(&RecoveryObjectKey::Target(*ordinal))
-                {
-                    if current_target.identity() == expected.identity()
-                        && current_target.link_count() == 2
-                    {
-                        let target_after = file_with_link_count(current_target, 1, journal_path)?;
-                        after.objects.insert(
-                            RecoveryObjectKey::Target(*ordinal),
-                            ExactRecoveryObject::File(target_after),
-                        );
-                    }
-                }
+                && current_target.identity() == expected.identity()
+                && current_target.link_count() == 2
+            {
+                let target_after = file_with_link_count(current_target, 1, journal_path)?;
+                after.objects.insert(
+                    RecoveryObjectKey::Target(*ordinal),
+                    ExactRecoveryObject::File(target_after),
+                );
             }
         }
         CleanupIntentV2::RemoveDirectory { target, .. } => {

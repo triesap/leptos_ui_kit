@@ -194,7 +194,7 @@ fn execute_ordered(
             .map_err(model_error_at(context.project_root()))?;
         store.publish_successor(prepared_snapshot)?;
         snapshot.revalidate_all(context)?;
-        commit_files(context, lock, snapshot, &prepared, &mut store)
+        commit_files(context, lock, snapshot, prepared, &mut store)
     })();
     match execution {
         Ok(()) => Ok(()),
@@ -1219,6 +1219,10 @@ fn observe_file_child_optional(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the owner-placement boundary keeps each independently authenticated protocol value explicit"
+)]
 fn place_file_owner(
     context: &PlanningContext,
     lock: &WriteLock,
@@ -1809,7 +1813,7 @@ fn commit_files(
                         &parent,
                         Path::new(&prepared_file.target_name),
                         &prepared_file.target_path,
-                        entry_file_read_limit(&entry),
+                        entry_file_read_limit(entry),
                     )
                     .map_err(|source| {
                         transaction_io(
@@ -2157,7 +2161,7 @@ fn cleanup_commit(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BoundedRecoveryStep {
     Advanced,
-    BarrierCertified(RecoveryBarrierCertificate),
+    BarrierCertified(Box<RecoveryBarrierCertificate>),
     ReadyForFinalization(TransactionOutcome),
 }
 
@@ -2706,7 +2710,7 @@ fn recover_loaded_transaction_step_inner(
                     window: TransitionWindow::After,
                 });
             }
-            Ok(BoundedRecoveryStep::BarrierCertified(certificate))
+            Ok(BoundedRecoveryStep::BarrierCertified(Box::new(certificate)))
         }
         RecoveryPreflightV2::PendingPlacement {
             ordinal,
@@ -2748,7 +2752,7 @@ fn recover_loaded_transaction_step_inner(
             if world == MutationWorldV2::Before || completion_authorized {
                 Ok(BoundedRecoveryStep::Advanced)
             } else {
-                Ok(BoundedRecoveryStep::BarrierCertified(certificate))
+                Ok(BoundedRecoveryStep::BarrierCertified(Box::new(certificate)))
             }
         }
         RecoveryPreflightV2::ForwardReplacementCompleted { ordinal, world } => {
@@ -2786,7 +2790,7 @@ fn recover_loaded_transaction_step_inner(
                 Ok(BoundedRecoveryStep::Advanced)
             } else {
                 certify_unrecorded_replacement_durable(context, lock, &store, &entry)?;
-                Ok(BoundedRecoveryStep::BarrierCertified(certificate))
+                Ok(BoundedRecoveryStep::BarrierCertified(Box::new(certificate)))
             }
         }
         RecoveryPreflightV2::PendingRollback { ordinal, world } => {
@@ -2822,7 +2826,7 @@ fn recover_loaded_transaction_step_inner(
                 return Ok(BoundedRecoveryStep::Advanced);
             }
             complete_pending_rollback(context, lock, &store, intent)?;
-            Ok(BoundedRecoveryStep::BarrierCertified(certificate))
+            Ok(BoundedRecoveryStep::BarrierCertified(Box::new(certificate)))
         }
         RecoveryPreflightV2::PendingCleanup { target, world } => {
             let (outcome, pending) = match store.snapshot().phase() {
@@ -2865,7 +2869,7 @@ fn recover_loaded_transaction_step_inner(
                 !completion_authorized,
             )?;
             if !completion_authorized {
-                return Ok(BoundedRecoveryStep::BarrierCertified(certificate));
+                return Ok(BoundedRecoveryStep::BarrierCertified(Box::new(certificate)));
             }
             let successor = store
                 .snapshot()
@@ -4351,28 +4355,27 @@ fn execute_cleanup_intent(
                 }
             }
             let parent_after = if owner {
-                if perform_durability_transition {
-                    if let Err(sync_error) = sync_transaction_workspace(context, lock, store, &path)
-                    {
-                        return Err(CodegenError::RecoveryRequired {
-                            journal_path: path.clone(),
-                            reason: match removal_error.as_ref() {
-                                Some(remove_error) => format!(
-                                    "cleanup directory removal may have completed ({remove_error}); its workspace durability barrier also failed: {sync_error}"
-                                ),
-                                None => format!(
-                                    "cleanup directory reached its after-world, but its workspace durability barrier failed: {sync_error}"
-                                ),
-                            },
-                        });
-                    }
+                if perform_durability_transition
+                    && let Err(sync_error) = sync_transaction_workspace(context, lock, store, &path)
+                {
+                    return Err(CodegenError::RecoveryRequired {
+                        journal_path: path.clone(),
+                        reason: match removal_error.as_ref() {
+                            Some(remove_error) => format!(
+                                "cleanup directory removal may have completed ({remove_error}); its workspace durability barrier also failed: {sync_error}"
+                            ),
+                            None => format!(
+                                "cleanup directory reached its after-world, but its workspace durability barrier failed: {sync_error}"
+                            ),
+                        },
+                    });
                 }
                 store.snapshot().project().workspace().exact().clone()
             } else {
                 let observed =
                     observe_directory_path(context, store.runtime().fs(), logical_parent_path)?;
-                if perform_durability_transition {
-                    if let Err(sync_error) = sync_directory_path(
+                if perform_durability_transition
+                    && let Err(sync_error) = sync_directory_path(
                         context,
                         lock,
                         store.runtime().fs(),
@@ -4380,19 +4383,19 @@ fn execute_cleanup_intent(
                         logical_parent_path,
                         &observed,
                         &path,
-                    ) {
-                        return Err(CodegenError::RecoveryRequired {
-                            journal_path: path.clone(),
-                            reason: match removal_error.as_ref() {
-                                Some(remove_error) => format!(
-                                    "cleanup directory removal may have completed ({remove_error}); its parent durability barrier also failed: {sync_error}"
-                                ),
-                                None => format!(
-                                    "cleanup directory reached its after-world, but its parent durability barrier failed: {sync_error}"
-                                ),
-                            },
-                        });
-                    }
+                    )
+                {
+                    return Err(CodegenError::RecoveryRequired {
+                        journal_path: path.clone(),
+                        reason: match removal_error.as_ref() {
+                            Some(remove_error) => format!(
+                                "cleanup directory removal may have completed ({remove_error}); its parent durability barrier also failed: {sync_error}"
+                            ),
+                            None => format!(
+                                "cleanup directory reached its after-world, but its parent durability barrier failed: {sync_error}"
+                            ),
+                        },
+                    });
                 }
                 exact_directory(&observed).map_err(model_error_at(directory.logical_path()))?
             };
@@ -4979,14 +4982,8 @@ mod barrier_certificate_tests {
         let context = PlanningContext::open(temporary.path()).unwrap();
         let expected = certificate("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a", 11);
 
-        assert_eq!(
-            authorize_recovery_barrier(None, &expected, true, &context).unwrap(),
-            false
-        );
-        assert_eq!(
-            authorize_recovery_barrier(Some(&expected), &expected, true, &context).unwrap(),
-            true
-        );
+        assert!(!authorize_recovery_barrier(None, &expected, true, &context).unwrap());
+        assert!(authorize_recovery_barrier(Some(&expected), &expected, true, &context).unwrap());
     }
 
     #[test]

@@ -960,6 +960,7 @@ enum TransactionsDirectoryCleanupOutcome {
 enum StaleCandidateCleanupOutcome {
     Complete,
     #[cfg(windows)]
+    #[allow(dead_code)]
     HeldLockAliasDeferred {
         transactions_identity: ObjectIdentity,
     },
