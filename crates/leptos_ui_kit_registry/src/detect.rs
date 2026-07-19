@@ -1,10 +1,12 @@
 use std::{
+    collections::BTreeSet,
     fmt, fs,
     path::{Path, PathBuf},
 };
 
+use semver::{Op as SemverOp, Version, VersionReq};
 use serde::{Deserialize, Serialize};
-use toml::Value as TomlValue;
+use toml::{Table as TomlTable, Value as TomlValue};
 
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
@@ -103,6 +105,7 @@ pub struct DependencyRequirement {
     pub found_source: Option<DetectedDependencySource>,
     pub features: Vec<String>,
     pub status: DependencyStatus,
+    pub incompatibility: Option<DependencyIncompatibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +122,39 @@ pub enum DependencyStatus {
     Satisfied,
     Missing,
     Incompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DependencyIncompatibility {
+    Renamed {
+        dependency_key: String,
+    },
+    NonNormal {
+        declaration: DependencyDeclarationKind,
+    },
+    Optional,
+    MissingWorkspaceDeclaration,
+    InvalidWorkspaceInheritance,
+    UnsupportedPathSource,
+    UnsupportedSource,
+    InvalidVersionRequirement,
+    UnprovenVersionRequirement,
+    SourceMismatch,
+    MissingFeatures {
+        features: Vec<String>,
+    },
+    ConflictingFeatures {
+        features: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyDeclarationKind {
+    Development,
+    Build,
+    Target,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,12 +294,7 @@ pub fn detect_cargo_plan_requirements(
 }
 
 fn detect_render_mode(dependency_plan: &DependencyPlan) -> Option<RenderMode> {
-    if dependency_plan
-        .leptos
-        .features
-        .iter()
-        .any(|feature| feature == "csr")
-    {
+    if dependency_plan.leptos.status == DependencyStatus::Satisfied {
         return Some(RenderMode::Csr);
     }
 
@@ -274,25 +305,48 @@ pub fn dependency_requirement_for_cargo_plan(
     manifest: &TomlValue,
     entry: &CargoPlanEntry,
 ) -> DependencyRequirement {
-    let dependency = manifest
-        .get("dependencies")
-        .and_then(TomlValue::as_table)
-        .and_then(|dependencies| dependencies.get(&entry.crate_name));
-
-    let found_source = dependency.and_then(dependency_source);
-    let features = dependency.and_then(dependency_features).unwrap_or_default();
-
-    let status = if dependency.is_none() {
-        DependencyStatus::Missing
-    } else if found_source
+    let effective = effective_normal_dependency(manifest, &entry.crate_name);
+    let found_source = effective.as_ref().and_then(|found| found.source.clone());
+    let features = effective
         .as_ref()
-        .is_some_and(|source| source_matches_requirement(source, &entry.source))
-        && required_features_are_present(&features, &entry.features)
-        && !has_conflicting_features(&entry.crate_name, &features)
-    {
-        DependencyStatus::Satisfied
-    } else {
-        DependencyStatus::Incompatible
+        .map(|found| found.features.clone())
+        .unwrap_or_default();
+    let incompatibility = effective
+        .as_ref()
+        .and_then(|found| found.incompatibility.clone())
+        .or_else(|| {
+            found_source.as_ref().and_then(|source| {
+                if source_matches_requirement(source, &entry.source) {
+                    None
+                } else if source.kind == CargoPlanSourceKind::Version
+                    && entry.source.kind == CargoPlanSourceKind::Version
+                {
+                    Some(DependencyIncompatibility::UnprovenVersionRequirement)
+                } else {
+                    Some(DependencyIncompatibility::SourceMismatch)
+                }
+            })
+        })
+        .or_else(|| {
+            let missing = entry
+                .features
+                .iter()
+                .filter(|required| !features.iter().any(|found| found == *required))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!missing.is_empty())
+                .then_some(DependencyIncompatibility::MissingFeatures { features: missing })
+        })
+        .or_else(|| {
+            let conflicting = conflicting_features(&entry.crate_name, &features);
+            (!conflicting.is_empty()).then_some(DependencyIncompatibility::ConflictingFeatures {
+                features: conflicting,
+            })
+        });
+    let status = match effective {
+        None => DependencyStatus::Missing,
+        Some(_) if incompatibility.is_none() => DependencyStatus::Satisfied,
+        Some(_) => DependencyStatus::Incompatible,
     };
 
     DependencyRequirement {
@@ -303,7 +357,185 @@ pub fn dependency_requirement_for_cargo_plan(
         found_source,
         features,
         status,
+        incompatibility,
     }
+}
+
+#[derive(Debug)]
+struct EffectiveDependency {
+    source: Option<DetectedDependencySource>,
+    features: Vec<String>,
+    incompatibility: Option<DependencyIncompatibility>,
+}
+
+fn effective_normal_dependency(
+    manifest: &TomlValue,
+    crate_name: &str,
+) -> Option<EffectiveDependency> {
+    let normal = manifest.get("dependencies").and_then(TomlValue::as_table);
+    if let Some(value) = normal.and_then(|dependencies| dependencies.get(crate_name)) {
+        return Some(resolve_normal_dependency(manifest, crate_name, value));
+    }
+
+    if let Some(dependency_key) = renamed_dependency_key(normal, crate_name) {
+        return Some(incompatible_dependency(
+            DependencyIncompatibility::Renamed { dependency_key },
+        ));
+    }
+
+    for (table_name, declaration) in [
+        ("dev-dependencies", DependencyDeclarationKind::Development),
+        ("build-dependencies", DependencyDeclarationKind::Build),
+    ] {
+        let table = manifest.get(table_name).and_then(TomlValue::as_table);
+        if table.is_some_and(|dependencies| dependencies.contains_key(crate_name))
+            || renamed_dependency_key(table, crate_name).is_some()
+        {
+            return Some(incompatible_dependency(
+                DependencyIncompatibility::NonNormal { declaration },
+            ));
+        }
+    }
+
+    if manifest
+        .get("target")
+        .and_then(TomlValue::as_table)
+        .is_some_and(|targets| target_has_dependency(targets, crate_name))
+    {
+        return Some(incompatible_dependency(
+            DependencyIncompatibility::NonNormal {
+                declaration: DependencyDeclarationKind::Target,
+            },
+        ));
+    }
+
+    None
+}
+
+fn resolve_normal_dependency(
+    manifest: &TomlValue,
+    crate_name: &str,
+    member_value: &TomlValue,
+) -> EffectiveDependency {
+    let mut features = dependency_features(member_value).unwrap_or_default();
+    let mut optional = dependency_optional(member_value);
+    let source_value = if member_value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .is_some()
+    {
+        let Some(member) = member_value.as_table() else {
+            return incompatible_dependency(DependencyIncompatibility::InvalidWorkspaceInheritance);
+        };
+        if member.get("workspace").and_then(TomlValue::as_bool) != Some(true)
+            || member.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "workspace" | "features" | "optional" | "default-features"
+                )
+            })
+        {
+            return EffectiveDependency {
+                source: dependency_source(member_value),
+                features: sorted_features(features),
+                incompatibility: Some(DependencyIncompatibility::InvalidWorkspaceInheritance),
+            };
+        }
+
+        let Some(workspace_value) = manifest
+            .get("workspace")
+            .and_then(TomlValue::as_table)
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(TomlValue::as_table)
+            .and_then(|dependencies| dependencies.get(crate_name))
+        else {
+            return EffectiveDependency {
+                source: None,
+                features: sorted_features(features),
+                incompatibility: Some(DependencyIncompatibility::MissingWorkspaceDeclaration),
+            };
+        };
+        features.extend(dependency_features(workspace_value).unwrap_or_default());
+        optional |= dependency_optional(workspace_value);
+        workspace_value
+    } else {
+        member_value
+    };
+
+    if dependency_package(source_value).is_some_and(|package| package != crate_name) {
+        return EffectiveDependency {
+            source: dependency_source(source_value),
+            features: sorted_features(features),
+            incompatibility: Some(DependencyIncompatibility::Renamed {
+                dependency_key: crate_name.to_owned(),
+            }),
+        };
+    }
+
+    let features = sorted_features(features);
+    if optional {
+        return EffectiveDependency {
+            source: dependency_source(source_value),
+            features,
+            incompatibility: Some(DependencyIncompatibility::Optional),
+        };
+    }
+
+    let (source, incompatibility) = classify_dependency_source(source_value);
+    EffectiveDependency {
+        source,
+        features,
+        incompatibility,
+    }
+}
+
+fn incompatible_dependency(incompatibility: DependencyIncompatibility) -> EffectiveDependency {
+    EffectiveDependency {
+        source: None,
+        features: Vec::new(),
+        incompatibility: Some(incompatibility),
+    }
+}
+
+fn classify_dependency_source(
+    value: &TomlValue,
+) -> (
+    Option<DetectedDependencySource>,
+    Option<DependencyIncompatibility>,
+) {
+    if value
+        .as_table()
+        .is_some_and(|table| table.contains_key("path"))
+    {
+        return (
+            dependency_source(value),
+            Some(DependencyIncompatibility::UnsupportedPathSource),
+        );
+    }
+
+    let source = dependency_source(value);
+    let incompatibility = match source.as_ref() {
+        Some(DetectedDependencySource {
+            kind: CargoPlanSourceKind::Version,
+            version: Some(version),
+            ..
+        }) => match VersionReq::parse(version) {
+            Ok(_) => None,
+            Err(_) => Some(DependencyIncompatibility::InvalidVersionRequirement),
+        },
+        Some(DetectedDependencySource {
+            kind: CargoPlanSourceKind::Git,
+            rev: Some(_),
+            ..
+        }) => None,
+        Some(DetectedDependencySource {
+            kind: CargoPlanSourceKind::Git,
+            rev: None,
+            ..
+        }) => Some(DependencyIncompatibility::UnsupportedSource),
+        Some(_) | None => Some(DependencyIncompatibility::UnsupportedSource),
+    };
+    (source, incompatibility)
 }
 
 fn dependency_source(value: &TomlValue) -> Option<DetectedDependencySource> {
@@ -345,6 +577,13 @@ fn source_matches_requirement(
     found: &DetectedDependencySource,
     required: &CargoPlanSource,
 ) -> bool {
+    if found.kind == CargoPlanSourceKind::Version && required.kind == CargoPlanSourceKind::Version {
+        return matches!(
+            (found.version.as_deref(), required.version.as_deref()),
+            (Some(found), Some(anchor)) if version_requirement_proves_compatibility(found, anchor)
+        );
+    }
+
     let found = CargoPlanSource {
         kind: found.kind,
         version: found.version.clone(),
@@ -356,17 +595,36 @@ fn source_matches_requirement(
     matches!((found, required), (Ok(found), Ok(required)) if found == required)
 }
 
-fn required_features_are_present(found: &[String], required: &[String]) -> bool {
-    required
-        .iter()
-        .all(|feature| found.iter().any(|found| found == feature))
+fn version_requirement_proves_compatibility(requirement: &str, anchor: &str) -> bool {
+    let Ok(requirement) = VersionReq::parse(requirement) else {
+        return false;
+    };
+    let Ok(anchor) = Version::parse(anchor) else {
+        return false;
+    };
+    if !requirement.matches(&anchor) || requirement.comparators.len() != 1 {
+        return false;
+    }
+
+    let comparator = &requirement.comparators[0];
+    matches!(
+        comparator.op,
+        SemverOp::Caret | SemverOp::Exact | SemverOp::Tilde
+    ) && comparator.major == anchor.major
+        && comparator.minor == Some(anchor.minor)
+        && comparator.patch == Some(anchor.patch)
+        && comparator.pre == anchor.pre
 }
 
-fn has_conflicting_features(crate_name: &str, features: &[String]) -> bool {
-    crate_name == "leptos"
-        && features
-            .iter()
-            .any(|feature| matches!(feature.as_str(), "hydrate" | "ssr" | "islands"))
+fn conflicting_features(crate_name: &str, features: &[String]) -> Vec<String> {
+    if crate_name != "leptos" {
+        return Vec::new();
+    }
+    features
+        .iter()
+        .filter(|feature| matches!(feature.as_str(), "hydrate" | "ssr" | "islands"))
+        .cloned()
+        .collect()
 }
 
 fn dependency_features(value: &TomlValue) -> Option<Vec<String>> {
@@ -383,6 +641,50 @@ fn dependency_features(value: &TomlValue) -> Option<Vec<String>> {
         ),
         _ => None,
     }
+}
+
+fn dependency_optional(value: &TomlValue) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("optional"))
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(false)
+}
+
+fn dependency_package(value: &TomlValue) -> Option<&str> {
+    value
+        .as_table()
+        .and_then(|table| table.get("package"))
+        .and_then(TomlValue::as_str)
+}
+
+fn renamed_dependency_key(table: Option<&TomlTable>, crate_name: &str) -> Option<String> {
+    table?.iter().find_map(|(key, value)| {
+        (key != crate_name && dependency_package(value) == Some(crate_name)).then(|| key.to_owned())
+    })
+}
+
+fn target_has_dependency(targets: &TomlTable, crate_name: &str) -> bool {
+    targets.values().any(|target| {
+        let Some(target) = target.as_table() else {
+            return false;
+        };
+        ["dependencies", "dev-dependencies", "build-dependencies"]
+            .iter()
+            .filter_map(|key| target.get(*key).and_then(TomlValue::as_table))
+            .any(|dependencies| {
+                dependencies.contains_key(crate_name)
+                    || renamed_dependency_key(Some(dependencies), crate_name).is_some()
+            })
+    })
+}
+
+fn sorted_features(features: Vec<String>) -> Vec<String> {
+    features
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn read_to_string(path: &Path) -> Result<String, DetectionError> {
@@ -437,6 +739,20 @@ leptos_router = "0.9.0-alpha"
         let path = root.join(DEFAULT_KIT_CONFIG_PATH);
         fs::create_dir_all(path.parent().expect("kit config parent")).expect("create kit dir");
         fs::write(path, config).expect("write kit.json");
+    }
+
+    fn leptos_entry() -> CargoPlanEntry {
+        CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["csr".to_owned()],
+            required: true,
+        }
+    }
+
+    fn requirement_for(manifest: &str) -> DependencyRequirement {
+        let manifest = toml::from_str(manifest).expect("parse manifest");
+        dependency_requirement_for_cargo_plan(&manifest, &leptos_entry())
     }
 
     #[test]
@@ -608,6 +924,217 @@ leptos = { git = "SSH://git@EXAMPLE.COM:22/Org/Repo/", rev = "ABCDEF0123456789AB
         let requirement = dependency_requirement_for_cargo_plan(&manifest, &entry);
 
         assert_eq!(requirement.status, DependencyStatus::Missing);
+    }
+
+    #[test]
+    fn version_requirements_are_accepted_only_when_compatibility_is_proven() {
+        for requirement in [
+            "0.9.0-alpha",
+            "^0.9.0-alpha",
+            "=0.9.0-alpha",
+            "~0.9.0-alpha",
+        ] {
+            let detected = requirement_for(&format!(
+                r#"[dependencies]
+leptos = {{ version = "{requirement}", features = ["csr"] }}
+"#
+            ));
+            assert_eq!(
+                detected.status,
+                DependencyStatus::Satisfied,
+                "{requirement}"
+            );
+            assert_eq!(detected.incompatibility, None, "{requirement}");
+        }
+
+        for requirement in [
+            "0.9.*",
+            ">=0.9.0-alpha",
+            ">=0.9.0-alpha, <1.0.0",
+            "0.8.0",
+            "0.9.0-beta",
+            "*",
+        ] {
+            let detected = requirement_for(&format!(
+                r#"[dependencies]
+leptos = {{ version = "{requirement}", features = ["csr"] }}
+"#
+            ));
+            assert_eq!(
+                detected.status,
+                DependencyStatus::Incompatible,
+                "{requirement}"
+            );
+            assert_eq!(
+                detected.incompatibility,
+                Some(DependencyIncompatibility::UnprovenVersionRequirement),
+                "{requirement}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_manifest_workspace_dependency_merges_member_features() {
+        let detected = requirement_for(
+            r#"[workspace]
+
+[workspace.dependencies]
+leptos = { version = "0.9.0-alpha", features = ["tracing"] }
+
+[dependencies]
+leptos = { workspace = true, features = ["csr", "tracing"] }
+"#,
+        );
+
+        assert_eq!(detected.status, DependencyStatus::Satisfied);
+        assert_eq!(detected.features, ["csr", "tracing"]);
+    }
+
+    #[test]
+    fn workspace_inheritance_fails_closed_for_missing_or_overridden_sources() {
+        let missing = requirement_for(
+            r#"[workspace]
+[dependencies]
+leptos = { workspace = true, features = ["csr"] }
+"#,
+        );
+        assert_eq!(
+            missing.incompatibility,
+            Some(DependencyIncompatibility::MissingWorkspaceDeclaration)
+        );
+
+        let override_source = requirement_for(
+            r#"[workspace]
+[workspace.dependencies]
+leptos = "0.9.0-alpha"
+[dependencies]
+leptos = { workspace = true, version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        );
+        assert_eq!(
+            override_source.incompatibility,
+            Some(DependencyIncompatibility::InvalidWorkspaceInheritance)
+        );
+    }
+
+    #[test]
+    fn optional_renamed_and_non_normal_dependencies_cannot_satisfy_codegen() {
+        let cases = [
+            (
+                r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"], optional = true }
+"#,
+                DependencyIncompatibility::Optional,
+            ),
+            (
+                r#"[dependencies]
+web = { package = "leptos", version = "0.9.0-alpha", features = ["csr"] }
+"#,
+                DependencyIncompatibility::Renamed {
+                    dependency_key: "web".to_owned(),
+                },
+            ),
+            (
+                r#"[dev-dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+                DependencyIncompatibility::NonNormal {
+                    declaration: DependencyDeclarationKind::Development,
+                },
+            ),
+            (
+                r#"[build-dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+                DependencyIncompatibility::NonNormal {
+                    declaration: DependencyDeclarationKind::Build,
+                },
+            ),
+            (
+                r#"[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+                DependencyIncompatibility::NonNormal {
+                    declaration: DependencyDeclarationKind::Target,
+                },
+            ),
+        ];
+
+        for (manifest, incompatibility) in cases {
+            let detected = requirement_for(manifest);
+            assert_eq!(detected.status, DependencyStatus::Incompatible);
+            assert_eq!(detected.incompatibility, Some(incompatibility));
+        }
+    }
+
+    #[test]
+    fn unsupported_path_and_inexact_git_sources_are_precise() {
+        let path = requirement_for(
+            r#"[dependencies]
+leptos = { path = "../leptos", version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        );
+        assert_eq!(
+            path.incompatibility,
+            Some(DependencyIncompatibility::UnsupportedPathSource)
+        );
+
+        let git_without_rev = requirement_for(
+            r#"[dependencies]
+leptos = { git = "https://example.com/leptos", branch = "main", features = ["csr"] }
+"#,
+        );
+        assert_eq!(
+            git_without_rev.incompatibility,
+            Some(DependencyIncompatibility::UnsupportedSource)
+        );
+    }
+
+    #[test]
+    fn missing_and_conflicting_csr_features_are_distinct() {
+        let missing = requirement_for(
+            r#"[dependencies]
+leptos = "0.9.0-alpha"
+"#,
+        );
+        assert_eq!(
+            missing.incompatibility,
+            Some(DependencyIncompatibility::MissingFeatures {
+                features: vec!["csr".to_owned()],
+            })
+        );
+
+        let conflicting = requirement_for(
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr", "hydrate", "ssr", "islands"] }
+"#,
+        );
+        assert_eq!(
+            conflicting.incompatibility,
+            Some(DependencyIncompatibility::ConflictingFeatures {
+                features: vec!["hydrate".to_owned(), "islands".to_owned(), "ssr".to_owned(),],
+            })
+        );
+    }
+
+    #[test]
+    fn dependency_detection_does_not_mutate_consumer_manifest_or_lock() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("Cargo.toml");
+        let lock_path = dir.path().join("Cargo.lock");
+        let manifest = r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#;
+        let lock = "# intentionally opaque consumer lock\n";
+        fs::write(&manifest_path, manifest).expect("write manifest");
+        fs::write(&lock_path, lock).expect("write lock");
+
+        let requirements =
+            detect_cargo_plan_requirements(dir.path(), &[leptos_entry()]).expect("detect");
+
+        assert_eq!(requirements[0].status, DependencyStatus::Satisfied);
+        assert_eq!(fs::read_to_string(manifest_path).unwrap(), manifest);
+        assert_eq!(fs::read_to_string(lock_path).unwrap(), lock);
     }
 
     #[test]

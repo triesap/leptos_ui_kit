@@ -25,9 +25,9 @@ pub use config::{
     normalize_single_crate_project, parse_kit_json_str,
 };
 pub use detect::{
-    DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,
-    DetectedProject, DetectionError, InfoOutput, build_info_output,
-    dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
+    DependencyDeclarationKind, DependencyIncompatibility, DependencyPlan, DependencyRequirement,
+    DependencyStatus, DetectedDependencySource, DetectedProject, DetectionError, InfoOutput,
+    build_info_output, dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
     detect_single_crate_project,
 };
 #[allow(
