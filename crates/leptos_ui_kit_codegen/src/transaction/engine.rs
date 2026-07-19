@@ -85,6 +85,8 @@ struct PreparedFile {
     logical_path: String,
     target_name: String,
     target_path: PathBuf,
+    stage_parent: Dir,
+    stage_parent_path: PathBuf,
     stage_name: String,
     stage_path: PathBuf,
     stage: ExactFileObservation,
@@ -171,10 +173,16 @@ fn execute_ordered(
         },
     )?;
 
+    let mut prepared_authority = None;
     let execution = (|| {
         preflight_preparation_filesystems(context, lock, &store)?;
         prepare_directories(context, lock, &mut store)?;
-        let prepared = prepare_files(context, lock, snapshot, &ordered, &mut store)?;
+        prepared_authority = Some(prepare_files(
+            context, lock, snapshot, &ordered, &mut store,
+        )?);
+        let prepared = prepared_authority
+            .as_ref()
+            .expect("prepared authority was just installed");
         let record = store
             .records()
             .last()
@@ -192,6 +200,12 @@ fn execute_ordered(
         Ok(()) => Ok(()),
         Err(original) => {
             let finish_only = store.snapshot().phase().desired_state_is_irreversible();
+            let salvage_error = if !finish_only && let Some(prepared) = prepared_authority.as_ref()
+            {
+                salvage_exact_unpublished_stages(store.runtime(), prepared).err()
+            } else {
+                None
+            };
             // Never recover from a stale in-memory journal handle. Drop every
             // cached capability and enter the same rediscover -> stable double
             // capture -> preflight -> one-step loop used by later commands.
@@ -206,7 +220,7 @@ fn execute_ordered(
                 // report failure with a committed tree and no recovery
                 // authority, inviting callers to retry a completed command.
                 (true, Ok(())) => Ok(()),
-                (false, Ok(())) => Err(original),
+                (false, Ok(())) => Err(salvage_error.unwrap_or(original)),
                 (_, Err(recovery_required)) => Err(recovery_required),
             }
         }
@@ -1216,7 +1230,7 @@ fn place_file_owner(
     owner_name: &str,
     placed_name: &str,
     expected_owner: ExactFileStateV2,
-) -> Result<ExactFileObservation, CodegenError> {
+) -> Result<(ExactFileObservation, Dir), CodegenError> {
     let parent_path = immediate_parent(logical_path).unwrap_or("");
     let parent_binding = directory_parent(store.snapshot(), parent_path)?;
     let target_path = context.project_root().join(parent_path).join(placed_name);
@@ -1347,7 +1361,7 @@ fn place_file_owner(
         )
         .map_err(model_error_at(&target_path))?;
     store.publish_successor(completed)?;
-    Ok(placed)
+    Ok((placed, parent))
 }
 
 fn prepare_files(
@@ -1411,7 +1425,7 @@ fn prepare_files(
             )
             .map_err(model_error_at(&owner_path))?;
         store.publish_successor(successor)?;
-        let stage = place_file_owner(
+        let (stage, stage_parent) = place_file_owner(
             context,
             lock,
             store,
@@ -1423,12 +1437,15 @@ fn prepare_files(
             &stage_name,
             owner_exact,
         )?;
-        let stage_path = context.project_root().join(parent_path).join(&stage_name);
+        let stage_parent_path = context.project_root().join(parent_path);
+        let stage_path = stage_parent_path.join(&stage_name);
         prepared.push(PreparedFile {
             ordinal: ordered.ordinal,
             logical_path: logical_path.to_owned(),
             target_name,
             target_path,
+            stage_parent,
+            stage_parent_path,
             stage_name,
             stage_path,
             stage,
@@ -1584,7 +1601,7 @@ fn prepare_files(
             )
             .map_err(model_error_at(&owner_path))?;
         store.publish_successor(successor)?;
-        let backup = place_file_owner(
+        let (backup, _backup_parent) = place_file_owner(
             context,
             lock,
             store,
@@ -1603,6 +1620,98 @@ fn prepare_files(
     Ok(prepared)
 }
 
+fn salvage_exact_unpublished_stages(
+    runtime: &TransactionRuntime,
+    prepared: &[PreparedFile],
+) -> Result<(), CodegenError> {
+    for prepared_file in prepared.iter().rev() {
+        let current = match runtime.fs().observe_regular_file_bounded(
+            &prepared_file.stage_parent,
+            Path::new(&prepared_file.stage_name),
+            &prepared_file.stage_path,
+            prepared_file.stage.byte_len,
+        ) {
+            Ok(current) => current,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(transaction_io(
+                    "inspect retained stage authority",
+                    &prepared_file.logical_path,
+                    &prepared_file.stage_path,
+                    source,
+                ));
+            }
+        };
+        if current != prepared_file.stage {
+            continue;
+        }
+
+        runtime.observe(TransitionKey::CleanupObject {
+            outcome: TransactionOutcome::Rollback,
+            kind: CleanupObjectKind::PlacedStage,
+            ordinal: prepared_file.ordinal.get(),
+            window: TransitionWindow::Before,
+        });
+        let removal = runtime.fs().remove_file_exact(
+            &prepared_file.stage_parent,
+            Path::new(&prepared_file.stage_name),
+            &prepared_file.stage_path,
+            &current,
+        );
+        if let Err(error) = removal.as_ref()
+            && !error.mutation_may_have_completed()
+        {
+            return Err(transaction_io(
+                "remove retained exact stage",
+                &prepared_file.logical_path,
+                &prepared_file.stage_path,
+                std::io::Error::other(error.to_string()),
+            ));
+        }
+        runtime
+            .fs()
+            .sync_directory(
+                &prepared_file.stage_parent,
+                &prepared_file.stage_parent_path,
+            )
+            .map_err(|source| {
+                transaction_io(
+                    "sync retained stage parent",
+                    &prepared_file.logical_path,
+                    &prepared_file.stage_parent_path,
+                    source,
+                )
+            })?;
+        match prepared_file
+            .stage_parent
+            .symlink_metadata(Path::new(&prepared_file.stage_name))
+        {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(CodegenError::RecoveryRequired {
+                    journal_path: prepared_file.stage_path.clone(),
+                    reason: "retained exact stage remains after rollback cleanup".to_owned(),
+                });
+            }
+            Err(source) => {
+                return Err(transaction_io(
+                    "prove retained stage absent",
+                    &prepared_file.logical_path,
+                    &prepared_file.stage_path,
+                    source,
+                ));
+            }
+        }
+        runtime.observe(TransitionKey::CleanupObject {
+            outcome: TransactionOutcome::Rollback,
+            kind: CleanupObjectKind::PlacedStage,
+            ordinal: prepared_file.ordinal.get(),
+            window: TransitionWindow::After,
+        });
+    }
+    Ok(())
+}
+
 fn commit_files(
     context: &PlanningContext,
     lock: &WriteLock,
@@ -1612,10 +1721,6 @@ fn commit_files(
 ) -> Result<(), CodegenError> {
     for prepared_file in prepared {
         let runtime = store.runtime().clone();
-        runtime.observe(TransitionKey::ReplaceTarget {
-            ordinal: prepared_file.ordinal.get(),
-            window: TransitionWindow::Before,
-        });
         runtime
             .fs()
             .before_final_revalidation(&prepared_file.target_path)
@@ -1668,29 +1773,35 @@ fn commit_files(
             &prepared_file.target_path,
         )?;
         match entry.action() {
-            EntryActionV2::Create => runtime
-                .fs()
-                .publish_absent(
-                    HardLinkEndpoint::new(
-                        &parent,
-                        Path::new(&prepared_file.stage_name),
-                        &prepared_file.stage_path,
-                    ),
-                    &prepared_file.stage,
-                    HardLinkEndpoint::new(
-                        &parent,
-                        Path::new(&prepared_file.target_name),
-                        &prepared_file.target_path,
-                    ),
-                )
-                .map_err(|source| {
-                    transaction_io(
-                        "publish absent target",
-                        &prepared_file.logical_path,
-                        &prepared_file.target_path,
-                        source,
+            EntryActionV2::Create => {
+                runtime.observe(TransitionKey::ReplaceTarget {
+                    ordinal: prepared_file.ordinal.get(),
+                    window: TransitionWindow::Before,
+                });
+                runtime
+                    .fs()
+                    .publish_absent(
+                        HardLinkEndpoint::new(
+                            &parent,
+                            Path::new(&prepared_file.stage_name),
+                            &prepared_file.stage_path,
+                        ),
+                        &prepared_file.stage,
+                        HardLinkEndpoint::new(
+                            &parent,
+                            Path::new(&prepared_file.target_name),
+                            &prepared_file.target_path,
+                        ),
                     )
-                })?,
+                    .map_err(|source| {
+                        transaction_io(
+                            "publish absent target",
+                            &prepared_file.logical_path,
+                            &prepared_file.target_path,
+                            source,
+                        )
+                    })?
+            }
             EntryActionV2::Replace => {
                 let target = runtime
                     .fs()
@@ -1720,6 +1831,10 @@ fn commit_files(
                 {
                     return third_state(&prepared_file.logical_path, context);
                 }
+                runtime.observe(TransitionKey::ReplaceTarget {
+                    ordinal: prepared_file.ordinal.get(),
+                    window: TransitionWindow::Before,
+                });
                 runtime
                     .fs()
                     .replace_existing(
