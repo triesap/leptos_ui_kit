@@ -250,6 +250,7 @@ fn observe_regular_child(
     max_bytes: u64,
     journal_path: &Path,
 ) -> Result<ExactRecoveryObject, CodegenError> {
+    let logical_path = child_logical_path(parent_logical, name);
     let parent = match open_logical_directory(context, parent_logical)? {
         Some(parent) => parent,
         None => return Ok(ExactRecoveryObject::Missing),
@@ -261,6 +262,7 @@ fn observe_regular_child(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ExactRecoveryObject::Missing),
         Err(error) => Err(observation_error(
             "observe bounded exact recovery regular file",
+            &logical_path,
             diagnostic_path,
             error,
         )),
@@ -281,6 +283,7 @@ fn observe_regular_owner_child(
     max_bytes: u64,
     journal_path: &Path,
 ) -> Result<ExactRecoveryObject, CodegenError> {
+    let logical_path = child_logical_path(parent_logical, name);
     let parent = match open_logical_directory(context, parent_logical)? {
         Some(parent) => parent,
         None => return Ok(ExactRecoveryObject::Missing),
@@ -300,6 +303,7 @@ fn observe_regular_owner_child(
             }
             Err(error) => Err(observation_error(
                 "observe bounded exact recovery owner file",
+                &logical_path,
                 diagnostic_path,
                 error,
             )),
@@ -310,6 +314,7 @@ fn observe_regular_owner_child(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ExactRecoveryObject::Missing),
         Err(error) => Err(observation_error(
             "observe metadata-only recovery owner file",
+            &logical_path,
             diagnostic_path,
             error,
         )),
@@ -377,7 +382,12 @@ fn observe_logical_directory(
         &diagnostic_path,
     );
     let observation = fs.observe_directory(endpoint).map_err(|error| {
-        observation_error("observe exact recovery directory", &diagnostic_path, error)
+        observation_error(
+            "observe exact recovery directory",
+            logical_path,
+            &diagnostic_path,
+            error,
+        )
     })?;
     let object = exact_directory(&observation)
         .map(ExactRecoveryObject::Directory)
@@ -388,6 +398,7 @@ fn observe_logical_directory(
             fs,
             endpoint,
             &observation,
+            logical_path,
             &diagnostic_path,
             &file_read_limits,
             journal_path,
@@ -407,6 +418,7 @@ fn observe_candidate_directory(
     model: &JournalDirectoryV2,
     journal_path: &Path,
 ) -> Result<DirectoryCapture, CodegenError> {
+    let logical_path = child_logical_path(parent_logical, candidate_name);
     let parent = match open_logical_directory(context, parent_logical)? {
         Some(parent) => parent,
         None => {
@@ -439,6 +451,7 @@ fn observe_candidate_directory(
                     fs,
                     endpoint,
                     &opened.observation,
+                    &logical_path,
                     diagnostic_path,
                     journal_path,
                 )?;
@@ -476,6 +489,7 @@ fn observe_candidate_directory(
 
     Err(observation_error(
         "open exact recovery directory candidate",
+        &logical_path,
         diagnostic_path,
         last_error.unwrap_or_else(|| {
             io::Error::new(
@@ -490,6 +504,7 @@ fn capture_empty_owner_inventory(
     fs: &dyn FsOps,
     endpoint: DirectoryEndpoint<'_>,
     expected_directory: &ExactDirectoryObservation,
+    logical_path: &str,
     diagnostic_path: &Path,
     journal_path: &Path,
 ) -> Result<ExactRecoveryInventory, CodegenError> {
@@ -498,6 +513,7 @@ fn capture_empty_owner_inventory(
         .map_err(|error| {
             observation_error(
                 "inventory exact recovery owner directory",
+                logical_path,
                 diagnostic_path,
                 error,
             )
@@ -591,6 +607,7 @@ fn capture_inventory(
     fs: &dyn FsOps,
     endpoint: DirectoryEndpoint<'_>,
     expected_directory: &ExactDirectoryObservation,
+    logical_path: &str,
     diagnostic_path: &Path,
     file_read_limits: &BTreeMap<String, u64>,
     journal_path: &Path,
@@ -602,7 +619,12 @@ fn capture_inventory(
             MAX_RECOVERY_DIRECTORY_ENTRIES,
         )
         .map_err(|error| {
-            observation_error("inventory exact recovery directory", diagnostic_path, error)
+            observation_error(
+                "inventory exact recovery directory",
+                logical_path,
+                diagnostic_path,
+                error,
+            )
         })?;
     if inventory.directory != *expected_directory {
         return Err(recovery_blocked(
@@ -636,10 +658,12 @@ fn capture_inventory(
         })?;
         require_direct_child_name(name, journal_path, diagnostic_path)?;
         let child_path = diagnostic_path.join(name);
+        let child_logical = child_logical_path(logical_path, name);
         let object = capture_inventory_child(
             fs,
             endpoint.directory,
             name,
+            &child_logical,
             &child_path,
             &entry,
             file_read_limits.get(name).copied(),
@@ -658,10 +682,15 @@ fn capture_inventory(
     Ok(captured)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inventory capture keeps filesystem authority, logical diagnostics, bounds, and journal authority explicit"
+)]
 fn capture_inventory_child(
     fs: &dyn FsOps,
     parent: &Dir,
     name: &str,
+    logical_path: &str,
     diagnostic_path: &Path,
     entry: &ExactDirectoryEntry,
     declared_max_bytes: Option<u64>,
@@ -675,6 +704,7 @@ fn capture_inventory_child(
                     .map_err(|error| {
                         observation_error(
                             "read bounded declared recovery inventory file",
+                            logical_path,
                             diagnostic_path,
                             error,
                         )
@@ -702,6 +732,7 @@ fn capture_inventory_child(
                 .map_err(|error| {
                     observation_error(
                         "observe undeclared recovery inventory file metadata",
+                        logical_path,
                         diagnostic_path,
                         error,
                     )
@@ -716,6 +747,7 @@ fn capture_inventory_child(
                 .map_err(|error| {
                     observation_error(
                         "open exact recovery inventory directory",
+                        logical_path,
                         diagnostic_path,
                         error,
                     )
@@ -961,10 +993,23 @@ fn leaf_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
 }
 
-fn observation_error(operation: &'static str, path: &Path, source: io::Error) -> CodegenError {
+fn child_logical_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn observation_error(
+    operation: &'static str,
+    logical_path: &str,
+    path: &Path,
+    source: io::Error,
+) -> CodegenError {
     CodegenError::FilesystemOperation {
         operation,
-        logical_path: path.display().to_string(),
+        logical_path: logical_path.to_owned(),
         path: path.to_path_buf(),
         source,
     }

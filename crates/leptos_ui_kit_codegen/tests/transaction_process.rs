@@ -662,10 +662,6 @@ fn assert_exact_first_use_coordination(root: &Path) {
                 PathBuf::from(DEFAULT_KIT_WRITE_LOCK_PATH),
                 TreeEntry::File(ADVISORY_LOCK_MARKER.to_vec()),
             ),
-            (
-                PathBuf::from("src/components/ui/_kit/.transactions"),
-                TreeEntry::Directory,
-            ),
         ]),
         "first-use operation left a non-exact coordination residual"
     );

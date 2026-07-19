@@ -200,7 +200,9 @@ fn execute_ordered(
         Ok(()) => Ok(()),
         Err(original) => {
             let finish_only = store.snapshot().phase().desired_state_is_irreversible();
-            let salvage_error = if !finish_only && let Some(prepared) = prepared_authority.as_ref()
+            let salvage_error = if !finish_only
+                && recovery_requires_detached_parent_salvage(&original)
+                && let Some(prepared) = prepared_authority.as_ref()
             {
                 salvage_exact_unpublished_stages(store.runtime(), prepared).err()
             } else {
@@ -225,6 +227,15 @@ fn execute_ordered(
             }
         }
     }
+}
+
+fn recovery_requires_detached_parent_salvage(error: &CodegenError) -> bool {
+    matches!(
+        error,
+        CodegenError::PreimageConflict { .. }
+            | CodegenError::ProjectRootChanged { .. }
+            | CodegenError::UnsafePath { .. }
+    )
 }
 
 pub fn write_file_atomic(

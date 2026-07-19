@@ -7393,14 +7393,24 @@ mod tests {
         operation: FsOperation,
         ordinal: usize,
         retry_after_success: bool,
-    ) -> (ExactRemovalDisposition, bool) {
+    ) -> (
+        ExactRemovalDisposition,
+        bool,
+        Vec<super::super::fs::FsEvent>,
+    ) {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let kit_path = temporary.path().join("_kit");
         fs::create_dir(&kit_path).expect("kit directory");
         let lock_path = kit_path.join(WRITE_LOCK_NAME);
         fs::write(&lock_path, b"held lock\n").expect("write lock fixture");
         set_mode(&lock_path, PRIVATE_FILE_MODE);
-        let victim_path = kit_path.join("victim");
+        let transaction_id =
+            TransactionId::parse("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a").expect("transaction id");
+        let namespace_path = kit_path.join(".transactions");
+        fs::create_dir(&namespace_path).expect("transaction namespace");
+        set_mode(&namespace_path, PRIVATE_DIRECTORY_MODE);
+        let victim_name = finalization_record_name(&transaction_id, 0);
+        let victim_path = namespace_path.join(&victim_name);
         fs::write(&victim_path, b"transaction evidence\n").expect("write victim");
         set_mode(&victim_path, PRIVATE_FILE_MODE);
 
@@ -7413,9 +7423,21 @@ mod tests {
         let root = Dir::open_ambient_dir(temporary.path(), ambient_authority())
             .expect("open fixture root");
         let kit = root.open_dir("_kit").expect("open kit capability");
-        let kit_endpoint = DirectoryEndpoint::new(&root, Path::new("_kit"), &kit, &kit_path);
-        let kit_observation = fault
-            .observe_directory(kit_endpoint)
+        let root_endpoint = DirectoryEndpoint::new(&root, Path::new("."), &root, temporary.path());
+        let root_observation = fault
+            .observe_directory(root_endpoint)
+            .expect("observe root before selected fault");
+        let namespace = kit
+            .open_dir(".transactions")
+            .expect("open transaction namespace");
+        let namespace_endpoint = DirectoryEndpoint::new(
+            &kit,
+            Path::new(".transactions"),
+            &namespace,
+            &namespace_path,
+        );
+        fault
+            .observe_directory(namespace_endpoint)
             .expect("observe kit before selected fault");
         let lock_observation = fault
             .read_regular_file_exact(
@@ -7428,8 +7450,8 @@ mod tests {
             .observation;
         let victim = fault
             .read_regular_file_exact(
-                &kit,
-                Path::new("victim"),
+                &namespace,
+                Path::new(&victim_name),
                 &victim_path,
                 MAX_CONTROL_ENVELOPE_BYTES,
             )
@@ -7437,22 +7459,22 @@ mod tests {
         let exact = exact_file(&victim.observation).expect("exact victim");
         let capabilities = JournalStoreCapabilities::finalization_only(
             temporary.path(),
-            kit_observation,
+            root_observation,
             lock_observation.identity,
             HardLinkEndpoint::new(&kit, Path::new(WRITE_LOCK_NAME), &lock_path),
-            kit_endpoint,
+            namespace_endpoint,
         );
         let store = JournalRecoveryStore::bind(
             &runtime,
-            TransactionId::parse("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a").expect("transaction id"),
+            transaction_id,
             Sha256Digest::parse(&format!("sha256:{}", "b".repeat(64))).expect("root digest"),
             capabilities,
         )
         .expect("bind store");
         let mut disposition = store
             .remove_exact_file(
-                kit_endpoint,
-                "victim",
+                namespace_endpoint,
+                &victim_name,
                 &exact,
                 MAX_CONTROL_ENVELOPE_BYTES,
                 RemovalObject::Finalization { generation: 0 },
@@ -7462,8 +7484,8 @@ mod tests {
         if retry_after_success {
             disposition = store
                 .remove_exact_file(
-                    kit_endpoint,
-                    "victim",
+                    namespace_endpoint,
+                    &victim_name,
                     &exact,
                     MAX_CONTROL_ENVELOPE_BYTES,
                     RemovalObject::Finalization { generation: 0 },
@@ -7471,12 +7493,12 @@ mod tests {
                 )
                 .expect("already-absent retry remains a typed disposition");
         }
-        (disposition, victim_path.exists())
+        (disposition, victim_path.exists(), fault.events())
     }
 
     #[test]
     fn injected_pre_unlink_failure_reconciles_to_exact_presence() {
-        let (disposition, exists) = remove_with_fault(FsOperation::RemoveFileExact, 1, false);
+        let (disposition, exists, _) = remove_with_fault(FsOperation::RemoveFileExact, 1, false);
         assert!(exists);
         let ExactRemovalDisposition::ReconcileRequired(reconciliation) = disposition else {
             panic!("failure must require reconciliation");
@@ -7487,7 +7509,7 @@ mod tests {
 
     #[test]
     fn injected_post_unlink_parent_sync_failure_reconciles_to_absence() {
-        let (disposition, exists) = remove_with_fault(FsOperation::SyncJournalParent, 1, false);
+        let (disposition, exists, _) = remove_with_fault(FsOperation::SyncJournalParent, 1, false);
         assert!(!exists);
         let ExactRemovalDisposition::ReconcileRequired(reconciliation) = disposition else {
             panic!("failure must require reconciliation");
@@ -7498,10 +7520,27 @@ mod tests {
 
     #[test]
     fn injected_post_unlink_inventory_failure_remains_typed() {
-        // The first inventory validates the complete lock/parent authority at
-        // the mutation boundary; the second is the post-unlink absence check.
-        let (disposition, exists) =
-            remove_with_fault(FsOperation::InventoryDirectoryExact, 2, false);
+        let (_, _, baseline_events) = remove_with_fault(
+            FsOperation::InventoryDirectoryExactBounded,
+            usize::MAX,
+            false,
+        );
+        let removal_index = baseline_events
+            .iter()
+            .position(|event| event.operation == FsOperation::RemoveFileExact)
+            .expect("baseline exact removal event");
+        let inventory_ordinal = baseline_events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.operation == FsOperation::InventoryDirectoryExactBounded)
+            .position(|(index, _)| index > removal_index)
+            .map(|index| index + 1)
+            .expect("baseline post-unlink inventory event");
+        let (disposition, exists, _) = remove_with_fault(
+            FsOperation::InventoryDirectoryExactBounded,
+            inventory_ordinal,
+            false,
+        );
         assert!(!exists);
         let ExactRemovalDisposition::ReconcileRequired(reconciliation) = disposition else {
             panic!("failure must require reconciliation");
@@ -7512,7 +7551,7 @@ mod tests {
 
     #[test]
     fn already_absent_exact_removal_is_durably_idempotent() {
-        let (disposition, exists) =
+        let (disposition, exists, _) =
             remove_with_fault(FsOperation::RemoveFileExact, usize::MAX, true);
         assert!(!exists);
         assert!(matches!(

@@ -2743,6 +2743,7 @@ pub(crate) enum FsOperation {
     ObserveDirectory,
     OpenDirectoryExact,
     CreateDirectoryExact,
+    #[cfg_attr(windows, allow(dead_code))]
     InventoryDirectoryExact,
     InventoryDirectoryExactBounded,
     CreateNewFile,
