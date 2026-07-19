@@ -116,17 +116,26 @@
         "uiDir": {
           "type": "string",
           "default": "src/components/ui",
-          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+[A-Za-z_][A-Za-z0-9_]*$"
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+[A-Za-z_][A-Za-z0-9_]*$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)(?:/|$)"
+          }
         },
         "uiMod": {
           "type": "string",
           "default": "src/components/ui/mod.rs",
-          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/){2,}mod\\.rs$"
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/){2,}mod\\.rs$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)/"
+          }
         },
         "componentsMod": {
           "type": "string",
           "default": "src/components/mod.rs",
-          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+mod\\.rs$"
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+mod\\.rs$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)/"
+          }
         }
       }
     },

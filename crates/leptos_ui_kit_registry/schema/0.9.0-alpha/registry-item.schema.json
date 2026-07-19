@@ -2,6 +2,68 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
   "title": "leptos_ui_kit registry item",
+  "$defs": {
+    "rust2024Keyword": {
+      "enum": [
+        "Self",
+        "abstract",
+        "as",
+        "async",
+        "await",
+        "become",
+        "box",
+        "break",
+        "const",
+        "continue",
+        "crate",
+        "do",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "final",
+        "fn",
+        "for",
+        "gen",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "macro",
+        "macro_rules",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "override",
+        "priv",
+        "pub",
+        "raw",
+        "ref",
+        "return",
+        "safe",
+        "self",
+        "static",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "union",
+        "unsafe",
+        "unsized",
+        "use",
+        "virtual",
+        "where",
+        "while",
+        "yield"
+      ]
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -26,7 +88,10 @@
     },
     "name": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "not": {
+        "$ref": "#/$defs/rust2024Keyword"
+      }
     },
     "kind": {
       "enum": [
@@ -104,6 +169,7 @@
     },
     "files": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -129,13 +195,29 @@
               },
               "path": {
                 "type": "string",
-                "pattern": "^([a-z_][a-z0-9_]*\\.rs|[a-z_][a-z0-9_]*(/[a-z_][a-z0-9_]*)*/([a-z_][a-z0-9_]*|mod)\\.rs)$"
+                "pattern": "^([a-z_][a-z0-9_]*\\.rs|[a-z_][a-z0-9_]*(/[a-z_][a-z0-9_]*)*/([a-z_][a-z0-9_]*|mod)\\.rs)$",
+                "not": {
+                  "anyOf": [
+                    {
+                      "pattern": "^mod\\.rs$"
+                    },
+                    {
+                      "pattern": "(?:^|/)(?:abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)/"
+                    },
+                    {
+                      "pattern": "(?:^|/)(?:abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)\\.rs$"
+                    }
+                  ]
+                }
               },
               "exports": {
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                  "not": {
+                    "$ref": "#/$defs/rust2024Keyword"
+                  }
                 },
                 "uniqueItems": true
               }
@@ -146,6 +228,7 @@
     },
     "styles": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -183,11 +266,15 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "not": {
+          "$ref": "#/$defs/rust2024Keyword"
+        }
       }
     },
     "cargoPlan": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,

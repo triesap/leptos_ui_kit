@@ -3123,7 +3123,10 @@ leptos_router = "0.9.0-alpha"
                     "lock",
                     "filesByPath[\"src/components/ui/spinner.rs\"] is owned",
                 ),
-                "extra_style" => ("lock_style_targets", "differ from the registry snapshot"),
+                "extra_style" => (
+                    "lock",
+                    "styleBlocks must contain at most one UI style block",
+                ),
                 "duplicate_style" => ("lock", ".blockId \"button\" duplicates"),
                 "misowned_style" => ("lock", "styleBlocksById[\"spinner\"] is owned"),
                 _ => unreachable!(),

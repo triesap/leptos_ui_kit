@@ -17,7 +17,7 @@ use crate::{
         embedded_asset_provider,
     },
     item::{
-        parse_registry_item_str, parse_registry_root_str, resolve_registry_targets,
+        parse_registry_item_raw_str, parse_registry_root_raw_str, resolve_registry_targets,
         validate_built_in_registry_items,
     },
     registry_health::{RegistryHealthError, validate_theme_contract_schema_shape},
@@ -628,7 +628,7 @@ fn own_exact_catalog(
 
 fn parse_root(assets: &BTreeMap<String, OwnedAsset>) -> Result<RegistryRoot, SnapshotError> {
     let input = asset_text(assets, REGISTRY_ROOT_PATH, EmbeddedAssetKind::Json)?;
-    let root = parse_registry_root_str(input).map_err(|source| SnapshotError::ParseJson {
+    let root = parse_registry_root_raw_str(input).map_err(|source| SnapshotError::ParseJson {
         logical_path: REGISTRY_ROOT_PATH.to_owned(),
         source,
     })?;
@@ -655,10 +655,11 @@ fn parse_items(
     for entry in &root.items {
         let logical_path = format!("registry/{}", entry.path);
         let input = asset_text(assets, &logical_path, EmbeddedAssetKind::Json)?;
-        let item = parse_registry_item_str(input).map_err(|source| SnapshotError::ParseJson {
-            logical_path: logical_path.clone(),
-            source,
-        })?;
+        let item =
+            parse_registry_item_raw_str(input).map_err(|source| SnapshotError::ParseJson {
+                logical_path: logical_path.clone(),
+                source,
+            })?;
         item.validate()
             .map_err(|source| SnapshotError::InvalidRegistryItem {
                 logical_path: logical_path.clone(),

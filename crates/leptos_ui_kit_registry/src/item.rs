@@ -1061,11 +1061,44 @@ pub struct ResolvedStyleBlockTarget {
 }
 
 pub fn parse_registry_root_str(input: &str) -> Result<RegistryRoot, serde_json::Error> {
-    serde_json::from_str(input)
+    let root = parse_registry_root_raw_str(input)?;
+    root.validate()
+        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
+    Ok(root)
 }
 
 pub fn parse_registry_item_str(input: &str) -> Result<RegistryItem, serde_json::Error> {
+    let item = parse_registry_item_raw_str(input)?;
+    item.validate()
+        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
+    Ok(item)
+}
+
+pub(crate) fn parse_registry_root_raw_str(input: &str) -> Result<RegistryRoot, serde_json::Error> {
     serde_json::from_str(input)
+}
+
+pub(crate) fn parse_registry_item_raw_str(input: &str) -> Result<RegistryItem, serde_json::Error> {
+    serde_json::from_str(input)
+}
+
+pub fn validate_registry_manifest_identity(
+    root: &RegistryRoot,
+    manifest_path: &str,
+    item: &RegistryItem,
+) -> Result<(), RegistryError> {
+    root.validate()?;
+    item.validate()?;
+    let entry = root
+        .items
+        .iter()
+        .find(|entry| entry.path == manifest_path)
+        .ok_or_else(|| RegistryError::InvalidValue {
+            field: "manifest.path",
+            expected: "a path declared by the registry root".to_owned(),
+            actual: manifest_path.to_owned(),
+        })?;
+    expect_string("manifest.name", &entry.name, &item.name)
 }
 
 pub fn load_registry_item(
@@ -1259,7 +1292,7 @@ fn parse_built_in_item_from_root(
     }
 
     let item = parse_registry_item_file(&path)?;
-    validate_registry_root_item_identity(entry, &item)?;
+    validate_registry_manifest_identity(root, &entry.path, &item)?;
 
     Ok((item, path))
 }
@@ -1639,14 +1672,6 @@ fn validate_registry_source_path_with_extension(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-fn validate_registry_root_item_identity(
-    entry: &RegistryRootItem,
-    item: &RegistryItem,
-) -> Result<(), RegistryError> {
-    expect_string("items[].name", &entry.name, &item.name)
 }
 
 fn validate_ui_target_path(field: &'static str, value: &str) -> Result<(), RegistryError> {
@@ -2291,7 +2316,7 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_target_path() {
-        let item = parse_registry_item_str(
+        let error = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
               "schemaVersion": "0.9.0-alpha",
@@ -2320,11 +2345,10 @@ mod tests {
               "extra": {}
             }"#,
         )
-        .expect("parse raw item");
+        .expect_err("semantic public parser must reject unsafe path");
 
-        let error = item.validate().expect_err("unsafe path should fail");
-
-        assert!(matches!(error, RegistryError::UnsafePath { .. }));
+        assert!(error.is_data());
+        assert!(error.to_string().contains("files[].target.path"));
     }
 
     #[test]
@@ -3381,16 +3405,43 @@ mod tests {
 
     #[test]
     fn rejects_registry_root_entry_name_that_differs_from_manifest_name() {
-        let entry = RegistryRootItem {
-            name: "button".to_owned(),
-            path: "ui/button.json".to_owned(),
+        let root = RegistryRoot {
+            schema: REGISTRY_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "leptos-ui-kit".to_owned(),
+            items: vec![RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/button.json".to_owned(),
+            }],
         };
         let item = item_with_name_and_target("spinner", "spinner.rs", "spinner", &[]);
 
         assert!(matches!(
-            validate_registry_root_item_identity(&entry, &item),
+            validate_registry_manifest_identity(&root, "ui/button.json", &item),
             Err(RegistryError::InvalidValue {
-                field: "items[].name",
+                field: "manifest.name",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_manifest_path_that_is_not_declared_by_the_root() {
+        let root = RegistryRoot {
+            schema: REGISTRY_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "leptos-ui-kit".to_owned(),
+            items: vec![RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/button.json".to_owned(),
+            }],
+        };
+        let item = item_with_name_and_target("button", "button.rs", "button", &[]);
+
+        assert!(matches!(
+            validate_registry_manifest_identity(&root, "ui/spinner.json", &item),
+            Err(RegistryError::InvalidValue {
+                field: "manifest.path",
                 ..
             })
         ));
@@ -3463,7 +3514,7 @@ mod tests {
         );
         assert_eq!(
             root_schema["properties"]["items"]["items"]["properties"]["name"]["pattern"],
-            serde_json::json!("^[a-z][a-z0-9-]*$")
+            serde_json::json!("^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
         );
         assert!(
             root_schema["properties"]["items"]["items"]["properties"]["path"]["pattern"]

@@ -238,14 +238,11 @@ fn validate_theme_token_name(value: &str) -> Result<(), ThemeContractError> {
         });
     };
 
-    if suffix
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase())
-        && suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
+    if suffix.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }) {
         Ok(())
     } else {
         Err(ThemeContractError::InvalidValue {
@@ -424,6 +421,17 @@ mod tests {
                 ..
             })
         ));
+        for name in ["--kit-color-", "--kit-color--surface"] {
+            let mut contract = valid_contract();
+            contract.tokens[0].name = name.to_owned();
+            assert!(matches!(
+                contract.validate(),
+                Err(ThemeContractError::InvalidValue {
+                    field: "tokens[].name",
+                    ..
+                })
+            ));
+        }
 
         let mut contract = valid_contract();
         contract.tokens[0].default_value.clear();

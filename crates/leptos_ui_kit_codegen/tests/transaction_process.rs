@@ -96,6 +96,12 @@ fn killed_holder_releases_lock_without_replacing_the_persistent_inode() {
 
 #[test]
 fn concurrent_first_use_has_one_holder_and_one_fast_contender() {
+    for iteration in 0..8 {
+        assert_concurrent_first_use(iteration);
+    }
+}
+
+fn assert_concurrent_first_use(iteration: usize) {
     let sandbox = tempdir().expect("process-test sandbox");
     let project = sandbox.path().join("project");
     let control = sandbox.path().join("control");
@@ -118,8 +124,16 @@ fn concurrent_first_use_has_one_holder_and_one_fast_contender() {
         .into_iter()
         .filter(|id| barrier_path(&control, "contended", id).exists())
         .collect::<Vec<_>>();
-    assert_eq!(acquired.len(), 1, "first-use holders: {acquired:?}");
-    assert_eq!(contended.len(), 1, "first-use contenders: {contended:?}");
+    assert_eq!(
+        acquired.len(),
+        1,
+        "first-use holders at iteration {iteration}: {acquired:?}"
+    );
+    assert_eq!(
+        contended.len(),
+        1,
+        "first-use contenders at iteration {iteration}: {contended:?}"
+    );
 
     signal(&control.join("release"));
     first.wait_success();

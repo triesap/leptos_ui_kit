@@ -17,10 +17,13 @@ use crate::{
 };
 
 #[cfg(test)]
-use crate::{parse_registry_item_str, parse_registry_root_str, parse_theme_contract_str};
+use crate::{
+    item::{parse_registry_item_raw_str, parse_registry_root_raw_str},
+    parse_theme_contract_str,
+};
 
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
-const THEME_TOKEN_NAME_PATTERN: &str = "^--kit-[a-z][a-z0-9-]*$";
+const THEME_TOKEN_NAME_PATTERN: &str = "^--kit-[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 
 /// The role of a packaged file involved in built-in registry validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,12 +262,13 @@ fn validate_built_in_registry_health_with_schema_at(
 ) -> Result<(), RegistryHealthError> {
     let root_path = registry_root.join("registry.json");
     let root_input = read_utf8(RegistryHealthFileKind::RegistryRoot, &root_path)?;
-    let root =
-        parse_registry_root_str(&root_input).map_err(|source| RegistryHealthError::ParseJson {
+    let root = parse_registry_root_raw_str(&root_input).map_err(|source| {
+        RegistryHealthError::ParseJson {
             kind: RegistryHealthFileKind::RegistryRoot,
             path: root_path.clone(),
             source,
-        })?;
+        }
+    })?;
     root.validate()
         .map_err(|source| RegistryHealthError::InvalidRegistryRoot {
             path: root_path.clone(),
@@ -276,12 +280,13 @@ fn validate_built_in_registry_health_with_schema_at(
     for entry in &root.items {
         let path = registry_root.join(&entry.path);
         let input = read_utf8(RegistryHealthFileKind::RegistryItem, &path)?;
-        let item =
-            parse_registry_item_str(&input).map_err(|source| RegistryHealthError::ParseJson {
+        let item = parse_registry_item_raw_str(&input).map_err(|source| {
+            RegistryHealthError::ParseJson {
                 kind: RegistryHealthFileKind::RegistryItem,
                 path: path.clone(),
                 source,
-            })?;
+            }
+        })?;
         item.validate()
             .map_err(|source| RegistryHealthError::InvalidRegistryItem {
                 path: path.clone(),
@@ -456,6 +461,7 @@ pub(crate) fn validate_theme_contract_schema_shape(
         ("/properties/name/const", json!(THEME_CONTRACT_NAME)),
         ("/properties/tokens/type", json!("array")),
         ("/properties/tokens/minItems", json!(1)),
+        ("/properties/tokens/uniqueItems", json!(true)),
         ("/properties/tokens/items/type", json!("object")),
         (
             "/properties/tokens/items/additionalProperties",

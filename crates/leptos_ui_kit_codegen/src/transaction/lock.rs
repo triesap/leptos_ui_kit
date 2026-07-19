@@ -2805,6 +2805,18 @@ fn cleanup_shared_transactions_directory_after_drop_by_identity(
                 source,
             })
         }
+        Err(original) if shared_cleanup_observation_raced(&original) => {
+            // A competing publisher can remove the now-empty shared
+            // namespace between the exact metadata reads performed by the
+            // losing publisher. The final advisory-lock path already won the
+            // no-clobber publication race, so leave namespace retirement to
+            // that lock owner and converge on its published inode.
+            if open_existing_lock(context, fs)?.is_some() {
+                Ok(())
+            } else {
+                Err(original)
+            }
+        }
         Err(original) => {
             best_effort_cleanup_transactions_directory_by_identity(
                 fs,
@@ -2815,6 +2827,14 @@ fn cleanup_shared_transactions_directory_after_drop_by_identity(
             Err(original)
         }
     }
+}
+
+fn shared_cleanup_observation_raced(error: &CodegenError) -> bool {
+    matches!(
+        error,
+        CodegenError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::InvalidData
+    )
 }
 
 fn cleanup_published_candidate(
