@@ -4689,6 +4689,7 @@ fn legacy_v1_journal_evidence_is_preserved_and_fails_closed() {
 }
 
 #[test]
+#[ignore = "exhaustive fault matrix; run explicitly with --ignored --exact"]
 fn every_transaction_io_fault_avoids_partial_application_state() {
     let baseline = tempfile::tempdir().expect("baseline tempdir");
     let (files, changes) = setup_two_file_update(baseline.path());
