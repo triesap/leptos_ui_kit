@@ -310,6 +310,7 @@ fn transaction_bootstrap_inventory_fails_closed() {
             .path()
             .join(KIT_COORDINATION_DIR)
             .join(".transactions");
+        fs::create_dir(&transactions).expect("create transaction bootstrap directory");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -360,6 +361,7 @@ fn unix_transaction_bootstrap_mode_and_symlinks_fail_closed() {
         .path()
         .join(KIT_COORDINATION_DIR)
         .join(".transactions");
+    fs::create_dir(&transactions).expect("create transaction bootstrap directory");
     fs::set_permissions(&transactions, fs::Permissions::from_mode(0o755))
         .expect("make transaction bootstrap directory permissive");
     let before = tree_snapshot(directory.path());
@@ -380,7 +382,6 @@ fn unix_transaction_bootstrap_mode_and_symlinks_fail_closed() {
         .path()
         .join(KIT_COORDINATION_DIR)
         .join(".transactions");
-    fs::remove_dir(&transactions).expect("remove empty transaction authority directory");
     let outside = tempdir().expect("outside tempdir");
     fs::write(outside.path().join("sentinel"), b"outside\n").expect("write outside sentinel");
     std::os::unix::fs::symlink(outside.path(), &transactions)
@@ -403,6 +404,7 @@ fn unix_transaction_bootstrap_mode_and_symlinks_fail_closed() {
         .path()
         .join(KIT_COORDINATION_DIR)
         .join(".transactions");
+    fs::create_dir(&transactions).expect("create transaction bootstrap directory");
     fs::set_permissions(&transactions, fs::Permissions::from_mode(0o700))
         .expect("set transaction bootstrap directory mode");
     let outside = tempdir().expect("candidate referent tempdir");
@@ -1071,25 +1073,12 @@ fn assert_exact_coordination_residual(root: &Path) {
     names.sort();
     assert_eq!(
         names,
-        vec![
-            ".gitignore",
-            ".transactions",
-            ".write.lock",
-            "kit.json",
-            "kit.lock.json",
-        ]
+        vec![".gitignore", ".write.lock", "kit.json", "kit.lock.json",]
     );
     let transactions = coordination_dir.join(".transactions");
-    let transactions_metadata =
-        fs::symlink_metadata(&transactions).expect("transaction authority directory metadata");
-    assert!(transactions_metadata.is_dir());
-    assert!(!transactions_metadata.file_type().is_symlink());
-    assert!(!is_reparse_point(&transactions_metadata));
-    assert_eq!(
-        fs::read_dir(&transactions)
-            .expect("read empty transaction authority directory")
-            .count(),
-        0
+    assert!(
+        !transactions.exists(),
+        "terminal transaction namespace must be absent"
     );
 
     #[cfg(unix)]
@@ -1099,8 +1088,6 @@ fn assert_exact_coordination_residual(root: &Path) {
             (0o700, 0o644, 0o600),
             "new coordination entries must use their frozen POSIX modes"
         );
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(transactions_metadata.permissions().mode() & 0o7777, 0o700);
     }
 }
 
