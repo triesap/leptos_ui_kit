@@ -59,20 +59,19 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
     {
         assert_eq!(first_label, second_label);
         assert_eq!(
-            normalize_project_root(first_output, &first),
-            normalize_project_root(second_output, &second),
-            "{first_label} emitted root-dependent data outside the explicit project-root fields"
+            first_output, second_output,
+            "{first_label} emitted root-dependent public metadata"
         );
     }
 
     let button_view = captured_json(&first_outputs, "view button JSON");
-    assert_eq!(button_view["data"]["source_path"], "ui/button.json");
+    assert_eq!(button_view["data"]["sourcePath"], "ui/button.json");
     assert_eq!(
-        button_view["data"]["targets"]["ui_files"][0]["source"],
+        button_view["data"]["targets"]["uiFiles"][0]["source"],
         "ui/button.rs"
     );
     assert_eq!(
-        button_view["data"]["targets"]["style_blocks"][0]["source"],
+        button_view["data"]["targets"]["styleBlocks"][0]["source"],
         "styles/button.css"
     );
     assert!(
@@ -83,7 +82,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 
     let button_source_view = captured_json(&first_outputs, "view button source JSON");
     assert_eq!(
-        button_source_view["data"]["resolved"]["source_path"],
+        button_source_view["data"]["resolved"]["sourcePath"],
         "ui/button.json"
     );
     assert_eq!(
@@ -100,7 +99,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 
     let tokens_source_view = captured_json(&first_outputs, "view tokens source JSON");
     assert_eq!(
-        tokens_source_view["data"]["resolved"]["source_path"],
+        tokens_source_view["data"]["resolved"]["sourcePath"],
         "foundation/tokens.json"
     );
     assert_eq!(
@@ -430,10 +429,6 @@ fn capture_success(
     assert_no_build_path_leaks("command stdout", &stdout, forbidden);
     assert_no_build_path_leaks("command stderr", &stderr, forbidden);
     stdout
-}
-
-fn normalize_project_root(output: &str, project: &Path) -> String {
-    output.replace(&project.to_string_lossy().into_owned(), "<project-root>")
 }
 
 fn build_path_sentinels() -> Vec<PathBuf> {

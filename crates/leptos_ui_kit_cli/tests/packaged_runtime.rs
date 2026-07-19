@@ -381,10 +381,14 @@ fn run_deleted_source_workflow(
     let second_sync = runtime.run_json(EntryPoint::Direct, &["sync", "--json"]);
     assert_envelope(&second_sync.value, "sync", "no_change");
     assert_eq!(second_sync.value["changes"], Value::Array(Vec::new()));
-    assert_eq!(second_sync.value["data"]["files"], Value::Array(Vec::new()));
-    assert_eq!(
-        second_sync.value["data"]["changes"],
-        Value::Array(Vec::new())
+    assert_eq!(second_sync.value["changes"], Value::Array(Vec::new()));
+    assert!(
+        second_sync.value["data"].get("files").is_none(),
+        "public sync DTO must not expose planned files"
+    );
+    assert!(
+        second_sync.value["data"].get("changes").is_none(),
+        "changes must exist only at the envelope level"
     );
     assert_eq!(
         fs::read(app_root.join(CONFIG_PATH)).expect("read config after idempotency"),
@@ -486,7 +490,7 @@ fn assert_version(value: &Value, expected_rev: &str) {
 
 fn assert_source_view(value: &Value, source_path: &str, expected_sources: &[&str]) {
     assert_envelope(value, "view", "success");
-    assert_eq!(value["data"]["resolved"]["source_path"], source_path);
+    assert_eq!(value["data"]["resolved"]["sourcePath"], source_path);
     let actual = value["data"]["sources"]
         .as_array()
         .expect("source view sources")

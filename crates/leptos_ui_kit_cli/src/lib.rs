@@ -10,7 +10,7 @@ use std::{
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CodegenError, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic,
+    AddPlan, ChangeRecord, CodegenError, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic,
     DiagnosticLevel, HtmlStylesheetState, InitPlan, InstallLock, InstalledFile, InstalledItem,
     InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync, check_pending_recovery,
     hash_content_bytes, inspect_html_stylesheet, inspect_managed_css_blocks_at_path,
@@ -28,18 +28,237 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CliEnvelope<T>
+where
+    T: Serialize,
+{
+    schema_version: &'static str,
+    command: String,
+    status: &'static str,
+    diagnostics: Vec<CliDiagnosticOutput>,
+    changes: Vec<CliChangeOutput>,
+    data: T,
+}
+
+impl<T> CliEnvelope<T>
+where
+    T: Serialize,
+{
+    fn new(command: impl Into<String>, status: CommandStatus, data: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            command: command.into(),
+            status: command_status_name(status),
+            diagnostics: Vec::new(),
+            changes: Vec::new(),
+            data,
+        }
+    }
+
+    fn success(command: impl Into<String>, data: T) -> Self {
+        Self::new(command, CommandStatus::Success, data)
+    }
+
+    fn with_diagnostics(mut self, diagnostics: &[Diagnostic]) -> Self {
+        self.diagnostics = diagnostics.iter().map(CliDiagnosticOutput::from).collect();
+        self
+    }
+
+    fn with_changes(mut self, changes: &[ChangeRecord]) -> Self {
+        self.changes = changes.iter().map(CliChangeOutput::from).collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliDiagnosticOutput {
+    level: &'static str,
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestion: Option<String>,
+}
+
+impl From<&Diagnostic> for CliDiagnosticOutput {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            level: match diagnostic.level {
+                DiagnosticLevel::Info => "info",
+                DiagnosticLevel::Warning => "warning",
+                DiagnosticLevel::Error => "error",
+            },
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+            path: diagnostic.path.clone(),
+            suggestion: diagnostic.suggestion.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliChangeOutput {
+    kind: &'static str,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<String>,
+    tracked: bool,
+}
+
+impl From<&ChangeRecord> for CliChangeOutput {
+    fn from(change: &ChangeRecord) -> Self {
+        Self {
+            kind: match change.kind {
+                leptos_ui_kit_codegen::ChangeKind::CreateFile => "create_file",
+                leptos_ui_kit_codegen::ChangeKind::UpdateFile => "update_file",
+                leptos_ui_kit_codegen::ChangeKind::DeleteFile => "delete_file",
+                leptos_ui_kit_codegen::ChangeKind::CreateDir => "create_dir",
+                leptos_ui_kit_codegen::ChangeKind::UpdateCssBlock => "update_css_block",
+                leptos_ui_kit_codegen::ChangeKind::WriteLockFile => "write_lock_file",
+            },
+            path: change.path.clone(),
+            item: change.item.clone(),
+            tracked: change.tracked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoRequirementOutput {
+    #[serde(rename = "crate")]
+    crate_name: String,
+    source: CargoSourceOutput,
+    features: Vec<String>,
+    required: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoSourceOutput {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rev: Option<String>,
+}
+
+impl From<&CargoPlanEntry> for CargoRequirementOutput {
+    fn from(entry: &CargoPlanEntry) -> Self {
+        Self {
+            crate_name: entry.crate_name.clone(),
+            source: CargoSourceOutput {
+                kind: match entry.source.kind {
+                    leptos_ui_kit_registry::CargoPlanSourceKind::Version => "version",
+                    leptos_ui_kit_registry::CargoPlanSourceKind::Git => "git",
+                },
+                version: entry.source.version.clone(),
+                url: entry.source.url.clone(),
+                rev: entry.source.rev.clone(),
+            },
+            features: entry.features.clone(),
+            required: entry.required,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddCommandOutput {
+    item_id: String,
+    item_name: String,
+    content_hash: String,
+    dependencies: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCommandOutput {
+    item_ids: Vec<String>,
+    dependencies: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitCommandOutput {}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HelpCommandOutput {
+    usage: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InfoCommandOutput {
-    #[serde(flatten)]
-    info: InfoOutput,
+    project_root: &'static str,
+    workspace_mode: &'static str,
+    cargo_manifest: String,
+    source_root: String,
+    index_html: String,
+    stylesheet: String,
+    render_mode: Option<&'static str>,
+    config_path: Option<String>,
     registry_available: bool,
-    installed_lock: Option<InstallLock>,
+    installed: Option<InstalledSummaryOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledSummaryOutput {
+    lock_path: String,
+    item_ids: Vec<String>,
+    file_paths: Vec<String>,
+    style_block_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RegistryItemSourceOutput {
-    resolved: ResolvedRegistryItem,
+    resolved: RegistryItemOutput,
     sources: Vec<RegistrySourceContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryItemOutput {
+    source_kind: &'static str,
+    source_path: String,
+    content_hash: String,
+    name: String,
+    kind: String,
+    version: String,
+    title: String,
+    description: String,
+    registry_dependencies: Vec<String>,
+    targets: RegistryTargetsOutput,
+    cargo_plan: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryTargetsOutput {
+    ui_files: Vec<RegistryUiTargetOutput>,
+    style_blocks: Vec<RegistryStyleTargetOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryUiTargetOutput {
+    source: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryStyleTargetOutput {
+    source: String,
+    id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +286,26 @@ struct VersionSourceOutput {
     url: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCommandOutput {
+    project_root: &'static str,
+    strict: bool,
+    check: bool,
+    trunk_build: bool,
+    checks: Vec<DoctorCheckOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheckOutput {
+    name: String,
+    status: DoctorCheckStatus,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +382,18 @@ enum DoctorCheckStatus {
     Pass,
     Warning,
     Fail,
+}
+
+fn command_status_name(status: CommandStatus) -> &'static str {
+    match status {
+        CommandStatus::Success => "success",
+        CommandStatus::NoChange => "no_change",
+        CommandStatus::Planned => "planned",
+        CommandStatus::Warning => "warning",
+        CommandStatus::Error => "error",
+        CommandStatus::Conflict => "conflict",
+        CommandStatus::Unsupported => "unsupported",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -328,16 +579,16 @@ impl CliError {
                 "Use a normalized project-relative path without traversal or symlink escapes.",
             ),
             CodegenError::Config(
-                ConfigError::PathMustBeRelative { value, .. }
-                | ConfigError::PathTraversal { value, .. }
-                | ConfigError::UnsafePathSegment { value, .. }
-                | ConfigError::PathOverlap { value, .. },
+                ConfigError::PathMustBeRelative { .. }
+                | ConfigError::PathTraversal { .. }
+                | ConfigError::UnsafePathSegment { .. }
+                | ConfigError::PathOverlap { .. },
             ) => (
                 ErrorCategory::UnsafePath,
                 CommandStatus::Error,
                 "config.unsafe_path",
                 ExitClass::UnsafePath,
-                Some(value.clone()),
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
                 "Use a normalized project-relative configuration path without overlap.",
             ),
             CodegenError::UnsafePatch { path, .. } => (
@@ -441,13 +692,18 @@ impl CliError {
                 "Resolve the reported project or filesystem error and retry.",
             ),
         };
+        let error_message = match &error {
+            CodegenError::Registry(error) => registry_error_message(error),
+            CodegenError::Config(error) => config_error_message(error),
+            _ => error.to_string(),
+        };
 
         Self {
             command: command.to_owned(),
             status,
             category,
             code,
-            message: format!("{action}: {error}"),
+            message: redact_project_root(&format!("{action}: {error_message}"), project_root),
             logical_path,
             suggestion: Some(suggestion),
             source: Some(Box::new(error)),
@@ -472,15 +728,15 @@ impl CliError {
                 "Verify the built-in registry package and retry.",
             ),
             DetectionError::Config(
-                ConfigError::PathMustBeRelative { value, .. }
-                | ConfigError::PathTraversal { value, .. }
-                | ConfigError::UnsafePathSegment { value, .. }
-                | ConfigError::PathOverlap { value, .. },
+                ConfigError::PathMustBeRelative { .. }
+                | ConfigError::PathTraversal { .. }
+                | ConfigError::UnsafePathSegment { .. }
+                | ConfigError::PathOverlap { .. },
             ) => (
                 ErrorCategory::UnsafePath,
                 "config.unsafe_path",
                 ExitClass::UnsafePath,
-                Some(value.clone()),
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
                 "Use a normalized project-relative configuration path without overlap.",
             ),
             DetectionError::MissingCargoManifest(path) => (
@@ -534,12 +790,19 @@ impl CliError {
             ),
         };
 
+        let error_message = match &error {
+            DetectionError::Config(error) => config_error_message(error),
+            _ => error.to_string(),
+        };
         Self {
             command: command.to_owned(),
             status: CommandStatus::Error,
             category,
             code,
-            message: format!("failed to inspect project: {error}"),
+            message: redact_project_root(
+                &format!("failed to inspect project: {error_message}"),
+                project_root,
+            ),
             logical_path,
             suggestion: Some(suggestion),
             source: Some(Box::new(error)),
@@ -557,7 +820,7 @@ impl CliError {
     ) -> Self {
         let logical_path = match &error {
             RegistryError::UnsafePath { path, .. } | RegistryError::DuplicateTarget(path) => {
-                Some(path.clone())
+                safe_logical_locator(path)
             }
             RegistryError::MissingSource(path)
             | RegistryError::Io { path, .. }
@@ -579,7 +842,10 @@ impl CliError {
             status: CommandStatus::Error,
             category: ErrorCategory::RegistryPackage,
             code: "registry.load_failed",
-            message: format!("failed to load registry item {selector}: {error}"),
+            message: format!(
+                "failed to load registry item {selector}: {}",
+                registry_error_message(&error)
+            ),
             logical_path,
             suggestion: Some(
                 "Verify the built-in registry package and requested item, then retry.",
@@ -591,7 +857,7 @@ impl CliError {
         }
     }
 
-    fn serialization(command: &'static str, json: bool, message: String) -> Self {
+    fn serialization(command: impl Into<String>, json: bool, message: String) -> Self {
         Self::operational(command, json, "output.serialize", message, None, None)
     }
 
@@ -619,9 +885,10 @@ impl CliError {
     }
 
     fn render_json(&self) -> String {
+        let diagnostics = [self.diagnostic()];
         serde_json::to_string_pretty(
-            &CommandEnvelope::new(&self.command, self.status, Option::<()>::None)
-                .with_diagnostics(vec![self.diagnostic()]),
+            &CliEnvelope::new(&self.command, self.status, Option::<()>::None)
+                .with_diagnostics(&diagnostics),
         )
         .expect("serializing the fixed CLI error envelope cannot fail")
     }
@@ -651,11 +918,54 @@ impl std::error::Error for CliError {
 }
 
 fn logical_path(project_root: &Path, path: &Path) -> Option<String> {
-    path.strip_prefix(project_root)
-        .ok()
-        .and_then(Path::to_str)
-        .map(|path| path.replace('\\', "/"))
-        .filter(|path| !path.is_empty())
+    if path.is_absolute() {
+        path.strip_prefix(project_root)
+            .ok()
+            .and_then(Path::to_str)
+            .and_then(safe_logical_locator)
+    } else {
+        path.to_str().and_then(safe_logical_locator)
+    }
+}
+
+fn registry_error_message(error: &RegistryError) -> String {
+    match error {
+        RegistryError::BuiltInNotFound(name) => {
+            format!("built-in registry item not found: {name}")
+        }
+        RegistryError::LocalRegistryUnsupported(source) => {
+            format!("local registry sources are not supported: {source}")
+        }
+        RegistryError::InvalidValue { .. } => "a packaged registry value is invalid".to_owned(),
+        RegistryError::UnknownDependency { .. } => {
+            "a packaged registry dependency is unknown".to_owned()
+        }
+        RegistryError::DependencyCycle(_) => {
+            "the packaged registry dependency graph contains a cycle".to_owned()
+        }
+        RegistryError::UnsafePath { .. } => "a packaged registry path is unsafe".to_owned(),
+        RegistryError::DuplicateTarget(_) => "a packaged registry target is duplicated".to_owned(),
+        RegistryError::Io { .. } => "failed to read a packaged registry asset".to_owned(),
+        RegistryError::Parse { .. } => "failed to parse a packaged registry asset".to_owned(),
+        RegistryError::MissingSource(_) => "a packaged registry source is missing".to_owned(),
+        RegistryError::Serialize(_) => "failed to serialize registry metadata".to_owned(),
+        RegistryError::BuiltInAsset(_) => "the packaged registry catalog is invalid".to_owned(),
+    }
+}
+
+fn config_error_message(error: &ConfigError) -> String {
+    match error {
+        ConfigError::PathMustBeRelative { .. }
+        | ConfigError::PathTraversal { .. }
+        | ConfigError::UnsafePathSegment { .. }
+        | ConfigError::PathOverlap { .. } => "kit.json contains an unsafe project path".to_owned(),
+        ConfigError::Parse(_) => "kit.json is malformed".to_owned(),
+        ConfigError::Serialize(_) => "kit.json could not be serialized".to_owned(),
+        ConfigError::InvalidValue { field, .. } => {
+            format!("kit.json contains an invalid value for {field}")
+        }
+        ConfigError::MissingToolProvenance { .. } => error.to_string(),
+    }
 }
 
 pub fn main_entry() {
@@ -749,7 +1059,11 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), CliError> {
     };
 
     if command == "--help" || command == "-h" {
-        println!("{}", help_text());
+        println!(
+            "{}",
+            render_help_output("help", &help_text(), json)
+                .map_err(|message| CliError::serialization("help", json, message))?
+        );
         return Ok(());
     }
     if command == "--version" || command == "-V" {
@@ -758,7 +1072,11 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), CliError> {
     if args[1..].iter().any(is_help_arg) {
         let help = command_help(command)
             .map_err(|message| CliError::usage(command, json, "cli.unknown_command", message))?;
-        println!("{help}");
+        println!(
+            "{}",
+            render_help_output(command, &help, json)
+                .map_err(|message| CliError::serialization(command, json, message))?
+        );
         return Ok(());
     }
 
@@ -1248,10 +1566,20 @@ fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
 
 fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
+        let output = AddCommandOutput {
+            item_id: plan.item_id.clone(),
+            item_name: plan.item_name.clone(),
+            content_hash: plan.content_hash.clone(),
+            dependencies: plan
+                .cargo_plan
+                .iter()
+                .map(CargoRequirementOutput::from)
+                .collect(),
+        };
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("add", status, plan)
-                .with_changes(plan.changes.clone())
-                .with_diagnostics(plan.diagnostics.clone()),
+            &CliEnvelope::new("add", status, output)
+                .with_changes(&plan.changes)
+                .with_diagnostics(&plan.diagnostics),
         )
         .map_err(|error| format!("failed to serialize add plan: {error}"));
     }
@@ -1274,10 +1602,18 @@ fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<
 
 fn render_sync_plan(plan: &SyncPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
+        let output = SyncCommandOutput {
+            item_ids: plan.item_ids.clone(),
+            dependencies: plan
+                .cargo_plan
+                .iter()
+                .map(CargoRequirementOutput::from)
+                .collect(),
+        };
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("sync", status, plan)
-                .with_changes(plan.changes.clone())
-                .with_diagnostics(plan.diagnostics.clone()),
+            &CliEnvelope::new("sync", status, output)
+                .with_changes(&plan.changes)
+                .with_diagnostics(&plan.diagnostics),
         )
         .map_err(|error| format!("failed to serialize sync plan: {error}"));
     }
@@ -1331,7 +1667,7 @@ fn cargo_plan_entry_label(entry: &CargoPlanEntry) -> String {
 fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("init", status, plan).with_changes(plan.changes.clone()),
+            &CliEnvelope::new("init", status, InitCommandOutput {}).with_changes(&plan.changes),
         )
         .map_err(|error| format!("failed to serialize init plan: {error}"));
     }
@@ -1363,7 +1699,7 @@ fn unchanged_label(status: CommandStatus) -> &'static str {
     if status == CommandStatus::Planned {
         "no changes planned"
     } else {
-        "unchanged"
+        "no changes"
     }
 }
 
@@ -1378,11 +1714,24 @@ fn render_version_output_with_tool(
     let output = version_output_with_tool(tool)?;
 
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("version", output))
+        return serde_json::to_string_pretty(&CliEnvelope::success("version", output))
             .map_err(|error| format!("failed to serialize version output: {error}"));
     }
 
     Ok(format!("{} {}", output.binary, output.version))
+}
+
+fn render_help_output(command: &str, help: &str, json: bool) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(&CliEnvelope::success(
+            command,
+            HelpCommandOutput {
+                usage: help.to_owned(),
+            },
+        ))
+        .map_err(|error| format!("failed to serialize help output: {error}"));
+    }
+    Ok(help.to_owned())
 }
 
 fn version_output_with_tool(
@@ -1410,34 +1759,62 @@ fn version_output_with_tool(
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
+    let project_root = &output.detected.project_root;
+    let installed_lock = read_info_install_lock(project_root, output.kit_config.as_ref());
     let command_output = InfoCommandOutput {
-        info: output.clone(),
+        project_root: ".",
+        workspace_mode: match output.detected.workspace_mode {
+            leptos_ui_kit_registry::WorkspaceMode::SingleCrate => "single-crate",
+            leptos_ui_kit_registry::WorkspaceMode::SinglePackageWorkspaceRoot => {
+                "single-package-workspace-root"
+            }
+        },
+        cargo_manifest: logical_path(project_root, &output.detected.cargo_manifest_path)
+            .unwrap_or_else(|| "Cargo.toml".to_owned()),
+        source_root: logical_path(project_root, &output.detected.source_root)
+            .unwrap_or_else(|| "src".to_owned()),
+        index_html: logical_path(project_root, &output.detected.index_html_path)
+            .unwrap_or_else(|| "index.html".to_owned()),
+        stylesheet: logical_path(project_root, &output.detected.css_file_path)
+            .unwrap_or_else(|| DEFAULT_CSS_PATH.to_owned()),
+        render_mode: output.detected.render_mode.map(|_| "csr"),
+        config_path: output
+            .detected
+            .kit_config_path
+            .as_ref()
+            .and_then(|path| logical_path(project_root, path)),
         registry_available: validate_built_in_registry_health().is_ok(),
-        installed_lock: read_info_install_lock(
-            &output.detected.project_root,
-            output.kit_config.as_ref(),
-        ),
+        installed: installed_lock.as_ref().map(|lock| InstalledSummaryOutput {
+            lock_path: output
+                .kit_config
+                .as_ref()
+                .map(install_lock_path)
+                .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned()),
+            item_ids: lock.items.keys().cloned().collect(),
+            file_paths: lock.files_by_path.keys().cloned().collect(),
+            style_block_ids: lock.style_blocks_by_id.keys().cloned().collect(),
+        }),
     };
 
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("info", &command_output))
+        return serde_json::to_string_pretty(&CliEnvelope::success("info", &command_output))
             .map_err(|error| format!("failed to serialize info output: {error}"));
     }
 
     Ok(format!(
         "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
-        output.detected.project_root.display(),
+        command_output.project_root,
         output.detected.workspace_mode,
-        output.detected.source_root.display(),
-        output.detected.index_html_path.display(),
-        output.detected.css_file_path.display(),
+        command_output.source_root,
+        command_output.index_html,
+        command_output.stylesheet,
         output
             .detected
             .render_mode
             .map(|value| format!("{value:?}"))
             .unwrap_or_else(|| "unknown".to_owned()),
         command_output.registry_available,
-        command_output.installed_lock.is_some()
+        command_output.installed.is_some()
     ))
 }
 
@@ -1449,13 +1826,13 @@ fn render_registry_item(
     if include_source {
         let output = registry_item_source_output(item)?;
         if json {
-            return serde_json::to_string_pretty(&CommandEnvelope::success("view", output))
+            return serde_json::to_string_pretty(&CliEnvelope::success("view", output))
                 .map_err(|error| format!("failed to serialize registry item source: {error}"));
         }
 
         let mut rendered = format!(
             "name: {}\nkind: {}\ncontent_hash: {}",
-            output.resolved.item.name, output.resolved.item.kind, output.resolved.content_hash
+            output.resolved.name, output.resolved.kind, output.resolved.content_hash
         );
         for source in output.sources {
             rendered.push_str(&format!(
@@ -1466,23 +1843,22 @@ fn render_registry_item(
         return Ok(rendered);
     }
 
+    let output = registry_item_output(item)?;
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("view", item))
+        return serde_json::to_string_pretty(&CliEnvelope::success("view", &output))
             .map_err(|error| format!("failed to serialize registry item: {error}"));
     }
 
     Ok(format!(
-        "name: {}\nkind: {}\nsource_kind: {:?}\nsource_path: {}",
-        item.item.name,
-        item.item.kind,
-        item.source_kind,
-        item.source_path.display()
+        "name: {}\nkind: {}\nsource_kind: {}\nsource_path: {}",
+        output.name, output.kind, output.source_kind, output.source_path
     ))
 }
 
 fn registry_item_source_output(
     item: &ResolvedRegistryItem,
 ) -> Result<RegistryItemSourceOutput, String> {
+    let resolved = registry_item_output(item)?;
     let mut sources = Vec::new();
     for file in &item.targets.ui_files {
         sources.push(RegistrySourceContent {
@@ -1501,10 +1877,79 @@ fn registry_item_source_output(
         });
     }
 
-    Ok(RegistryItemSourceOutput {
-        resolved: item.clone(),
-        sources,
+    Ok(RegistryItemSourceOutput { resolved, sources })
+}
+
+fn registry_item_output(item: &ResolvedRegistryItem) -> Result<RegistryItemOutput, String> {
+    let source_path = item
+        .source_path
+        .to_str()
+        .and_then(safe_logical_locator)
+        .ok_or_else(|| "registry manifest locator is not a safe logical path".to_owned())?;
+    let ui_files = item
+        .targets
+        .ui_files
+        .iter()
+        .map(|target| {
+            Ok(RegistryUiTargetOutput {
+                source: safe_logical_locator(&target.source).ok_or_else(|| {
+                    "registry source locator is not a safe logical path".to_owned()
+                })?,
+                path: safe_logical_locator(&target.path).ok_or_else(|| {
+                    "registry target locator is not a safe logical path".to_owned()
+                })?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let style_blocks = item
+        .targets
+        .style_blocks
+        .iter()
+        .map(|target| {
+            Ok(RegistryStyleTargetOutput {
+                source: safe_logical_locator(&target.source).ok_or_else(|| {
+                    "registry stylesheet locator is not a safe logical path".to_owned()
+                })?,
+                id: target.id.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(RegistryItemOutput {
+        source_kind: "built-in",
+        source_path,
+        content_hash: item.content_hash.clone(),
+        name: item.item.name.clone(),
+        kind: item.item.kind.to_string(),
+        version: item.item.version.clone(),
+        title: item.item.title.clone(),
+        description: item.item.description.clone(),
+        registry_dependencies: item.item.registry_dependencies.clone(),
+        targets: RegistryTargetsOutput {
+            ui_files,
+            style_blocks,
+        },
+        cargo_plan: item
+            .item
+            .cargo_plan
+            .iter()
+            .map(CargoRequirementOutput::from)
+            .collect(),
     })
+}
+
+fn safe_logical_locator(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.as_bytes().get(1) == Some(&b':')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    Some(path)
 }
 
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
@@ -2641,9 +3086,28 @@ fn render_doctor_output(
     status: CommandStatus,
 ) -> Result<String, String> {
     if json {
+        let command_output = DoctorCommandOutput {
+            project_root: ".",
+            strict: output.strict,
+            check: output.check,
+            trunk_build: output.trunk_build,
+            checks: output
+                .checks
+                .iter()
+                .map(|check| DoctorCheckOutput {
+                    name: check.name.clone(),
+                    status: check.status,
+                    message: redact_project_root(&check.message, &output.project_root),
+                    path: check
+                        .path
+                        .as_deref()
+                        .and_then(|path| public_path(&output.project_root, path)),
+                })
+                .collect(),
+        };
+        let diagnostics = doctor_diagnostics(output);
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("doctor", status, output)
-                .with_diagnostics(doctor_diagnostics(output)),
+            &CliEnvelope::new("doctor", status, command_output).with_diagnostics(&diagnostics),
         )
         .map_err(|error| format!("failed to serialize doctor output: {error}"));
     }
@@ -2652,7 +3116,9 @@ fn render_doctor_output(
     for check in &output.checks {
         rendered.push_str(&format!(
             "\n- {:?} {}: {}",
-            check.status, check.name, check.message
+            check.status,
+            check.name,
+            redact_project_root(&check.message, &output.project_root)
         ));
     }
     Ok(rendered)
@@ -2671,14 +3137,33 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
             let diagnostic = Diagnostic::new(
                 level,
                 format!("doctor.{}", check.name),
-                check.message.clone(),
+                redact_project_root(&check.message, &output.project_root),
             );
             check
                 .path
-                .clone()
+                .as_deref()
+                .and_then(|path| public_path(&output.project_root, path))
                 .map_or(diagnostic.clone(), |path| diagnostic.with_path(path))
         })
         .collect()
+}
+
+fn public_path(project_root: &Path, path: &str) -> Option<String> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        logical_path(project_root, path).or_else(|| (path == project_root).then(|| ".".to_owned()))
+    } else {
+        Some(path.to_string_lossy().replace('\\', "/"))
+    }
+}
+
+fn redact_project_root(message: &str, project_root: &Path) -> String {
+    let root = project_root.to_string_lossy();
+    if root.is_empty() || root == "." {
+        message.to_owned()
+    } else {
+        message.replace(root.as_ref(), ".")
+    }
 }
 
 fn read_info_install_lock(
@@ -2848,9 +3333,12 @@ leptos_router = "0.9.0-alpha"
 
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"info\""));
-        assert!(output.contains("\"project_root\""));
-        assert!(output.contains("\"render_mode\": \"csr\""));
-        assert!(output.contains("\"css_file_path\""));
+        assert!(output.contains("\"projectRoot\": \".\""));
+        assert!(output.contains("\"renderMode\": \"csr\""));
+        assert!(output.contains("\"stylesheet\": \"styles/kit.css\""));
+        assert!(!output.contains(&root.display().to_string()));
+        assert!(!output.contains("\"kitConfig\""));
+        assert!(!output.contains("\"installedLock\""));
     }
 
     #[test]
@@ -2861,7 +3349,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"view\""));
         assert!(output.contains("\"name\": \"button\""));
-        assert!(output.contains("\"source_kind\": \"built-in\""));
+        assert!(output.contains("\"sourceKind\": \"built-in\""));
         assert!(output.contains("\"kind\": \"ui\""));
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"source\""));
@@ -2919,6 +3407,12 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"init\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.json\""));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).expect("init JSON")["data"],
+            serde_json::json!({})
+        );
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"content\""));
         assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
     }
 
@@ -2971,10 +3465,15 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"add\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemName\": \"button\""));
-        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"dependencies\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
         assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.lock.json\""));
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"lock\""));
+        assert!(!output.contains("\"content\""));
+        assert_eq!(output.matches("\"changes\"").count(), 1);
+        assert_eq!(output.matches("\"diagnostics\"").count(), 1);
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -3037,10 +3536,13 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemIds\": ["));
         assert!(output.contains("\"builtin:button\""));
-        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"dependencies\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(!output.contains("\"crate\": \"leptos_router\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"lock\""));
+        assert!(!output.contains("\"content\""));
     }
 
     #[test]
@@ -4442,6 +4944,27 @@ leptos_router = "0.9.0-alpha"
             .expect("render JSON version");
         let value = serde_json::from_str::<serde_json::Value>(&output).expect("parse version JSON");
 
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schemaVersion": "0.9.0-alpha",
+                "command": "version",
+                "status": "success",
+                "diagnostics": [],
+                "changes": [],
+                "data": {
+                    "package": "leptos_ui_kit_cli",
+                    "binary": "leptos_ui_kit",
+                    "version": "0.1.0",
+                    "schemaVersion": "0.9.0-alpha",
+                    "source": {
+                        "kind": "git",
+                        "url": "https://github.com/triesap/leptos_ui_kit",
+                        "rev": TEST_TOOL_REV
+                    }
+                }
+            })
+        );
         assert_eq!(value["command"], "version");
         assert_eq!(value["status"], "success");
         assert_eq!(value["schemaVersion"], "0.9.0-alpha");
@@ -4634,6 +5157,53 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn registry_diagnostics_never_expose_physical_locators() {
+        for path in [
+            "/private/build/registry/item.json",
+            r"C:\private\build\registry\item.json",
+            "../registry/item.json",
+            "registry/../item.json",
+        ] {
+            let error = CliError::from_registry(
+                "view",
+                true,
+                "button",
+                RegistryError::UnsafePath {
+                    field: "targets.uiFiles[].source",
+                    path: path.to_owned(),
+                },
+            );
+            let output = error.render_json();
+
+            assert!(!output.contains(path), "{path}");
+            assert!(!output.contains("private"), "{output}");
+            assert_eq!(error.logical_path, None);
+        }
+
+        let logical = CliError::from_registry(
+            "view",
+            true,
+            "button",
+            RegistryError::DuplicateTarget("ui/button.rs".to_owned()),
+        );
+        assert_eq!(logical.logical_path.as_deref(), Some("ui/button.rs"));
+
+        let packaged = CliError::from_codegen(
+            "add",
+            true,
+            Path::new("/project"),
+            "failed to load item",
+            CodegenError::Registry(RegistryError::Io {
+                path: PathBuf::from("/private/build/out/registry/item.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+            }),
+        );
+        let output = packaged.render_json();
+        assert!(!output.contains("/private/build"), "{output}");
+        assert!(output.contains("failed to read a packaged registry asset"));
+    }
+
+    #[test]
     fn human_change_wording_distinguishes_planned_applied_and_unchanged() {
         assert_eq!(change_verb(CommandStatus::Planned), "planned");
         assert_eq!(change_verb(CommandStatus::Success), "applied");
@@ -4641,7 +5211,7 @@ leptos_router = "0.9.0-alpha"
             unchanged_label(CommandStatus::Planned),
             "no changes planned"
         );
-        assert_eq!(unchanged_label(CommandStatus::NoChange), "unchanged");
+        assert_eq!(unchanged_label(CommandStatus::NoChange), "no changes");
     }
 
     #[test]
