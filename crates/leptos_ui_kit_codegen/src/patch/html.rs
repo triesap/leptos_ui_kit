@@ -158,6 +158,9 @@ pub fn inspect_html(input: &str) -> Result<HtmlInspection, HtmlInspectionError> 
         let Some(next) = bytes.get(cursor + 1) else {
             return malformed(cursor, "unterminated tag opener");
         };
+        if next.is_ascii_whitespace() {
+            return malformed(cursor, "whitespace is not allowed before a tag name");
+        }
         if !next.is_ascii_alphabetic() && *next != b'/' {
             cursor += 1;
             continue;
@@ -199,9 +202,14 @@ pub fn inspect_html(input: &str) -> Result<HtmlInspection, HtmlInspectionError> 
         }
 
         if !tag.end
-            && !tag.self_closing
             && (tag.name.eq_ignore_ascii_case("script") || tag.name.eq_ignore_ascii_case("style"))
         {
+            if tag.self_closing {
+                return malformed(
+                    tag.span.start,
+                    format!("{} raw-text element cannot be self-closing", tag.name),
+                );
+            }
             cursor = find_raw_text_end(input, cursor, &tag.name).ok_or_else(|| {
                 HtmlInspectionError::Malformed {
                     offset: tag.span.start,
@@ -372,7 +380,12 @@ fn parse_tag(input: &str, start: usize) -> Result<ParsedTag, HtmlInspectionError
     if end {
         cursor += 1;
     }
-    skip_ascii_whitespace(bytes, &mut cursor);
+    if bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        return malformed(cursor, "whitespace is not allowed before a tag name");
+    }
     let name_start = cursor;
     while bytes.get(cursor).is_some_and(|byte| is_name_byte(*byte)) {
         cursor += 1;
@@ -733,10 +746,14 @@ mod tests {
     fn scanner_rejects_malformed_comments_tags_quotes_and_raw_text() {
         for html in [
             "<head><!--</head>",
+            "< head></head>",
+            "<head></ head>",
             "<head><link href=\"styles/kit.css></head>",
             "<head><link =bad></head>",
             "<head><script>const x = 1;</head>",
             "<head><style>.x {}</head>",
+            "<head><script/></head>",
+            "<head><style/></head>",
             "<head><link href='a' HREF='b'></head>",
         ] {
             assert!(

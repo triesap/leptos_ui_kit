@@ -127,6 +127,7 @@ pub enum DependencyStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum DependencyIncompatibility {
+    InvalidDeclaration,
     Renamed {
         dependency_key: String,
     },
@@ -137,6 +138,8 @@ pub enum DependencyIncompatibility {
     MissingWorkspaceDeclaration,
     InvalidWorkspaceInheritance,
     UnsupportedPathSource,
+    UnsupportedRegistrySource,
+    UnsupportedGitSource,
     UnsupportedSource,
     InvalidVersionRequirement,
     UnprovenVersionRequirement,
@@ -392,7 +395,29 @@ fn effective_normal_dependency(
 ) -> Option<EffectiveDependency> {
     let normal = manifest.get("dependencies").and_then(TomlValue::as_table);
     if let Some(value) = normal.and_then(|dependencies| dependencies.get(crate_name)) {
-        return Some(resolve_normal_dependency(manifest, crate_name, value));
+        let resolved = resolve_normal_dependency(manifest, crate_name, value);
+        if resolved.incompatibility.is_some() {
+            return Some(resolved);
+        }
+        if let Some(dependency_key) = renamed_dependency_key(normal, crate_name) {
+            return Some(EffectiveDependency {
+                incompatibility: Some(DependencyIncompatibility::Renamed { dependency_key }),
+                ..resolved
+            });
+        }
+        if manifest
+            .get("target")
+            .and_then(TomlValue::as_table)
+            .is_some_and(|targets| target_has_dependency(targets, crate_name))
+        {
+            return Some(EffectiveDependency {
+                incompatibility: Some(DependencyIncompatibility::NonNormal {
+                    declaration: DependencyDeclarationKind::Target,
+                }),
+                ..resolved
+            });
+        }
+        return Some(resolved);
     }
 
     if let Some(dependency_key) = renamed_dependency_key(normal, crate_name) {
@@ -435,8 +460,15 @@ fn resolve_normal_dependency(
     crate_name: &str,
     member_value: &TomlValue,
 ) -> EffectiveDependency {
-    let mut features = dependency_features(member_value).unwrap_or_default();
-    let mut optional = dependency_optional(member_value);
+    let Ok(mut features) = dependency_features(member_value) else {
+        return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+    };
+    let Ok(mut optional) = dependency_optional(member_value) else {
+        return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+    };
+    if !dependency_scalar_fields_are_valid(member_value) {
+        return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+    }
     let source_value = if member_value
         .as_table()
         .and_then(|table| table.get("workspace"))
@@ -473,8 +505,17 @@ fn resolve_normal_dependency(
                 incompatibility: Some(DependencyIncompatibility::MissingWorkspaceDeclaration),
             };
         };
-        features.extend(dependency_features(workspace_value).unwrap_or_default());
-        optional |= dependency_optional(workspace_value);
+        let Ok(workspace_features) = dependency_features(workspace_value) else {
+            return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+        };
+        let Ok(workspace_optional) = dependency_optional(workspace_value) else {
+            return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+        };
+        if !dependency_scalar_fields_are_valid(workspace_value) {
+            return incompatible_dependency(DependencyIncompatibility::InvalidDeclaration);
+        }
+        features.extend(workspace_features);
+        optional |= workspace_optional;
         workspace_value
     } else {
         member_value
@@ -521,13 +562,56 @@ fn classify_dependency_source(
     Option<DetectedDependencySource>,
     Option<DependencyIncompatibility>,
 ) {
-    if value
-        .as_table()
-        .is_some_and(|table| table.contains_key("path"))
-    {
+    let Some(table) = value.as_table() else {
+        let source = dependency_source(value);
+        let incompatibility = match source.as_ref() {
+            Some(DetectedDependencySource {
+                kind: CargoPlanSourceKind::Version,
+                version: Some(version),
+                ..
+            }) => match VersionReq::parse(version) {
+                Ok(_) => None,
+                Err(_) => Some(DependencyIncompatibility::InvalidVersionRequirement),
+            },
+            Some(_) | None => Some(DependencyIncompatibility::UnsupportedSource),
+        };
+        return (source, incompatibility);
+    };
+
+    if table.contains_key("path") {
         return (
             dependency_source(value),
             Some(DependencyIncompatibility::UnsupportedPathSource),
+        );
+    }
+    if table.contains_key("registry") {
+        return (
+            dependency_source(value),
+            Some(DependencyIncompatibility::UnsupportedRegistrySource),
+        );
+    }
+    if table.contains_key("git")
+        && (table.contains_key("branch")
+            || table.contains_key("tag")
+            || !table.contains_key("rev")
+            || table.contains_key("version"))
+    {
+        return (
+            dependency_source(value),
+            Some(DependencyIncompatibility::UnsupportedGitSource),
+        );
+    }
+    if table
+        .keys()
+        .any(|key| !is_supported_dependency_key(key.as_str()))
+        || (!table.contains_key("git")
+            && ["rev", "branch", "tag"]
+                .iter()
+                .any(|key| table.contains_key(*key)))
+    {
+        return (
+            dependency_source(value),
+            Some(DependencyIncompatibility::UnsupportedSource),
         );
     }
 
@@ -550,7 +634,7 @@ fn classify_dependency_source(
             kind: CargoPlanSourceKind::Git,
             rev: None,
             ..
-        }) => Some(DependencyIncompatibility::UnsupportedSource),
+        }) => Some(DependencyIncompatibility::UnsupportedGitSource),
         Some(_) | None => Some(DependencyIncompatibility::UnsupportedSource),
     };
     (source, incompatibility)
@@ -645,28 +729,59 @@ fn conflicting_features(crate_name: &str, features: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn dependency_features(value: &TomlValue) -> Option<Vec<String>> {
+fn dependency_features(value: &TomlValue) -> Result<Vec<String>, ()> {
     match value {
-        TomlValue::Table(table) => Some(
-            table
-                .get("features")
-                .and_then(TomlValue::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(TomlValue::as_str)
-                .map(ToOwned::to_owned)
-                .collect(),
-        ),
-        _ => None,
+        TomlValue::String(_) => Ok(Vec::new()),
+        TomlValue::Table(table) => match table.get("features") {
+            None => Ok(Vec::new()),
+            Some(TomlValue::Array(features))
+                if features.iter().all(|feature| feature.as_str().is_some()) =>
+            {
+                Ok(features
+                    .iter()
+                    .filter_map(TomlValue::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect())
+            }
+            Some(_) => Err(()),
+        },
+        _ => Err(()),
     }
 }
 
-fn dependency_optional(value: &TomlValue) -> bool {
-    value
-        .as_table()
-        .and_then(|table| table.get("optional"))
-        .and_then(TomlValue::as_bool)
-        .unwrap_or(false)
+fn dependency_optional(value: &TomlValue) -> Result<bool, ()> {
+    match value {
+        TomlValue::String(_) => Ok(false),
+        TomlValue::Table(table) => match table.get("optional") {
+            None => Ok(false),
+            Some(TomlValue::Boolean(optional)) => Ok(*optional),
+            Some(_) => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+fn dependency_scalar_fields_are_valid(value: &TomlValue) -> bool {
+    let Some(table) = value.as_table() else {
+        return value.as_str().is_some();
+    };
+    table.iter().all(|(key, value)| match key.as_str() {
+        "features" => value
+            .as_array()
+            .is_some_and(|values| values.iter().all(|value| value.as_str().is_some())),
+        "optional" | "default-features" | "workspace" => value.as_bool().is_some(),
+        "version" | "registry" | "git" | "rev" | "branch" | "tag" | "path" | "package" => {
+            value.as_str().is_some()
+        }
+        _ => true,
+    })
+}
+
+fn is_supported_dependency_key(key: &str) -> bool {
+    matches!(
+        key,
+        "version" | "git" | "rev" | "features" | "optional" | "default-features" | "package"
+    )
 }
 
 fn dependency_package(value: &TomlValue) -> Option<&str> {
@@ -1114,7 +1229,94 @@ leptos = { git = "https://example.com/leptos", branch = "main", features = ["csr
         );
         assert_eq!(
             git_without_rev.incompatibility,
-            Some(DependencyIncompatibility::UnsupportedSource)
+            Some(DependencyIncompatibility::UnsupportedGitSource)
+        );
+    }
+
+    #[test]
+    fn malformed_dependency_fields_fail_closed() {
+        for manifest in [
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"], optional = "false" }
+"#,
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr", 42] }
+"#,
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = "csr" }
+"#,
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"], default-features = "false" }
+"#,
+        ] {
+            let detected = requirement_for(manifest);
+            assert_eq!(detected.status, DependencyStatus::Incompatible);
+            assert_eq!(
+                detected.incompatibility,
+                Some(DependencyIncompatibility::InvalidDeclaration),
+                "{manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_registries_and_mixed_git_selectors_fail_closed() {
+        let registry = requirement_for(
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", registry = "private", features = ["csr"] }
+"#,
+        );
+        assert_eq!(
+            registry.incompatibility,
+            Some(DependencyIncompatibility::UnsupportedRegistrySource)
+        );
+
+        for selector in [
+            r#"branch = "main""#,
+            r#"tag = "v0.9.0""#,
+            r#"branch = "main", tag = "v0.9.0""#,
+        ] {
+            let detected = requirement_for(&format!(
+                r#"[dependencies]
+leptos = {{ git = "https://example.com/leptos", rev = "abcdef0123456789abcdef0123456789abcdef01", {selector}, features = ["csr"] }}
+"#
+            ));
+            assert_eq!(
+                detected.incompatibility,
+                Some(DependencyIncompatibility::UnsupportedGitSource),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_normal_dependency_declarations_fail_closed() {
+        let target = requirement_for(
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+leptos = { version = "0.9.0-alpha", features = ["ssr"] }
+"#,
+        );
+        assert_eq!(
+            target.incompatibility,
+            Some(DependencyIncompatibility::NonNormal {
+                declaration: DependencyDeclarationKind::Target,
+            })
+        );
+
+        let renamed = requirement_for(
+            r#"[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+web = { package = "leptos", version = "0.9.0-alpha" }
+"#,
+        );
+        assert_eq!(
+            renamed.incompatibility,
+            Some(DependencyIncompatibility::Renamed {
+                dependency_key: "web".to_owned(),
+            })
         );
     }
 
