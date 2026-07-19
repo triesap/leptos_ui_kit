@@ -28,11 +28,15 @@ include = [
     "src/planning/mod.rs",
     "src/planning/sync.rs",
     "src/tests.rs",
+    "src/transaction/authority.rs",
     "src/transaction/engine.rs",
     "src/transaction/fs.rs",
     "src/transaction/journal.rs",
     "src/transaction/lock.rs",
     "src/transaction/mod.rs",
+    "src/transaction/recovery.rs",
+    "src/transaction/recovery_capture.rs",
+    "src/transaction/recovery_policy.rs",
     "src/transaction/replace.rs",
     "src/transaction/runtime.rs",
     "src/transaction/store.rs",
@@ -43,6 +47,9 @@ include = [
     "tests/transaction_process.rs",
     "tests/transaction_security.rs",
 ]
+
+[features]
+test-support = []
 
 [dependencies]
 cap-fs-ext.workspace = true
@@ -58,6 +65,7 @@ rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 fs_at = "0.2.1"
+leptos_ui_kit_codegen_platform.workspace = true
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

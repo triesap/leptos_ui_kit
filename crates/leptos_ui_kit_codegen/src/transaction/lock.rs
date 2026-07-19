@@ -17,12 +17,17 @@ use cap_std::{
 use crate::CodegenError;
 use crate::path_safety::PlanningContext;
 
-use super::fs::{CreatedFile, FsOps, HardLinkEndpoint, SystemFs};
+use super::fs::{
+    CreatedFile, ExactObjectIdentity, FsOps, HardLinkEndpoint, SystemFs, opened_directory_identity,
+};
+use super::journal::{
+    parse_bootstrap_intent_name, parse_finalization_file_name, parse_transaction_directory_name,
+};
 
 pub const DEFAULT_KIT_WRITE_LOCK_PATH: &str = "src/components/ui/_kit/.write.lock";
 pub(crate) const DEFAULT_KIT_COORDINATION_IGNORE_PATH: &str = "src/components/ui/_kit/.gitignore";
 pub(crate) const KIT_ADVISORY_LOCK_CONTENT: &[u8] = b"leptos-ui-kit advisory lock v1\n";
-pub(crate) const KIT_COORDINATION_IGNORE_CONTENT: &[u8] = b"/.write.lock\n/.transactions/\n";
+pub(crate) const KIT_COORDINATION_IGNORE_CONTENT: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 
 const LEGACY_WRITE_LOCK_CONTENT: &[u8] = b"locked\n";
 const TRANSACTIONS_DIRECTORY_NAME: &str = ".transactions";
@@ -41,9 +46,10 @@ const KIT_DIRECTORY_COMPONENTS: [&str; 4] = ["src", "components", "ui", "_kit"];
 pub struct WriteLock {
     path: PathBuf,
     file: Option<std::fs::File>,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     project_root: PathBuf,
-    project_identity: (u64, u64),
+    project_identity: ExactObjectIdentity,
+    kit_identity: ExactObjectIdentity,
 }
 
 struct PinnedKitDirectories {
@@ -264,26 +270,45 @@ impl WriteLock {
             kit_directory,
             opened,
         )?;
-        let (project_root, project_device, project_inode) = context.project_identity();
+        let (project_root, project_identity) = context.project_identity();
+        let kit_identity =
+            opened_directory_identity(kit_directory).map_err(|source| CodegenError::Io {
+                path: context.project_root().join(KIT_DIRECTORY_PATH),
+                source,
+            })?;
 
-        Ok(Self {
+        let lock = Self {
             path: opened.path,
             file: Some(opened.file.into_std()),
             identity: opened.identity,
             project_root: project_root.to_path_buf(),
-            project_identity: (project_device, project_inode),
-        })
+            project_identity,
+            kit_identity,
+        };
+        Ok(lock)
     }
 
     pub(crate) fn validate_context(&self, context: &PlanningContext) -> Result<(), CodegenError> {
-        let (project_root, device, inode) = context.project_identity();
-        if project_root != self.project_root || (device, inode) != self.project_identity {
+        let (project_root, project_identity) = context.project_identity();
+        if project_root != self.project_root || project_identity != self.project_identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: project_root.to_path_buf(),
                 reason: "write lock belongs to a different project identity".to_owned(),
             });
         }
         context.revalidate_project_root_identity()?;
+        let current_kit = context.open_directory(KIT_DIRECTORY_PATH)?;
+        let current_kit_identity =
+            opened_directory_identity(&current_kit).map_err(|source| CodegenError::Io {
+                path: context.project_root().join(KIT_DIRECTORY_PATH),
+                source,
+            })?;
+        if current_kit_identity != self.kit_identity {
+            return Err(CodegenError::UnsafePath {
+                path: KIT_DIRECTORY_PATH.to_owned(),
+                reason: "the coordination parent changed while the write lock was held".to_owned(),
+            });
+        }
 
         let held = self
             .file
@@ -311,14 +336,30 @@ impl WriteLock {
         validate_single_link_lock(context, &held, held_identity, &self.path)
     }
 
-    pub(crate) fn identity(&self) -> (u64, u64) {
+    pub(crate) fn identity(&self) -> ExactObjectIdentity {
         self.identity
+    }
+
+    pub(super) fn coordination_parent_identity(&self) -> ExactObjectIdentity {
+        self.kit_identity
+    }
+
+    pub(super) fn open_or_create_transaction_namespace(
+        &self,
+        context: &PlanningContext,
+        fs: &dyn FsOps,
+    ) -> Result<Dir, CodegenError> {
+        self.validate_context(context)?;
+        let kit = context.open_directory(KIT_DIRECTORY_PATH)?;
+        let transactions = open_or_create_transactions_directory(context, fs, &kit)?;
+        self.validate_context(context)?;
+        Ok(transactions.directory)
     }
 }
 
 struct OpenedLock {
     file: File,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     path: PathBuf,
     locked: bool,
 }
@@ -351,7 +392,7 @@ fn validate_completed_opened_lock(
 fn validate_single_link_lock(
     context: &PlanningContext,
     held: &File,
-    expected_identity: (u64, u64),
+    expected_identity: ExactObjectIdentity,
     path: &Path,
 ) -> Result<(), CodegenError> {
     context.revalidate_auxiliary_identity(DEFAULT_KIT_WRITE_LOCK_PATH, expected_identity)?;
@@ -468,7 +509,7 @@ fn finish_deferred_held_lock_alias_cleanup(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    transactions_identity: (u64, u64),
+    transactions_identity: ExactObjectIdentity,
 ) -> Result<(), CodegenError> {
     for _ in 0..CLEANUP_QUIESCENCE_ATTEMPTS {
         match try_cleanup_transactions_directory_by_identity(
@@ -779,7 +820,7 @@ fn publish_initialized_lock(
 fn converge_on_expected_published_lock(
     context: &PlanningContext,
     fs: &dyn FsOps,
-    expected_identity: (u64, u64),
+    expected_identity: ExactObjectIdentity,
 ) -> Result<OpenedLock, CodegenError> {
     let opened = converge_on_published_lock(context, fs)?;
     if opened.identity != expected_identity {
@@ -796,7 +837,7 @@ fn best_effort_cleanup_failed_lock_publication(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    expected_lock_identity: (u64, u64),
+    expected_lock_identity: ExactObjectIdentity,
 ) {
     let Ok(Some(mut opened)) = open_existing_lock(context, fs) else {
         return;
@@ -884,7 +925,7 @@ impl CandidateKind {
 
 struct TransactionsDirectory {
     directory: Dir,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     path: PathBuf,
 }
 
@@ -893,30 +934,30 @@ struct Candidate {
     path: PathBuf,
     file: File,
     source_guard: Option<File>,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 }
 
-type FinishedCandidateHandles = (File, Option<File>, (u64, u64));
+type FinishedCandidateHandles = (File, Option<File>, ExactObjectIdentity);
 
 struct CandidateAlias {
     name: String,
     path: PathBuf,
     file: File,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     kind: CandidateKind,
 }
 
 struct CandidateInventory {
     name: String,
     path: PathBuf,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     kind: CandidateKind,
     recover_owner_mode: bool,
 }
 
 struct ClaimedCandidate {
     aliases: Vec<CandidateAlias>,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 }
 
 enum CandidateAliasCleanupOutcome {
@@ -945,7 +986,7 @@ enum StaleCandidateCleanupOutcome {
     Complete,
     #[cfg(windows)]
     HeldLockAliasDeferred {
-        transactions_identity: (u64, u64),
+        transactions_identity: ExactObjectIdentity,
     },
 }
 
@@ -1023,13 +1064,20 @@ fn open_or_create_transactions_directory(
             &path,
             &mut metadata,
         )?;
-        let identity = metadata_identity(&metadata);
         let directory = kit_directory
             .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
             .map_err(|source| CodegenError::UnsafePath {
                 path: "src/components/ui/_kit/.transactions".to_owned(),
                 reason: format!("failed to open directory without following: {source}"),
             })?;
+        let identity =
+            opened_directory_identity(&directory).map_err(|source| CodegenError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        if created {
+            created_identity = Some(identity);
+        }
         let transactions = TransactionsDirectory {
             directory,
             identity,
@@ -1073,7 +1121,7 @@ fn best_effort_cleanup_created_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) {
     let path = context
         .project_root()
@@ -1088,7 +1136,17 @@ fn best_effort_cleanup_created_transactions_directory_by_identity(
                 source,
             })?;
         ensure_safe_directory_metadata("src/components/ui/_kit/.transactions", &metadata)?;
-        if metadata_identity(&metadata) != identity {
+        let directory = kit_directory
+            .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
+            .map_err(|source| CodegenError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        if opened_directory_identity(&directory).map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })? != identity
+        {
             return Err(detached_transactions_directory());
         }
         recover_restrictive_transactions_directory_mode(
@@ -1139,13 +1197,16 @@ fn open_existing_transactions_directory(
         &mut metadata,
     )?;
     validate_directory_mode(&metadata, 0o700, "src/components/ui/_kit/.transactions")?;
-    let identity = metadata_identity(&metadata);
     let directory = kit_directory
         .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
         .map_err(|source| CodegenError::UnsafePath {
             path: "src/components/ui/_kit/.transactions".to_owned(),
             reason: format!("failed to open directory without following: {source}"),
         })?;
+    let identity = opened_directory_identity(&directory).map_err(|source| CodegenError::Io {
+        path: path.clone(),
+        source,
+    })?;
     let transactions = TransactionsDirectory {
         directory,
         identity,
@@ -1254,7 +1315,17 @@ fn match_transactions_directory_identity(
         }
     };
     ensure_safe_directory_metadata("src/components/ui/_kit/.transactions", &metadata)?;
-    if metadata_identity(&metadata) != transactions.identity {
+    let current_directory = kit_directory
+        .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
+        .map_err(|source| CodegenError::Io {
+            path: transactions.path.clone(),
+            source,
+        })?;
+    if opened_directory_identity(&current_directory).map_err(|source| CodegenError::Io {
+        path: transactions.path.clone(),
+        source,
+    })? != transactions.identity
+    {
         return Err(detached_transactions_directory());
     }
     let opened = transactions
@@ -1265,7 +1336,11 @@ fn match_transactions_directory_identity(
             source,
         })?;
     ensure_safe_directory_metadata("src/components/ui/_kit/.transactions", &opened)?;
-    if metadata_identity(&opened) != transactions.identity {
+    if opened_directory_identity(&transactions.directory).map_err(|source| CodegenError::Io {
+        path: transactions.path.clone(),
+        source,
+    })? != transactions.identity
+    {
         return Err(detached_transactions_directory());
     }
     Ok(true)
@@ -1486,7 +1561,7 @@ fn cleanup_stale_lock_candidates(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    held_lock_identity: (u64, u64),
+    held_lock_identity: ExactObjectIdentity,
 ) -> Result<StaleCandidateCleanupOutcome, CodegenError> {
     'quiescence: for _ in 0..CLEANUP_QUIESCENCE_ATTEMPTS {
         let Some(transactions) = open_existing_transactions_directory(context, fs, kit_directory)?
@@ -1495,7 +1570,7 @@ fn cleanup_stale_lock_candidates(
         };
 
         let mut names = Vec::new();
-        let mut journal_present = false;
+        let mut has_transaction_evidence = false;
         for entry in transactions
             .directory
             .entries()
@@ -1509,8 +1584,11 @@ fn cleanup_stale_lock_candidates(
                 source,
             })?;
             let name = entry.file_name();
-            if transaction_journal_name(&name) || journal_update_name(&name) {
-                journal_present = true;
+            if transaction_journal_name(&name)
+                || journal_update_name(&name)
+                || journal_v2_authority_name(&name)
+            {
+                has_transaction_evidence = true;
                 continue;
             }
             if candidate_kind(&name).is_none() {
@@ -1520,7 +1598,8 @@ fn cleanup_stale_lock_candidates(
         }
         names.sort();
 
-        let mut inventory_by_identity = BTreeMap::<(u64, u64), Vec<CandidateInventory>>::new();
+        let mut inventory_by_identity =
+            BTreeMap::<ExactObjectIdentity, Vec<CandidateInventory>>::new();
         for name in names {
             let kind = candidate_kind(&name).ok_or_else(|| invalid_transactions_entry(&name))?;
             let name = name
@@ -1804,9 +1883,9 @@ fn cleanup_stale_lock_candidates(
 
         require_current_transactions_directory(context, fs, kit_directory, &transactions)?;
         let mut removed_any = false;
-        #[cfg(windows)]
-        let mut removed_held_lock_alias = false;
         let mut restart = false;
+        #[cfg(windows)]
+        let mut defer_held_lock_alias = false;
         'removal: for candidate in &claimed {
             for alias in &candidate.aliases {
                 match cleanup_claimed_candidate_alias(
@@ -1820,14 +1899,14 @@ fn cleanup_stale_lock_candidates(
                 )? {
                     CandidateAliasCleanupOutcome::Removed => {
                         removed_any = true;
-                        #[cfg(windows)]
-                        if candidate.identity == held_lock_identity {
-                            removed_held_lock_alias = true;
-                        }
                     }
                     CandidateAliasCleanupOutcome::Absent => {}
                     CandidateAliasCleanupOutcome::Retry => {
                         restart = true;
+                        #[cfg(windows)]
+                        {
+                            defer_held_lock_alias = candidate.identity == held_lock_identity;
+                        }
                         break 'removal;
                     }
                 }
@@ -1837,71 +1916,40 @@ fn cleanup_stale_lock_candidates(
             sync_directory(fs, &transactions.directory, &transactions.path)?;
         }
         if restart {
+            #[cfg(windows)]
+            if defer_held_lock_alias {
+                return Ok(StaleCandidateCleanupOutcome::HeldLockAliasDeferred {
+                    transactions_identity: transactions.identity,
+                });
+            }
             return Err(CodegenError::WriteLockContended {
                 path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
             });
         }
-
-        if journal_present {
+        if has_transaction_evidence {
             return Ok(StaleCandidateCleanupOutcome::Complete);
         }
-
         let transactions_identity = transactions.identity;
         drop(claimed);
         drop(transactions.directory);
-        let directory_cleanup = try_cleanup_transactions_directory_by_identity(
+        return match try_cleanup_transactions_directory_by_identity(
             fs,
             kit_directory,
             context,
             transactions_identity,
-        );
-        let directory_cleanup = match directory_cleanup {
-            Ok(outcome) => outcome,
-            Err(original) => {
-                best_effort_cleanup_transactions_directory_by_identity(
-                    fs,
-                    kit_directory,
-                    context,
-                    transactions_identity,
-                );
-                return Err(original);
-            }
-        };
-        match directory_cleanup {
+        )? {
             TransactionsDirectoryCleanupOutcome::Removed
-            | TransactionsDirectoryCleanupOutcome::Absent => {
-                return Ok(StaleCandidateCleanupOutcome::Complete);
+            | TransactionsDirectoryCleanupOutcome::Absent
+            | TransactionsDirectoryCleanupOutcome::NotQuiescent(_) => {
+                Ok(StaleCandidateCleanupOutcome::Complete)
             }
-            TransactionsDirectoryCleanupOutcome::NotQuiescent(_) => {
-                #[cfg(windows)]
-                if removed_held_lock_alias {
-                    return Ok(StaleCandidateCleanupOutcome::HeldLockAliasDeferred {
-                        transactions_identity,
-                    });
-                }
-                continue 'quiescence;
-            }
-            TransactionsDirectoryCleanupOutcome::Failed(source) => {
-                #[cfg(windows)]
-                if removed_held_lock_alias && windows_namespace_delete_pending_error(&source) {
-                    return Ok(StaleCandidateCleanupOutcome::HeldLockAliasDeferred {
-                        transactions_identity,
-                    });
-                }
-                best_effort_cleanup_transactions_directory_by_identity(
-                    fs,
-                    kit_directory,
-                    context,
-                    transactions_identity,
-                );
-                return Err(CodegenError::Io {
-                    path: context
-                        .project_root()
-                        .join("src/components/ui/_kit/.transactions"),
-                    source,
-                });
-            }
-        }
+            TransactionsDirectoryCleanupOutcome::Failed(source) => Err(CodegenError::Io {
+                path: context
+                    .project_root()
+                    .join("src/components/ui/_kit/.transactions"),
+                source,
+            }),
+        };
     }
 
     Err(CodegenError::InvalidCoordinationState {
@@ -1961,6 +2009,15 @@ fn journal_update_name(name: &OsStr) -> bool {
         })
 }
 
+fn journal_v2_authority_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    parse_transaction_directory_name(name).is_ok()
+        || parse_bootstrap_intent_name(name).is_ok()
+        || parse_finalization_file_name(name).is_ok()
+}
+
 #[cfg(unix)]
 fn coordination_metadata_mode(metadata: &Metadata) -> Option<u32> {
     use cap_std::fs::PermissionsExt;
@@ -2008,7 +2065,7 @@ fn validate_candidate_inventory_mode(
 fn validate_inventoried_candidate_metadata(
     candidate: &CandidateInventory,
     metadata: &Metadata,
-    held_lock_identity: (u64, u64),
+    held_lock_identity: ExactObjectIdentity,
 ) -> Result<(), CodegenError> {
     ensure_safe_regular_metadata(candidate.path.to_string_lossy().as_ref(), metadata)?;
     if metadata_identity(metadata) != candidate.identity {
@@ -2038,7 +2095,7 @@ fn cleanup_claimed_candidate_alias(
     kit_directory: &Dir,
     transactions: &TransactionsDirectory,
     alias: &CandidateAlias,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     aliases_held_lock: bool,
 ) -> Result<CandidateAliasCleanupOutcome, CodegenError> {
     let first_attempt = try_cleanup_claimed_candidate_alias(
@@ -2094,7 +2151,7 @@ fn try_cleanup_claimed_candidate_alias(
     kit_directory: &Dir,
     transactions: &TransactionsDirectory,
     alias: &CandidateAlias,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     aliases_held_lock: bool,
 ) -> Result<CandidateAliasCleanupAttempt, CodegenError> {
     require_current_transactions_directory(context, fs, kit_directory, transactions)?;
@@ -2191,7 +2248,7 @@ fn try_cleanup_claimed_candidate_alias(
                 reason: "coordination candidate changed before handle-relative cleanup".to_owned(),
             });
         }
-        return match fs.remove_file_by_handle(cleanup_file, &alias.path) {
+        match fs.remove_file_by_handle(cleanup_file, &alias.path) {
             Ok(()) => Ok(CandidateAliasCleanupAttempt::Removed),
             Err(error) if error.source.kind() == std::io::ErrorKind::NotFound => {
                 Ok(CandidateAliasCleanupAttempt::Absent)
@@ -2200,7 +2257,7 @@ fn try_cleanup_claimed_candidate_alias(
                 Ok(CandidateAliasCleanupAttempt::Retry)
             }
             Err(error) => Ok(CandidateAliasCleanupAttempt::Failed(error.source)),
-        };
+        }
     }
 
     #[cfg(not(windows))]
@@ -2217,7 +2274,7 @@ fn cleanup_transactions_directory_after_drop(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     directory: Dir,
 ) -> Result<(), CodegenError> {
     drop(directory);
@@ -2228,7 +2285,7 @@ fn cleanup_transactions_directory_after_drop_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) -> Result<(), CodegenError> {
     let first_attempt =
         try_cleanup_transactions_directory_by_identity(fs, kit_directory, context, identity);
@@ -2269,7 +2326,7 @@ fn best_effort_cleanup_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) {
     let _ = try_cleanup_transactions_directory_by_identity(fs, kit_directory, context, identity);
 }
@@ -2278,7 +2335,7 @@ fn try_cleanup_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) -> Result<TransactionsDirectoryCleanupOutcome, CodegenError> {
     let path = context
         .project_root()
@@ -2299,11 +2356,59 @@ fn try_cleanup_transactions_directory_by_identity(
     };
     ensure_safe_directory_metadata("src/components/ui/_kit/.transactions", &metadata)?;
     validate_directory_mode(&metadata, 0o700, "src/components/ui/_kit/.transactions")?;
-    if metadata_identity(&metadata) != identity {
+    let directory = kit_directory
+        .open_dir_nofollow(TRANSACTIONS_DIRECTORY_NAME)
+        .map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    let observation = fs
+        .observe_directory(super::fs::DirectoryEndpoint::new(
+            kit_directory,
+            Path::new(TRANSACTIONS_DIRECTORY_NAME),
+            &directory,
+            &path,
+        ))
+        .map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    if observation.identity != identity {
         return Err(detached_transactions_directory());
     }
+    let inventory = fs
+        .inventory_directory_exact_bounded(
+            super::fs::DirectoryEndpoint::new(
+                kit_directory,
+                Path::new(TRANSACTIONS_DIRECTORY_NAME),
+                &directory,
+                &path,
+            ),
+            &observation,
+            1,
+        )
+        .map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    if !inventory.entries.is_empty() {
+        return Ok(TransactionsDirectoryCleanupOutcome::NotQuiescent(
+            std::io::Error::new(
+                std::io::ErrorKind::DirectoryNotEmpty,
+                "transaction namespace retains authenticated coordination evidence",
+            ),
+        ));
+    }
     require_current_kit_directory(context, kit_directory)?;
-    match fs.remove_dir(kit_directory, Path::new(TRANSACTIONS_DIRECTORY_NAME), &path) {
+    match fs.remove_empty_directory_exact(
+        super::fs::DirectoryEndpoint::new(
+            kit_directory,
+            Path::new(TRANSACTIONS_DIRECTORY_NAME),
+            &directory,
+            &path,
+        ),
+        &observation,
+    ) {
         Ok(()) => {
             sync_directory(fs, kit_directory, &path)?;
             Ok(TransactionsDirectoryCleanupOutcome::Removed)
@@ -2535,7 +2640,7 @@ fn cleanup_candidate(
     transactions: &TransactionsDirectory,
     name: &str,
     path: &Path,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) -> Result<(), CodegenError> {
     let first_attempt = try_cleanup_candidate(
         context,
@@ -2590,7 +2695,7 @@ fn try_cleanup_candidate(
     transactions: &TransactionsDirectory,
     name: &str,
     path: &Path,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
 ) -> Result<CandidateCleanupOutcome, CodegenError> {
     require_current_transactions_directory(context, fs, kit_directory, transactions)?;
     inspect_metadata(fs, path)?;
@@ -2678,7 +2783,7 @@ fn cleanup_shared_transactions_directory_after_drop_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     directory: Dir,
 ) -> Result<(), CodegenError> {
     drop(directory);
@@ -3025,17 +3130,38 @@ fn read_bounded_cap_file(file: &mut File, path: &Path) -> Result<Vec<u8>, Codege
     Ok(content)
 }
 
-fn file_identity(file: &File, path: &Path) -> Result<(u64, u64), CodegenError> {
+fn file_identity(file: &File, path: &Path) -> Result<ExactObjectIdentity, CodegenError> {
     let metadata = file.metadata().map_err(|source| CodegenError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     ensure_safe_regular_metadata(path.to_string_lossy().as_ref(), &metadata)?;
-    Ok(metadata_identity(&metadata))
+    #[cfg(windows)]
+    {
+        let capability = leptos_ui_kit_codegen_platform::adopt_object(
+            file.try_clone()
+                .map_err(|source| CodegenError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+                .into_std(),
+            leptos_ui_kit_codegen_platform::ObjectKind::RegularFile,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Inspect,
+        )
+        .map_err(|error| CodegenError::Io {
+            path: path.to_path_buf(),
+            source: error.into_error(),
+        })?;
+        Ok(capability.identity().into())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(metadata_identity(&metadata))
+    }
 }
 
-fn metadata_identity(metadata: &Metadata) -> (u64, u64) {
-    (MetadataExt::dev(metadata), MetadataExt::ino(metadata))
+fn metadata_identity(metadata: &Metadata) -> ExactObjectIdentity {
+    ExactObjectIdentity::from_unix(MetadataExt::dev(metadata), MetadataExt::ino(metadata))
 }
 
 fn ensure_safe_directory_metadata(path: &str, metadata: &Metadata) -> Result<(), CodegenError> {
@@ -3176,6 +3302,11 @@ fn validate_mode(actual: u32, expected: u32, logical_path: &str) -> Result<(), C
     })
 }
 
+#[cfg(not(unix))]
+fn validate_mode(_actual: u32, _expected: u32, _logical_path: &str) -> Result<(), CodegenError> {
+    Ok(())
+}
+
 fn sync_directory(fs: &dyn FsOps, directory: &Dir, path: &Path) -> Result<(), CodegenError> {
     fs.sync_directory(directory, path)
         .map_err(|source| CodegenError::Io {
@@ -3253,6 +3384,51 @@ mod held_lock_validation_tests {
         );
         lock.validate_context(&context)
             .expect("unchanged held lock must validate");
+    }
+
+    #[test]
+    fn lock_acquisition_defers_the_transaction_namespace_until_mutation() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let namespace_path = directory
+            .path()
+            .join("src/components/ui/_kit/.transactions");
+
+        assert!(
+            !namespace_path.exists(),
+            "lock acquisition alone must not publish transaction state",
+        );
+
+        let namespace = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("reopen the persistent transaction namespace");
+        assert!(namespace_path.is_dir());
+        drop(namespace);
+    }
+
+    #[test]
+    fn reopening_the_namespace_preserves_nonempty_evidence() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let (context, lock) = acquire(directory.path());
+        let namespace_path = directory
+            .path()
+            .join("src/components/ui/_kit/.transactions");
+        let namespace = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("create transaction namespace explicitly");
+        namespace
+            .write("evidence", b"preserve")
+            .expect("write evidence");
+        drop(namespace);
+
+        let reopened = lock
+            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .expect("reopen nonempty transaction namespace");
+        drop(reopened);
+        assert_eq!(
+            fs::read(namespace_path.join("evidence")).expect("preserved evidence"),
+            b"preserve",
+        );
     }
 
     #[test]

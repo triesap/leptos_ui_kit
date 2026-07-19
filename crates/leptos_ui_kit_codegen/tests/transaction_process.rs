@@ -11,8 +11,10 @@ use std::{
 };
 
 use cap_std::{ambient_authority, fs::Dir};
+#[cfg(feature = "test-support")]
+use leptos_ui_kit_codegen::apply_init_with_transition_barrier;
 use leptos_ui_kit_codegen::{
-    CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_init, apply_sync,
+    CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock, apply_add, apply_init, apply_sync,
 };
 use tempfile::tempdir;
 
@@ -20,10 +22,10 @@ const WORKER_ROLE_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_ROLE";
 const WORKER_PROJECT_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_PROJECT";
 const WORKER_CONTROL_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_CONTROL";
 const WORKER_ID_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_ID";
-const BARRIER_TIMEOUT: Duration = Duration::from_secs(20);
+const BARRIER_TIMEOUT: Duration = Duration::from_secs(120);
 const BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ADVISORY_LOCK_MARKER: &[u8] = b"leptos-ui-kit advisory lock v1\n";
-const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n";
+const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 const INDEX_HTML: &[u8] = b"<html><head></head><body></body></html>\n";
 
 #[test]
@@ -186,9 +188,23 @@ fn unknown_coordination_lock_is_rejected_without_replacement() {
     assert_eq!(file_identity(&lock_path), identity_before);
 }
 
+#[cfg(feature = "test-support")]
 #[test]
-fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
-    for attempt in 1..=8 {
+fn killed_transaction_recovers_to_the_state_selected_by_its_durable_v2_phase() {
+    for (selector, recovery_role, expect_desired) in [
+        ("OwnerPrepared:Before", "recover-precommit", false),
+        ("CommitBoundary:After", "recover-postcommit", true),
+        (
+            "MoveTransactionNamespaceToRetirement:Before",
+            "recover-postcommit",
+            true,
+        ),
+        (
+            "RemoveRetirementAuthority:After",
+            "recover-postcommit",
+            true,
+        ),
+    ] {
         let sandbox = tempdir().expect("process-test sandbox");
         let project = sandbox.path().join("project");
         let control = sandbox.path().join("control");
@@ -197,40 +213,48 @@ fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
         let lock = WriteLock::acquire(&project).expect("bootstrap coordination");
         drop(lock);
         let before = project_tree(&project);
-        let mut worker = spawn_worker("apply-init", &project, &control, "crash-writer");
-        let deadline = Instant::now() + BARRIER_TIMEOUT;
-        let mut saw_journal = false;
-        while Instant::now() < deadline {
-            if transaction_journal_is_valid(&project) {
-                saw_journal = true;
-                worker.kill_and_wait();
-                break;
-            }
-            if worker.try_status().is_some() {
-                break;
-            }
-            thread::yield_now();
-        }
-        if !saw_journal {
-            worker.wait_success();
-            continue;
-        }
 
-        let mut recovery = spawn_worker("recover", &project, &control, "recovery");
+        let desired_sandbox = tempdir().expect("desired-state sandbox");
+        let desired_project = desired_sandbox.path().join("project");
+        setup_project(&desired_project);
+        apply_init(&desired_project).expect("materialize exact desired state");
+        let desired = project_tree(&desired_project);
+
+        fs::write(barrier_path(&control, "selector", "crash-writer"), selector)
+            .expect("write explicit transition selector");
+        let mut worker = spawn_worker("barrier-init", &project, &control, "crash-writer");
+        let ready = barrier_path(&control, "ready", "crash-writer");
+        wait_for_worker_signal(&ready, &mut worker);
+        assert!(
+            fs::read_to_string(&ready)
+                .expect("read observed transition")
+                .starts_with(selector.split_once(':').expect("selector family").0),
+            "child stopped at a different semantic transition"
+        );
+        worker.kill_and_wait();
+
+        let expected = if expect_desired { &desired } else { &before };
+
+        let mut recovery = spawn_worker(recovery_role, &project, &control, "recovery");
         recovery.wait_success();
         assert_eq!(
             project_tree(&project),
-            before,
-            "fresh-process recovery after crash attempt {attempt}"
+            *expected,
+            "fresh-process recovery disagreed after killing {selector}",
         );
         assert!(
-            !project
-                .join("src/components/ui/_kit/.transactions")
-                .exists()
+            transaction_workspace_paths(&project).is_empty(),
+            "recovery must remove every journal-v2 transaction workspace"
         );
-        return;
+        assert!(
+            !has_transaction_artifacts(&project),
+            "recovery must remove every journal-v2 top-level authority"
+        );
+
+        let mut second = spawn_worker(recovery_role, &project, &control, "recovery-again");
+        second.wait_success();
+        assert_eq!(project_tree(&project), *expected);
     }
-    panic!("could not observe a durable in-flight journal before the worker completed");
 }
 
 #[test]
@@ -250,9 +274,25 @@ fn transaction_process_worker() {
         "apply-init" => {
             apply_init(&project).expect("worker applies init");
         }
-        "recover" => {
-            apply_sync(&project)
-                .expect_err("recovery succeeds before sync reports the missing kit config");
+        #[cfg(feature = "test-support")]
+        "barrier-init" => {
+            let selector = fs::read_to_string(barrier_path(&control, "selector", &id))
+                .expect("read explicit transition selector");
+            apply_init_with_transition_barrier(
+                &project,
+                &barrier_path(&control, "ready", &id),
+                &barrier_path(&control, "release", &id),
+                &selector,
+                1,
+            )
+            .expect("worker applies init through explicit transition barrier");
+        }
+        "recover-precommit" => {
+            apply_add(&project, "__recovery_probe_missing_item__")
+                .expect_err("the recovery probe must fail after completing recovery");
+        }
+        "recover-postcommit" => {
+            apply_sync(&project).expect("finish-only recovery preserves the installed project");
         }
         other => panic!("unknown transaction-process worker role {other}"),
     }
@@ -455,20 +495,37 @@ fn setup_project(root: &Path) {
     fs::write(root.join("index.html"), INDEX_HTML).expect("write project index");
 }
 
-fn transaction_journal_is_valid(project: &Path) -> bool {
-    let transactions = project.join("src/components/ui/_kit/.transactions");
-    let Ok(entries) = fs::read_dir(transactions) else {
-        return false;
+fn transaction_workspace_paths(project: &Path) -> Vec<PathBuf> {
+    let kit = project.join("src/components/ui/_kit/.transactions");
+    let Ok(entries) = fs::read_dir(kit) else {
+        return Vec::new();
     };
-    entries.filter_map(Result::ok).any(|entry| {
-        let name = entry.file_name();
-        name.to_str()
-            .is_some_and(|name| name.starts_with("transaction-") && name.ends_with(".json"))
-            && fs::read(entry.path())
-                .ok()
-                .and_then(|content| serde_json::from_slice::<serde_json::Value>(&content).ok())
-                .is_some()
-    })
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("transaction-v2-"))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn has_transaction_artifacts(project: &Path) -> bool {
+    let kit = project.join("src/components/ui/_kit/.transactions");
+    fs::read_dir(kit)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .any(|name| {
+            name.starts_with("transaction-v2-")
+                || name.starts_with("bootstrap-intent-v2-")
+                || name.starts_with("finalization-v2-")
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

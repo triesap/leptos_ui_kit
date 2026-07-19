@@ -13,8 +13,11 @@ use super::fs::{FsOps, SystemFs};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum EntropyPurpose {
     TransactionId,
+    #[cfg(test)]
     LockBootstrapCandidate,
+    #[cfg(test)]
     IgnoreBootstrapCandidate,
+    #[cfg(test)]
     CapabilityProbeCandidate,
 }
 
@@ -22,8 +25,11 @@ impl fmt::Display for EntropyPurpose {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::TransactionId => "transaction identifier",
+            #[cfg(test)]
             Self::LockBootstrapCandidate => "write-lock bootstrap candidate",
+            #[cfg(test)]
             Self::IgnoreBootstrapCandidate => "coordination-ignore bootstrap candidate",
+            #[cfg(test)]
             Self::CapabilityProbeCandidate => "filesystem-capability probe candidate",
         })
     }
@@ -75,10 +81,19 @@ pub(crate) enum RollbackAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CleanupObjectKind {
+    OwnedStage,
+    PlacedStage,
+    OwnedBackup,
+    PlacedBackup,
+    CreatedDirectory,
+    OwnedDirectory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum PreparationArtifactKind {
+    Directory,
     Stage,
     Backup,
-    CreatedDirectory,
-    DirectoryCandidate,
 }
 
 /// Stable semantic observation points for the transaction crash-window
@@ -100,19 +115,18 @@ pub(crate) enum TransitionKey {
         sequence: u64,
         window: TransitionWindow,
     },
-    CreateDirectoryCandidate {
+    OwnerPrepared {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
-    PublishDirectoryCandidate {
+    Placement {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
-    PrepareStage {
-        ordinal: u32,
-        window: TransitionWindow,
-    },
-    PrepareBackup {
+    CancelPlacement {
+        artifact: PreparationArtifactKind,
         ordinal: u32,
         window: TransitionWindow,
     },
@@ -165,6 +179,22 @@ pub(crate) enum TransitionKey {
     RemoveFinalizationLease {
         outcome: TransactionOutcome,
         generation: u64,
+        window: TransitionWindow,
+    },
+    ArmRetirementAuthority {
+        outcome: TransactionOutcome,
+        window: TransitionWindow,
+    },
+    MoveTransactionNamespaceToRetirement {
+        outcome: TransactionOutcome,
+        window: TransitionWindow,
+    },
+    RetireTransactionNamespace {
+        outcome: TransactionOutcome,
+        window: TransitionWindow,
+    },
+    RemoveRetirementAuthority {
+        outcome: TransactionOutcome,
         window: TransitionWindow,
     },
 }
@@ -221,26 +251,6 @@ impl TransactionRuntime {
         self.fs.as_ref()
     }
 
-    pub(crate) fn fs_arc(&self) -> Arc<dyn FsOps> {
-        Arc::clone(&self.fs)
-    }
-
-    pub(crate) fn entropy(&self) -> &dyn EntropySource {
-        self.entropy.as_ref()
-    }
-
-    pub(crate) fn entropy_arc(&self) -> Arc<dyn EntropySource> {
-        Arc::clone(&self.entropy)
-    }
-
-    pub(crate) fn transition_observer(&self) -> &dyn TransitionObserver {
-        self.transition_observer.as_ref()
-    }
-
-    pub(crate) fn transition_observer_arc(&self) -> Arc<dyn TransitionObserver> {
-        Arc::clone(&self.transition_observer)
-    }
-
     pub(crate) fn fill_entropy(
         &self,
         purpose: EntropyPurpose,
@@ -250,6 +260,8 @@ impl TransactionRuntime {
     }
 
     pub(crate) fn observe(&self, key: TransitionKey) {
+        #[cfg(test)]
+        self.fs.observe_transition(key);
         self.transition_observer.observe(key);
     }
 }
@@ -386,17 +398,17 @@ mod test_support {
                     ),
                 ));
             }
-            if let QueuedEntropy::Bytes { bytes, .. } = next {
-                if bytes.len() != destination.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "queued {purpose} entropy has {} bytes, but {} were requested",
-                            bytes.len(),
-                            destination.len()
-                        ),
-                    ));
-                }
+            if let QueuedEntropy::Bytes { bytes, .. } = next
+                && bytes.len() != destination.len()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "queued {purpose} entropy has {} bytes, but {} were requested",
+                        bytes.len(),
+                        destination.len()
+                    ),
+                ));
             }
 
             match queue.pop_front().expect("front entry exists") {
@@ -747,11 +759,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&entropy), 2);
         assert_eq!(Arc::strong_count(&observer), 2);
         let _ = runtime.fs();
-        let _ = runtime.fs_arc();
-        let _ = runtime.entropy();
-        let _ = runtime.entropy_arc();
-        let _ = runtime.transition_observer();
-        let _ = runtime.transition_observer_arc();
     }
 
     fn at_window(key: TransitionKey, window: TransitionWindow) -> TransitionKey {
@@ -768,18 +775,27 @@ mod tests {
             TransitionKey::PublishJournalRecord { sequence, .. } => {
                 TransitionKey::PublishJournalRecord { sequence, window }
             }
-            TransitionKey::CreateDirectoryCandidate { ordinal, .. } => {
-                TransitionKey::CreateDirectoryCandidate { ordinal, window }
-            }
-            TransitionKey::PublishDirectoryCandidate { ordinal, .. } => {
-                TransitionKey::PublishDirectoryCandidate { ordinal, window }
-            }
-            TransitionKey::PrepareStage { ordinal, .. } => {
-                TransitionKey::PrepareStage { ordinal, window }
-            }
-            TransitionKey::PrepareBackup { ordinal, .. } => {
-                TransitionKey::PrepareBackup { ordinal, window }
-            }
+            TransitionKey::OwnerPrepared {
+                artifact, ordinal, ..
+            } => TransitionKey::OwnerPrepared {
+                artifact,
+                ordinal,
+                window,
+            },
+            TransitionKey::Placement {
+                artifact, ordinal, ..
+            } => TransitionKey::Placement {
+                artifact,
+                ordinal,
+                window,
+            },
+            TransitionKey::CancelPlacement {
+                artifact, ordinal, ..
+            } => TransitionKey::CancelPlacement {
+                artifact,
+                ordinal,
+                window,
+            },
             TransitionKey::ReplaceTarget { ordinal, .. } => {
                 TransitionKey::ReplaceTarget { ordinal, window }
             }
@@ -848,6 +864,18 @@ mod tests {
                 generation,
                 window,
             },
+            TransitionKey::ArmRetirementAuthority { outcome, .. } => {
+                TransitionKey::ArmRetirementAuthority { outcome, window }
+            }
+            TransitionKey::MoveTransactionNamespaceToRetirement { outcome, .. } => {
+                TransitionKey::MoveTransactionNamespaceToRetirement { outcome, window }
+            }
+            TransitionKey::RetireTransactionNamespace { outcome, .. } => {
+                TransitionKey::RetireTransactionNamespace { outcome, window }
+            }
+            TransitionKey::RemoveRetirementAuthority { outcome, .. } => {
+                TransitionKey::RemoveRetirementAuthority { outcome, window }
+            }
         }
     }
 
@@ -856,6 +884,22 @@ mod tests {
         let mut points = vec![
             TransitionKey::BootstrapWorkspace { window: before },
             TransitionKey::PublishWorkspaceOwnership { window: before },
+            TransitionKey::ArmRetirementAuthority {
+                outcome: TransactionOutcome::Commit,
+                window: before,
+            },
+            TransitionKey::MoveTransactionNamespaceToRetirement {
+                outcome: TransactionOutcome::Commit,
+                window: before,
+            },
+            TransitionKey::RetireTransactionNamespace {
+                outcome: TransactionOutcome::Commit,
+                window: before,
+            },
+            TransitionKey::RemoveRetirementAuthority {
+                outcome: TransactionOutcome::Commit,
+                window: before,
+            },
             TransitionKey::PrepareJournalPartial {
                 sequence: 0,
                 window: before,
@@ -864,19 +908,38 @@ mod tests {
                 sequence: 0,
                 window: before,
             },
-            TransitionKey::CreateDirectoryCandidate {
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Directory,
                 ordinal: 1,
                 window: before,
             },
-            TransitionKey::PublishDirectoryCandidate {
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Directory,
                 ordinal: 1,
                 window: before,
             },
-            TransitionKey::PrepareStage {
+            TransitionKey::CancelPlacement {
+                artifact: PreparationArtifactKind::Directory,
+                ordinal: 1,
+                window: before,
+            },
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Stage,
                 ordinal: 2,
                 window: before,
             },
-            TransitionKey::PrepareBackup {
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Stage,
+                ordinal: 2,
+                window: before,
+            },
+            TransitionKey::OwnerPrepared {
+                artifact: PreparationArtifactKind::Backup,
+                ordinal: 2,
+                window: before,
+            },
+            TransitionKey::Placement {
+                artifact: PreparationArtifactKind::Backup,
                 ordinal: 2,
                 window: before,
             },
@@ -902,10 +965,12 @@ mod tests {
 
         for outcome in [TransactionOutcome::Commit, TransactionOutcome::Rollback] {
             for (kind, ordinal) in [
-                (CleanupObjectKind::Stage, 6),
-                (CleanupObjectKind::Backup, 7),
-                (CleanupObjectKind::CreatedDirectory, 8),
-                (CleanupObjectKind::DirectoryCandidate, 9),
+                (CleanupObjectKind::OwnedStage, 6),
+                (CleanupObjectKind::PlacedStage, 7),
+                (CleanupObjectKind::OwnedBackup, 8),
+                (CleanupObjectKind::PlacedBackup, 9),
+                (CleanupObjectKind::CreatedDirectory, 10),
+                (CleanupObjectKind::OwnedDirectory, 11),
             ] {
                 points.push(TransitionKey::CleanupObject {
                     outcome,
@@ -956,7 +1021,7 @@ mod tests {
     #[test]
     fn transition_key_surface_covers_every_protocol_mutation_before_and_after() {
         let points = protocol_transition_points();
-        assert_eq!(points.len(), 34);
+        assert_eq!(points.len(), 45);
 
         let expected = points
             .into_iter()
@@ -974,7 +1039,7 @@ mod tests {
 
         assert_eq!(observer.wait_for_count(expected.len()), expected);
         assert_eq!(observer.events(), expected);
-        assert_eq!(expected.len(), 68);
+        assert_eq!(expected.len(), 90);
         for pair in expected.chunks_exact(2) {
             assert_eq!(pair[0], at_window(pair[0], TransitionWindow::Before));
             assert_eq!(pair[1], at_window(pair[0], TransitionWindow::After));

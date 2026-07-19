@@ -16,7 +16,7 @@ const KIT_COORDINATION_DIR: &str = "src/components/ui/_kit";
 const KIT_GITIGNORE_PATH: &str = "src/components/ui/_kit/.gitignore";
 const ADVISORY_LOCK_MARKER: &[u8] = b"leptos-ui-kit advisory lock v1\n";
 const LEGACY_SENTINEL_MARKER: &[u8] = b"locked\n";
-const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n";
+const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 
 const INIT_OBSERVATIONS: [&str; 6] = [
     "index.html",
@@ -796,8 +796,8 @@ fn readonly_targets_conflict_without_stages_backups_or_target_changes() {
                     .file_name()
                     .to_str()
                     .is_some_and(|name| {
-                        name.starts_with(".leptos-ui-kit-stage-")
-                            || name.starts_with(".leptos-ui-kit-backup-")
+                        name.starts_with(".leptos-ui-kit-stage-v2-")
+                            || name.starts_with(".leptos-ui-kit-backup-v2-")
                     })
             })
     );

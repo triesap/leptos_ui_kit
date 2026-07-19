@@ -27,6 +27,9 @@ pub use install_lock::{
     ManagedCssOperation, install_lock_path, lock_to_json, lock_to_json_at_path,
     parse_install_lock_str, parse_install_lock_str_at_path,
 };
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use orchestration::apply_init_with_transition_barrier;
 #[doc(inline)]
 pub use orchestration::{apply_add, apply_init, apply_sync};
 #[doc(inline)]
@@ -62,8 +65,8 @@ use planning::{
 #[cfg(test)]
 use transaction::{
     DEFAULT_KIT_COORDINATION_IGNORE_PATH, FaultFs, FsEvent, FsOperation, KIT_ADVISORY_LOCK_CONTENT,
-    KIT_COORDINATION_IGNORE_CONTENT, apply_planned_files_with, apply_planned_files_with_snapshot,
-    recover_pending_locked,
+    KIT_COORDINATION_IGNORE_CONTENT, PreparationArtifactKind, TransactionOutcome, TransitionKey,
+    TransitionWindow, apply_planned_files_with, apply_planned_files_with_snapshot,
 };
 
 #[cfg(test)]

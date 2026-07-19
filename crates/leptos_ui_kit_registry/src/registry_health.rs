@@ -232,6 +232,10 @@ impl std::error::Error for RegistryHealthError {
 }
 
 /// Validates every runtime-relevant file in the packaged built-in registry.
+#[allow(
+    clippy::result_large_err,
+    reason = "the stable public health error preserves typed paths, versions, and source diagnostics"
+)]
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
     let snapshot = built_in_registry_snapshot().map_err(snapshot_health_error)?;
     debug_assert_eq!(snapshot.schema_count(), 4);
@@ -397,6 +401,10 @@ fn read_utf8(kind: RegistryHealthFileKind, path: &Path) -> Result<String, Regist
     })
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 pub(crate) fn validate_theme_contract_schema_shape(
     path: &Path,
     schema: &Value,
@@ -504,6 +512,10 @@ pub(crate) fn validate_theme_contract_schema_shape(
     )
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_value(
     path: &Path,
     schema: &Value,
@@ -523,6 +535,10 @@ fn expect_schema_value(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_string_set(
     path: &Path,
     schema: &Value,
@@ -553,6 +569,10 @@ fn expect_schema_string_set(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_object_keys(
     path: &Path,
     schema: &Value,

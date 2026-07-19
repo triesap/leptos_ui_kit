@@ -15,17 +15,19 @@ mod build_provenance;
 
 use build_provenance::GIT_REPOSITORY_OVERRIDE_ENV;
 
-pub const PACKAGE_NAMES: [&str; 5] = [
+pub const PACKAGE_NAMES: [&str; 6] = [
     "leptos_ui_kit",
     "leptos_ui_kit_cli",
     "leptos_ui_kit_codegen",
+    "leptos_ui_kit_codegen_platform",
     "leptos_ui_kit_primitives",
     "leptos_ui_kit_registry",
 ];
 
-const PATCHED_PACKAGE_NAMES: [&str; 3] = [
+const PATCHED_PACKAGE_NAMES: [&str; 4] = [
     "leptos_ui_kit_registry",
     "leptos_ui_kit_codegen",
+    "leptos_ui_kit_codegen_platform",
     "leptos_ui_kit_primitives",
 ];
 

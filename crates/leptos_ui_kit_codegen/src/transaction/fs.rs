@@ -18,9 +18,46 @@ use sha2::{Digest, Sha256};
 
 use crate::PreservedFileMode;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ExactObjectIdentity {
+    namespace: [u8; 16],
+    object: [u8; 16],
+}
+
+impl ExactObjectIdentity {
+    pub(crate) const fn from_unix(device: u64, inode: u64) -> Self {
+        Self {
+            namespace: (device as u128).to_le_bytes(),
+            object: (inode as u128).to_le_bytes(),
+        }
+    }
+
+    pub(crate) const fn from_parts(namespace: [u8; 16], object: [u8; 16]) -> Self {
+        Self { namespace, object }
+    }
+
+    pub(crate) const fn namespace(self) -> [u8; 16] {
+        self.namespace
+    }
+
+    pub(crate) const fn object(self) -> [u8; 16] {
+        self.object
+    }
+}
+
+#[cfg(windows)]
+impl From<leptos_ui_kit_codegen_platform::FileIdentity> for ExactObjectIdentity {
+    fn from(identity: leptos_ui_kit_codegen_platform::FileIdentity) -> Self {
+        Self {
+            namespace: (identity.volume_serial_number as u128).to_le_bytes(),
+            object: identity.file_id,
+        }
+    }
+}
+
 pub(crate) struct CreatedFile {
     pub file: File,
-    pub identity: (u64, u64),
+    pub identity: ExactObjectIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -36,7 +73,6 @@ impl<'a> HardLinkEndpoint<'a> {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct DirectoryEndpoint<'a> {
     pub parent: &'a Dir,
@@ -45,7 +81,6 @@ pub(crate) struct DirectoryEndpoint<'a> {
     pub path: &'a Path,
 }
 
-#[allow(dead_code)]
 impl<'a> DirectoryEndpoint<'a> {
     pub(crate) fn new(parent: &'a Dir, name: &'a Path, directory: &'a Dir, path: &'a Path) -> Self {
         Self {
@@ -57,106 +92,111 @@ impl<'a> DirectoryEndpoint<'a> {
     }
 }
 
-/// Whether this dependency set can represent a filesystem object's complete,
-/// stable identity on the current platform.
-///
-/// `cap-fs-ext` exposes a portable `(device, inode)` pair. That pair is exact
-/// on the supported Unix targets, but its Windows inode component truncates a
-/// ReFS file identifier to 64 bits. Transaction decisions that require exact
-/// identity therefore fail closed on Windows until a full-width, safe handle
-/// identity API is available.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExactIdentitySupport {
-    Complete,
-    Unsupported,
-}
-
-#[allow(dead_code)]
-pub(crate) const fn exact_identity_support() -> ExactIdentitySupport {
-    #[cfg(windows)]
-    {
-        ExactIdentitySupport::Unsupported
-    }
-    #[cfg(not(windows))]
-    {
-        ExactIdentitySupport::Complete
-    }
-}
-
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactFileObservation {
-    pub identity: (u64, u64),
+    pub identity: ExactObjectIdentity,
     pub byte_len: u64,
     pub content_hash: String,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExactFileMetadataObservation {
+    pub identity: ExactObjectIdentity,
+    pub byte_len: u64,
+    pub mode: PreservedFileMode,
+    pub link_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactFileRead {
     pub bytes: Vec<u8>,
     pub observation: ExactFileObservation,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryObservation {
-    pub identity: (u64, u64),
+    pub identity: ExactObjectIdentity,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct ExactDirectoryHandle {
     pub directory: Dir,
     pub observation: ExactDirectoryObservation,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactDirectoryEntryKind {
     RegularFile,
     Directory,
     Symlink,
+    #[cfg(windows)]
     ReparsePoint,
     Other,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryEntry {
     pub name: OsString,
     pub kind: ExactDirectoryEntryKind,
-    pub identity: (u64, u64),
+    pub identity: ExactObjectIdentity,
     pub byte_len: u64,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryInventory {
     pub directory: ExactDirectoryObservation,
     pub entries: Vec<ExactDirectoryEntry>,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExactRelocationSource {
+    File(ExactFileObservation),
+    EmptyDirectory(ExactDirectoryObservation),
+    Directory(ExactDirectoryInventory),
+}
+
 #[derive(Debug)]
 pub(crate) struct ExclusiveFileCopy {
     pub file: File,
-    pub source: ExactFileObservation,
     pub copy: ExactFileObservation,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParentSyncKind {
     Target,
     Journal,
+}
+
+/// Typed result for a capability-relative atomic no-clobber relocation.
+/// Cross-filesystem placement is a protocol incompatibility, not an ordinary
+/// transient I/O failure, and callers must fail closed without copying.
+#[derive(Debug)]
+pub(crate) enum NoReplaceRelocationError {
+    CrossDevice,
+    Unsupported,
+    Io(io::Error),
+}
+
+impl NoReplaceRelocationError {
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            Self::CrossDevice => io::Error::new(
+                io::ErrorKind::CrossesDevices,
+                "transaction owner and destination are on different filesystems",
+            ),
+            Self::Unsupported => io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic capability-relative no-replace relocation is unavailable on this platform",
+            ),
+            Self::Io(source) => source,
+        }
+    }
 }
 
 /// The filesystem disposition of one immutable no-clobber publication.
@@ -172,7 +212,6 @@ pub(crate) enum ParentSyncKind {
 /// therefore accept and classify both the pre-unlink two-alias world and the
 /// post-unlink single-target world rather than trusting either link count as
 /// current after a crash.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum ImmutablePublicationOutcome {
     NotPublished {
@@ -197,7 +236,7 @@ pub(crate) enum ImmutablePublicationOutcome {
 
 /// The filesystem disposition of atomically publishing one fully prepared
 /// private directory at an expected-absent logical name.
-#[allow(dead_code)]
+#[cfg(all(test, unix))]
 #[derive(Debug)]
 pub(crate) enum DirectoryPublicationOutcome {
     NotPublished {
@@ -221,19 +260,41 @@ pub(crate) struct HandleDeleteError {
 }
 
 pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
+    #[cfg(test)]
+    fn observe_transition(&self, key: super::runtime::TransitionKey);
     fn before_create_directory(&self, path: &Path) -> io::Result<()>;
     fn after_create_directory(&self, path: &Path) -> io::Result<()>;
     fn before_open_coordination_file(&self, path: &Path) -> io::Result<()>;
     fn before_inspect_metadata(&self, path: &Path) -> io::Result<()>;
     fn before_read_handle(&self, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn observe_regular_file(
         &self,
         parent: &Dir,
         name: &Path,
         path: &Path,
     ) -> io::Result<ExactFileObservation>;
-    #[allow(dead_code)]
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation>;
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation>;
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation>;
     fn read_regular_file_exact(
         &self,
         parent: &Dir,
@@ -241,12 +302,10 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         max_bytes: u64,
     ) -> io::Result<ExactFileRead>;
-    #[allow(dead_code)]
     fn observe_directory(
         &self,
         endpoint: DirectoryEndpoint<'_>,
     ) -> io::Result<ExactDirectoryObservation>;
-    #[allow(dead_code)]
     fn open_directory_exact(
         &self,
         parent: &Dir,
@@ -254,7 +313,6 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         mode: u32,
     ) -> io::Result<ExactDirectoryHandle>;
-    #[allow(dead_code)]
     fn create_directory_exact(
         &self,
         parent: &Dir,
@@ -262,11 +320,16 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         mode: u32,
     ) -> io::Result<ExactDirectoryHandle>;
-    #[allow(dead_code)]
     fn inventory_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
+    ) -> io::Result<ExactDirectoryInventory>;
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
     ) -> io::Result<ExactDirectoryInventory>;
     fn create_new_file(
         &self,
@@ -275,7 +338,6 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         mode: u32,
     ) -> io::Result<CreatedFile>;
-    #[allow(dead_code)]
     fn create_exclusive_copy(
         &self,
         source: HardLinkEndpoint<'_>,
@@ -307,10 +369,8 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
     fn set_directory_mode(&self, directory: &Dir, path: &Path, mode: u32) -> io::Result<()>;
     fn write_handle(&self, file: &mut File, path: &Path, content: &[u8]) -> io::Result<()>;
     fn sync_handle(&self, file: &File, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn flush_file(&self, file: &File, path: &Path) -> io::Result<()>;
     fn sync_directory(&self, directory: &Dir, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn sync_parent(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -324,14 +384,12 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         from: HardLinkEndpoint<'_>,
         to: HardLinkEndpoint<'_>,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
     fn publish_absent(
         &self,
         staged: HardLinkEndpoint<'_>,
         expected_stage: &ExactFileObservation,
         target: HardLinkEndpoint<'_>,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
     fn publish_immutable(
         &self,
         partial: HardLinkEndpoint<'_>,
@@ -341,17 +399,41 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         expected_target_parent: &ExactDirectoryObservation,
         parent_sync_kind: ParentSyncKind,
     ) -> ImmutablePublicationOutcome;
-    #[allow(dead_code)]
+    #[cfg(all(test, unix))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the test seam exposes both capability-relative endpoints and the exact directory inventory"
+    )]
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
         candidate_name: &Path,
         candidate_path: &Path,
+        expected_candidate: &ExactDirectoryInventory,
         target_parent: &Dir,
         target_name: &Path,
         target_path: &Path,
     ) -> io::Result<()>;
-    #[allow(dead_code)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "both capability-relative endpoints and the exact source state are explicit protocol inputs"
+    )]
+    fn relocate_noreplace(
+        &self,
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError>;
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError>;
+    #[cfg(all(test, unix))]
     fn publish_directory_absent(
         &self,
         candidate: DirectoryEndpoint<'_>,
@@ -361,8 +443,8 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         target_name: &Path,
         target_path: &Path,
     ) -> DirectoryPublicationOutcome;
+    #[cfg(not(windows))]
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn remove_file_exact(
         &self,
         parent: &Dir,
@@ -370,27 +452,21 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         path: &Path,
         expected: &ExactFileObservation,
     ) -> io::Result<()>;
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> io::Result<()>;
     #[cfg(windows)]
     fn remove_file_by_handle(&self, file: File, path: &Path) -> Result<(), HandleDeleteError>;
-    fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()>;
-    #[allow(dead_code)]
     fn remove_empty_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
         expected: &ExactDirectoryObservation,
     ) -> io::Result<()>;
-    fn before_final_revalidation(&self, path: &Path) -> io::Result<()>;
-    fn after_final_revalidation(&self, path: &Path) -> io::Result<()>;
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()>;
-    #[allow(dead_code)]
+    fn before_mutation_rebind(&self, path: &Path) -> io::Result<()>;
     fn replace_existing(
         &self,
         staged: HardLinkEndpoint<'_>,
@@ -398,21 +474,15 @@ pub(crate) trait FsOps: fmt::Debug + Send + Sync + UnwindSafe + RefUnwindSafe {
         target: HardLinkEndpoint<'_>,
         expected_target: &ExactFileObservation,
     ) -> io::Result<()>;
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()>;
 }
 
 #[derive(Debug, Default)]
-pub(super) struct SystemFs;
+pub(crate) struct SystemFs;
 
 impl FsOps for SystemFs {
+    #[cfg(test)]
+    fn observe_transition(&self, _key: super::runtime::TransitionKey) {}
+
     fn before_create_directory(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
@@ -440,6 +510,37 @@ impl FsOps for SystemFs {
         path: &Path,
     ) -> io::Result<ExactFileObservation> {
         observe_regular_file_exact(parent, name, path)
+    }
+
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        observe_regular_file_bounded_exact(parent, name, path, max_bytes)
+    }
+
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation> {
+        observe_regular_file_metadata_exact(parent, name, path, max_bytes)
+    }
+
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        observe_created_file_exact_impl(parent, name, path, created, max_bytes)
     }
 
     fn read_regular_file_exact(
@@ -487,6 +588,15 @@ impl FsOps for SystemFs {
         inventory_directory_exact_impl(endpoint, expected)
     }
 
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
+    ) -> io::Result<ExactDirectoryInventory> {
+        inventory_directory_exact_bounded_impl(endpoint, expected, max_entries)
+    }
+
     fn create_new_file(
         &self,
         parent: &Dir,
@@ -522,19 +632,7 @@ impl FsOps for SystemFs {
         let file = parent.open_with(name, &options)?;
         match opened_regular_file_identity(&file) {
             Ok(identity) => Ok(CreatedFile { file, identity }),
-            Err(error) => {
-                #[cfg(windows)]
-                {
-                    use fs_at::os::windows::FileExt;
-
-                    let _ = file.into_std().delete_by_handle();
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = parent.remove_file(name);
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -663,7 +761,15 @@ impl FsOps for SystemFs {
         {
             Dir::reopen_dir(directory)?.into_std_file().sync_all()
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let capability = leptos_ui_kit_codegen_platform::adopt_root_directory(
+                directory.try_clone()?.into_std_file(),
+            )
+            .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+            leptos_ui_kit_codegen_platform::sync_directory(&capability)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = directory;
             Err(unsupported_parent_sync())
@@ -684,7 +790,17 @@ impl FsOps for SystemFs {
                 .sync_all()?;
             require_exact_directory_state(endpoint, expected)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            require_exact_directory_state(endpoint, expected)?;
+            let capability = leptos_ui_kit_codegen_platform::adopt_root_directory(
+                endpoint.directory.try_clone()?.into_std_file(),
+            )
+            .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+            leptos_ui_kit_codegen_platform::sync_directory(&capability)?;
+            require_exact_directory_state(endpoint, expected)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (endpoint, expected);
             Err(unsupported_parent_sync())
@@ -738,11 +854,13 @@ impl FsOps for SystemFs {
         )
     }
 
+    #[cfg(all(test, unix))]
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
         candidate_name: &Path,
         candidate_path: &Path,
+        expected_candidate: &ExactDirectoryInventory,
         target_parent: &Dir,
         target_name: &Path,
         target_path: &Path,
@@ -751,12 +869,43 @@ impl FsOps for SystemFs {
             candidate_parent,
             candidate_name,
             candidate_path,
+            expected_candidate,
             target_parent,
             target_name,
             target_path,
         )
     }
 
+    fn relocate_noreplace(
+        &self,
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError> {
+        relocate_noreplace_impl(
+            owner_parent,
+            owner_name,
+            owner_path,
+            destination_parent,
+            destination_name,
+            destination_path,
+            expected_source,
+        )
+    }
+
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError> {
+        probe_noreplace_relocation_impl(parent, path)
+    }
+
+    #[cfg(all(test, unix))]
     fn publish_directory_absent(
         &self,
         candidate: DirectoryEndpoint<'_>,
@@ -777,6 +926,7 @@ impl FsOps for SystemFs {
         )
     }
 
+    #[cfg(not(windows))]
     fn remove_file(&self, parent: &Dir, name: &Path, _path: &Path) -> io::Result<()> {
         parent.remove_file(name)
     }
@@ -791,6 +941,16 @@ impl FsOps for SystemFs {
         remove_exact_file(parent, name, path, expected, || Ok(()))
     }
 
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> io::Result<()> {
+        remove_exact_file_metadata(parent, name, path, expected, || Ok(()))
+    }
+
     #[cfg(windows)]
     fn remove_file_by_handle(&self, file: File, _path: &Path) -> Result<(), HandleDeleteError> {
         use fs_at::os::windows::FileExt;
@@ -803,10 +963,6 @@ impl FsOps for SystemFs {
             })
     }
 
-    fn remove_dir(&self, parent: &Dir, name: &Path, _path: &Path) -> io::Result<()> {
-        parent.remove_dir(name)
-    }
-
     fn remove_empty_directory_exact(
         &self,
         endpoint: DirectoryEndpoint<'_>,
@@ -815,24 +971,8 @@ impl FsOps for SystemFs {
         remove_empty_directory_exact_impl(endpoint, expected, || Ok(()))
     }
 
-    fn before_final_revalidation(&self, _path: &Path) -> io::Result<()> {
+    fn before_mutation_rebind(&self, _path: &Path) -> io::Result<()> {
         Ok(())
-    }
-
-    fn after_final_revalidation(&self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        _from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        _to: &Path,
-    ) -> io::Result<()> {
-        from_parent.rename(from_name, to_parent, to_name)
     }
 
     fn replace_existing(
@@ -845,27 +985,56 @@ impl FsOps for SystemFs {
         ensure_same_parent(staged.parent, target.parent, staged.path, target.path)?;
         require_exact_file_state(staged, expected_stage)?;
         require_exact_file_state(target, expected_target)?;
-        staged
-            .parent
-            .rename(staged.name, target.parent, target.name)
-    }
+        #[cfg(windows)]
+        {
+            use leptos_ui_kit_codegen_platform::{
+                CapabilityAccess, MutationFailure, ObjectKind, adopt_root_directory,
+                open_child_nofollow, replace_exact,
+            };
 
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.rename(from_parent, from_name, from, to_parent, to_name, to)
+            let parent = adopt_root_directory(staged.parent.try_clone()?.into_std_file())
+                .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+            let source = open_child_nofollow(
+                &parent,
+                staged.name.as_os_str(),
+                ObjectKind::RegularFile,
+                CapabilityAccess::Mutation,
+            )?;
+            let existing = open_child_nofollow(
+                &parent,
+                target.name.as_os_str(),
+                ObjectKind::RegularFile,
+                CapabilityAccess::Mutation,
+            )?;
+            if ExactObjectIdentity::from(source.identity()) != expected_stage.identity
+                || ExactObjectIdentity::from(existing.identity()) != expected_target.identity
+            {
+                return Err(changed_during_observation(
+                    target.path,
+                    "the Windows replacement capabilities do not match the exact journal state",
+                ));
+            }
+            match replace_exact(source, &parent, target.name.as_os_str(), existing) {
+                Ok(_) => {
+                    require_name_absent(staged.parent, staged.name, staged.path)?;
+                    require_exact_file_state(target, expected_stage)
+                }
+                Err(MutationFailure::NotMutated { error, .. })
+                | Err(MutationFailure::MutatedUnverified { error, .. }) => Err(error),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            staged
+                .parent
+                .rename(staged.name, target.parent, target.name)
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegularMetadataState {
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     byte_len: u64,
     mode: PreservedFileMode,
     link_count: Option<u64>,
@@ -873,22 +1042,12 @@ struct RegularMetadataState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DirectoryMetadataState {
-    identity: (u64, u64),
+    identity: ExactObjectIdentity,
     mode: PreservedFileMode,
     link_count: Option<u64>,
 }
 
-fn require_exact_identity_support() -> io::Result<()> {
-    match exact_identity_support() {
-        ExactIdentitySupport::Complete => Ok(()),
-        ExactIdentitySupport::Unsupported => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "exact transaction identity is unavailable on Windows because the current safe dependency API truncates ReFS file identifiers to 64 bits",
-        )),
-    }
-}
-
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn unsupported_parent_sync() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
@@ -952,11 +1111,30 @@ fn ensure_directory_metadata(metadata: &Metadata, path: &Path) -> io::Result<()>
 fn regular_metadata_state(metadata: &Metadata, path: &Path) -> io::Result<RegularMetadataState> {
     ensure_regular_metadata(metadata, path)?;
     Ok(RegularMetadataState {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ExactObjectIdentity::from_unix(
+            MetadataExt::dev(metadata),
+            MetadataExt::ino(metadata),
+        ),
         byte_len: metadata.len(),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
     })
+}
+
+fn regular_path_metadata_state(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+) -> io::Result<RegularMetadataState> {
+    let mut state = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    state.identity = current_regular_file_identity(parent, name)?;
+    Ok(state)
+}
+
+fn regular_handle_metadata_state(file: &File, path: &Path) -> io::Result<RegularMetadataState> {
+    let mut state = regular_metadata_state(&file.metadata()?, path)?;
+    state.identity = opened_regular_file_identity(file)?;
+    Ok(state)
 }
 
 fn directory_metadata_state(
@@ -965,10 +1143,22 @@ fn directory_metadata_state(
 ) -> io::Result<DirectoryMetadataState> {
     ensure_directory_metadata(metadata, path)?;
     Ok(DirectoryMetadataState {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ExactObjectIdentity::from_unix(
+            MetadataExt::dev(metadata),
+            MetadataExt::ino(metadata),
+        ),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
     })
+}
+
+fn directory_handle_metadata_state(
+    directory: &Dir,
+    path: &Path,
+) -> io::Result<DirectoryMetadataState> {
+    let mut state = directory_metadata_state(&directory.dir_metadata()?, path)?;
+    state.identity = opened_directory_identity(directory)?;
+    Ok(state)
 }
 
 fn open_regular_file_nofollow(parent: &Dir, name: &Path) -> io::Result<File> {
@@ -989,6 +1179,10 @@ fn open_regular_file_nofollow(parent: &Dir, name: &Path) -> io::Result<File> {
 }
 
 fn hash_file(file: &mut File) -> io::Result<(String, u64)> {
+    hash_file_bounded(file, u64::MAX)
+}
+
+fn hash_file_bounded(file: &mut File, max_bytes: u64) -> io::Result<(String, u64)> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut byte_len = 0_u64;
@@ -1002,6 +1196,12 @@ fn hash_file(file: &mut File) -> io::Result<(String, u64)> {
         byte_len = byte_len
             .checked_add(count as u64)
             .ok_or_else(|| io::Error::other("regular-file length overflow while hashing"))?;
+        if byte_len > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("regular file grew beyond the bounded hash limit of {max_bytes} bytes"),
+            ));
+        }
     }
     Ok((format!("sha256:{:x}", hasher.finalize()), byte_len))
 }
@@ -1016,15 +1216,116 @@ fn changed_during_observation(path: &Path, detail: &str) -> io::Error {
     )
 }
 
+fn observe_regular_file_metadata_exact(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<ExactFileMetadataObservation> {
+    let path_before = regular_path_metadata_state(parent, name, path)?;
+    if path_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding the owner-residual limit of {max_bytes} bytes",
+                path.display(),
+                path_before.byte_len
+            ),
+        ));
+    }
+    let file = open_regular_file_nofollow(parent, name)?;
+    let handle = regular_handle_metadata_state(&file, path)?;
+    let path_after = regular_path_metadata_state(parent, name, path)?;
+    if handle != path_before || path_after != path_before {
+        return Err(changed_during_observation(
+            path,
+            "metadata-only owner observation did not remain identity/mode/length/link stable",
+        ));
+    }
+    Ok(ExactFileMetadataObservation {
+        identity: handle.identity,
+        byte_len: handle.byte_len,
+        mode: handle.mode,
+        link_count: handle.link_count,
+    })
+}
+
+fn observe_created_file_exact_impl(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    created: &mut CreatedFile,
+    max_bytes: u64,
+) -> io::Result<ExactFileObservation> {
+    let handle_before = regular_handle_metadata_state(&created.file, path)?;
+    let path_before = regular_path_metadata_state(parent, name, path)?;
+    if handle_before.identity != created.identity || path_before != handle_before {
+        return Err(changed_during_observation(
+            path,
+            "the still-open created handle is no longer bound to its owner path",
+        ));
+    }
+    if handle_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding its declared owner length of {max_bytes} bytes",
+                path.display(),
+                handle_before.byte_len
+            ),
+        ));
+    }
+    let (content_hash, byte_len) = hash_file(&mut created.file)?;
+    if byte_len != handle_before.byte_len {
+        return Err(changed_during_observation(
+            path,
+            "the live-handle hash length differs from the opened metadata",
+        ));
+    }
+    let handle_after = regular_handle_metadata_state(&created.file, path)?;
+    let path_after = regular_path_metadata_state(parent, name, path)?;
+    if handle_after != handle_before || path_after != handle_before {
+        return Err(changed_during_observation(
+            path,
+            "the created owner changed during live-handle hashing",
+        ));
+    }
+    Ok(ExactFileObservation {
+        identity: handle_after.identity,
+        byte_len,
+        content_hash,
+        mode: handle_after.mode,
+        link_count: handle_after.link_count,
+    })
+}
+
 fn observe_regular_file_exact(
     parent: &Dir,
     name: &Path,
     path: &Path,
 ) -> io::Result<ExactFileObservation> {
-    require_exact_identity_support()?;
-    let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    observe_regular_file_bounded_exact(parent, name, path, u64::MAX)
+}
+
+fn observe_regular_file_bounded_exact(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> io::Result<ExactFileObservation> {
+    let path_before = regular_path_metadata_state(parent, name, path)?;
+    if path_before.byte_len > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, exceeding the bounded hash limit of {max_bytes} bytes",
+                path.display(),
+                path_before.byte_len
+            ),
+        ));
+    }
     let mut file = open_regular_file_nofollow(parent, name)?;
-    let handle_before = regular_metadata_state(&file.metadata()?, path)?;
+    let handle_before = regular_handle_metadata_state(&file, path)?;
     if handle_before != path_before {
         return Err(changed_during_observation(
             path,
@@ -1032,7 +1333,7 @@ fn observe_regular_file_exact(
         ));
     }
 
-    let (content_hash, byte_len) = hash_file(&mut file)?;
+    let (content_hash, byte_len) = hash_file_bounded(&mut file, max_bytes)?;
     if byte_len != handle_before.byte_len {
         return Err(changed_during_observation(
             path,
@@ -1040,8 +1341,8 @@ fn observe_regular_file_exact(
         ));
     }
 
-    let handle_after = regular_metadata_state(&file.metadata()?, path)?;
-    let path_after = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    let handle_after = regular_handle_metadata_state(&file, path)?;
+    let path_after = regular_path_metadata_state(parent, name, path)?;
     if handle_after != handle_before || path_after != handle_before {
         return Err(changed_during_observation(
             path,
@@ -1064,8 +1365,7 @@ fn read_regular_file_exact_impl(
     path: &Path,
     max_bytes: u64,
 ) -> io::Result<ExactFileRead> {
-    require_exact_identity_support()?;
-    let path_before = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    let path_before = regular_path_metadata_state(parent, name, path)?;
     if path_before.byte_len > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1078,7 +1378,7 @@ fn read_regular_file_exact_impl(
     }
 
     let mut file = open_regular_file_nofollow(parent, name)?;
-    let handle_before = regular_metadata_state(&file.metadata()?, path)?;
+    let handle_before = regular_handle_metadata_state(&file, path)?;
     if handle_before != path_before {
         return Err(changed_during_observation(
             path,
@@ -1120,8 +1420,8 @@ fn read_regular_file_exact_impl(
         ));
     }
 
-    let handle_after = regular_metadata_state(&file.metadata()?, path)?;
-    let path_after = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    let handle_after = regular_handle_metadata_state(&file, path)?;
+    let path_after = regular_path_metadata_state(parent, name, path)?;
     if handle_after != handle_before || path_after != handle_before {
         return Err(changed_during_observation(
             path,
@@ -1144,25 +1444,28 @@ fn read_regular_file_exact_impl(
 fn observe_directory_exact(
     endpoint: DirectoryEndpoint<'_>,
 ) -> io::Result<ExactDirectoryObservation> {
-    require_exact_identity_support()?;
-    let path_before = directory_metadata_state(
+    let mut path_before = directory_metadata_state(
         &endpoint.parent.symlink_metadata(endpoint.name)?,
         endpoint.path,
     )?;
-    let handle_before =
+    path_before.identity = current_directory_identity(endpoint.parent, endpoint.name)?;
+    let mut handle_before =
         directory_metadata_state(&endpoint.directory.dir_metadata()?, endpoint.path)?;
+    handle_before.identity = opened_directory_identity(endpoint.directory)?;
     if handle_before != path_before {
         return Err(changed_during_observation(
             endpoint.path,
             "the path and opened directory do not identify the same state",
         ));
     }
-    let path_after = directory_metadata_state(
+    let mut path_after = directory_metadata_state(
         &endpoint.parent.symlink_metadata(endpoint.name)?,
         endpoint.path,
     )?;
-    let handle_after =
+    path_after.identity = current_directory_identity(endpoint.parent, endpoint.name)?;
+    let mut handle_after =
         directory_metadata_state(&endpoint.directory.dir_metadata()?, endpoint.path)?;
+    handle_after.identity = opened_directory_identity(endpoint.directory)?;
     if path_after != handle_before || handle_after != handle_before {
         return Err(changed_during_observation(
             endpoint.path,
@@ -1174,6 +1477,31 @@ fn observe_directory_exact(
         mode: handle_after.mode,
         link_count: handle_after.link_count,
     })
+}
+
+pub(crate) fn opened_directory_identity(directory: &Dir) -> io::Result<ExactObjectIdentity> {
+    let metadata = directory.dir_metadata()?;
+    ensure_directory_metadata(&metadata, Path::new("directory capability"))?;
+    #[cfg(windows)]
+    {
+        let capability = leptos_ui_kit_codegen_platform::adopt_root_directory(
+            directory.try_clone()?.into_std_file(),
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        Ok(capability.identity().into())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ExactObjectIdentity::from_unix(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ))
+    }
+}
+
+fn current_directory_identity(parent: &Dir, name: &Path) -> io::Result<ExactObjectIdentity> {
+    let directory = parent.open_dir_nofollow(name)?;
+    opened_directory_identity(&directory)
 }
 
 fn validate_requested_mode(mode: u32) -> io::Result<()> {
@@ -1234,7 +1562,6 @@ fn open_directory_exact_impl(
     path: &Path,
     mode: u32,
 ) -> io::Result<ExactDirectoryHandle> {
-    require_exact_identity_support()?;
     validate_requested_mode(mode)?;
     let directory = parent.open_dir_nofollow(name)?;
     let observation =
@@ -1252,7 +1579,6 @@ fn create_directory_exact_impl(
     path: &Path,
     mode: u32,
 ) -> io::Result<ExactDirectoryHandle> {
-    require_exact_identity_support()?;
     validate_requested_mode(mode)?;
     #[cfg(unix)]
     {
@@ -1294,9 +1620,35 @@ fn directory_entry_kind(metadata: &Metadata) -> ExactDirectoryEntryKind {
     }
 }
 
-fn directory_names(directory: &Dir) -> io::Result<Vec<OsString>> {
+fn directory_entry_identity(
+    directory: &Dir,
+    name: &Path,
+    kind: ExactDirectoryEntryKind,
+    metadata: &Metadata,
+) -> io::Result<ExactObjectIdentity> {
+    match kind {
+        ExactDirectoryEntryKind::RegularFile => current_regular_file_identity(directory, name),
+        ExactDirectoryEntryKind::Directory => current_directory_identity(directory, name),
+        ExactDirectoryEntryKind::Symlink | ExactDirectoryEntryKind::Other => Ok(
+            ExactObjectIdentity::from_unix(MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        ),
+        #[cfg(windows)]
+        ExactDirectoryEntryKind::ReparsePoint => Ok(ExactObjectIdentity::from_unix(
+            MetadataExt::dev(metadata),
+            MetadataExt::ino(metadata),
+        )),
+    }
+}
+
+fn directory_names_bounded(directory: &Dir, max_entries: usize) -> io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     for entry in directory.entries()? {
+        if names.len() == max_entries {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("directory exceeds its bounded inventory limit of {max_entries} entries"),
+            ));
+        }
         names.push(entry?.file_name());
     }
     names.sort();
@@ -1307,25 +1659,36 @@ fn inventory_directory_exact_impl(
     endpoint: DirectoryEndpoint<'_>,
     expected: &ExactDirectoryObservation,
 ) -> io::Result<ExactDirectoryInventory> {
+    inventory_directory_exact_bounded_impl(endpoint, expected, usize::MAX)
+}
+
+fn inventory_directory_exact_bounded_impl(
+    endpoint: DirectoryEndpoint<'_>,
+    expected: &ExactDirectoryObservation,
+    max_entries: usize,
+) -> io::Result<ExactDirectoryInventory> {
     require_exact_directory_state(endpoint, expected)?;
-    let names_before = directory_names(endpoint.directory)?;
+    let names_before = directory_names_bounded(endpoint.directory, max_entries)?;
     let mut entries = Vec::with_capacity(names_before.len());
     for name in &names_before {
         let entry_path = endpoint.path.join(name);
         let metadata = endpoint.directory.symlink_metadata(name)?;
+        let kind = directory_entry_kind(&metadata);
+        let identity =
+            directory_entry_identity(endpoint.directory, Path::new(name), kind, &metadata)?;
         entries.push(ExactDirectoryEntry {
             name: name.clone(),
-            kind: directory_entry_kind(&metadata),
-            identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+            kind,
+            identity,
             byte_len: metadata.len(),
             mode: preserved_mode(&metadata),
             link_count: Some(MetadataExt::nlink(&metadata)),
         });
         let current = endpoint.directory.symlink_metadata(name)?;
+        let current_kind = directory_entry_kind(&current);
         let current_state = (
-            directory_entry_kind(&current),
-            MetadataExt::dev(&current),
-            MetadataExt::ino(&current),
+            current_kind,
+            directory_entry_identity(endpoint.directory, Path::new(name), current_kind, &current)?,
             current.len(),
             preserved_mode(&current),
             Some(MetadataExt::nlink(&current)),
@@ -1334,8 +1697,7 @@ fn inventory_directory_exact_impl(
         if current_state
             != (
                 recorded.kind,
-                recorded.identity.0,
-                recorded.identity.1,
+                recorded.identity,
                 recorded.byte_len,
                 recorded.mode,
                 recorded.link_count,
@@ -1347,7 +1709,7 @@ fn inventory_directory_exact_impl(
             ));
         }
     }
-    let names_after = directory_names(endpoint.directory)?;
+    let names_after = directory_names_bounded(endpoint.directory, max_entries)?;
     if names_after != names_before {
         return Err(changed_during_observation(
             endpoint.path,
@@ -1414,9 +1776,8 @@ fn ensure_same_parent(from: &Dir, to: &Dir, from_path: &Path, to_path: &Path) ->
     if std::ptr::eq(from, to) {
         return Ok(());
     }
-    require_exact_identity_support()?;
-    let from_state = directory_metadata_state(&from.dir_metadata()?, from_path)?;
-    let to_state = directory_metadata_state(&to.dir_metadata()?, to_path)?;
+    let from_state = directory_handle_metadata_state(from, from_path)?;
+    let to_state = directory_handle_metadata_state(to, to_path)?;
     if from_state.identity == to_state.identity {
         Ok(())
     } else {
@@ -1549,7 +1910,8 @@ fn recorded_file_absent_in_process(
     match parent.symlink_metadata(name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => true,
         Ok(metadata) => {
-            (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity
+            ExactObjectIdentity::from_unix(MetadataExt::dev(&metadata), MetadataExt::ino(&metadata))
+                != expected.identity
         }
         Err(_) => false,
     }
@@ -1568,7 +1930,6 @@ where
     F: FsOps + ?Sized,
 {
     let partial_before = match (|| {
-        require_exact_identity_support()?;
         if partial.name == target.name {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1809,39 +2170,302 @@ fn require_single_component_name(name: &Path, path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(all(test, unix))]
 fn rename_directory_noreplace_impl(
     candidate_parent: &Dir,
     candidate_name: &Path,
     candidate_path: &Path,
+    expected_candidate: &ExactDirectoryInventory,
     target_parent: &Dir,
     target_name: &Path,
     target_path: &Path,
 ) -> io::Result<()> {
-    require_single_component_name(candidate_name, candidate_path)?;
-    require_single_component_name(target_name, target_path)?;
-    ensure_same_parent(candidate_parent, target_parent, candidate_path, target_path)?;
+    relocate_noreplace_impl(
+        candidate_parent,
+        candidate_name,
+        candidate_path,
+        target_parent,
+        target_name,
+        target_path,
+        &ExactRelocationSource::Directory(expected_candidate.clone()),
+    )
+    .map_err(NoReplaceRelocationError::into_io)
+}
+
+fn relocate_noreplace_impl(
+    owner_parent: &Dir,
+    owner_name: &Path,
+    owner_path: &Path,
+    destination_parent: &Dir,
+    destination_name: &Path,
+    destination_path: &Path,
+    expected_source: &ExactRelocationSource,
+) -> Result<(), NoReplaceRelocationError> {
+    require_single_component_name(owner_name, owner_path).map_err(NoReplaceRelocationError::Io)?;
+    require_single_component_name(destination_name, destination_path)
+        .map_err(NoReplaceRelocationError::Io)?;
+    let owner_parent_state = directory_handle_metadata_state(owner_parent, owner_path)
+        .map_err(NoReplaceRelocationError::Io)?;
+    let destination_parent_state =
+        directory_handle_metadata_state(destination_parent, destination_path)
+            .map_err(NoReplaceRelocationError::Io)?;
+    if owner_parent_state.identity.namespace() != destination_parent_state.identity.namespace() {
+        return Err(NoReplaceRelocationError::CrossDevice);
+    }
+
+    match expected_source {
+        ExactRelocationSource::File(expected) => {
+            let actual = observe_regular_file_bounded_exact(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.byte_len,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &actual != expected {
+                return Err(NoReplaceRelocationError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} no longer matches the exact file owner",
+                        owner_path.display()
+                    ),
+                )));
+            }
+        }
+        ExactRelocationSource::EmptyDirectory(expected) => {
+            let opened = open_directory_exact_impl(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            let inventory = inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(owner_parent, owner_name, &opened.directory, owner_path),
+                expected,
+                0,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if inventory.directory != *expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    owner_path,
+                    "the exact empty directory owner changed before relocation",
+                )));
+            }
+        }
+        ExactRelocationSource::Directory(expected) => {
+            let opened = open_directory_exact_impl(
+                owner_parent,
+                owner_name,
+                owner_path,
+                expected.directory.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            let inventory = inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(owner_parent, owner_name, &opened.directory, owner_path),
+                &expected.directory,
+                expected.entries.len(),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &inventory != expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    owner_path,
+                    "the exact directory owner changed before relocation",
+                )));
+            }
+        }
+    }
 
     #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
-    {
+    let relocation = {
         rustix::fs::renameat_with(
-            candidate_parent,
-            candidate_name,
-            target_parent,
-            target_name,
+            owner_parent,
+            owner_name,
+            destination_parent,
+            destination_name,
             rustix::fs::RenameFlags::NOREPLACE,
         )
-        .map_err(io::Error::from)
+        .map_err(|error| {
+            if error == rustix::io::Errno::XDEV {
+                NoReplaceRelocationError::CrossDevice
+            } else {
+                NoReplaceRelocationError::Io(io::Error::from(error))
+            }
+        })
+    };
+    #[cfg(windows)]
+    let relocation = {
+        use leptos_ui_kit_codegen_platform::{
+            CapabilityAccess, MutationFailure, ObjectKind, adopt_root_directory, move_noreplace,
+            open_child_nofollow,
+        };
+
+        let owner = adopt_root_directory(
+            owner_parent
+                .try_clone()
+                .map_err(NoReplaceRelocationError::Io)?
+                .into_std_file(),
+        )
+        .map_err(|error| NoReplaceRelocationError::Io(error.into_error()))?;
+        let destination = adopt_root_directory(
+            destination_parent
+                .try_clone()
+                .map_err(NoReplaceRelocationError::Io)?
+                .into_std_file(),
+        )
+        .map_err(|error| NoReplaceRelocationError::Io(error.into_error()))?;
+        let kind = match expected_source {
+            ExactRelocationSource::File(_) => ObjectKind::RegularFile,
+            ExactRelocationSource::EmptyDirectory(_) | ExactRelocationSource::Directory(_) => {
+                ObjectKind::Directory
+            }
+        };
+        let source = open_child_nofollow(
+            &owner,
+            owner_name.as_os_str(),
+            kind,
+            CapabilityAccess::Mutation,
+        )
+        .map_err(NoReplaceRelocationError::Io)?;
+        let expected_identity = match expected_source {
+            ExactRelocationSource::File(expected) => expected.identity,
+            ExactRelocationSource::EmptyDirectory(expected) => expected.identity,
+            ExactRelocationSource::Directory(expected) => expected.directory.identity,
+        };
+        if ExactObjectIdentity::from(source.identity()) != expected_identity {
+            return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                owner_path,
+                "the Windows relocation source identity changed",
+            )));
+        }
+        match move_noreplace(source, &destination, destination_name.as_os_str()) {
+            Ok(_) => Ok(()),
+            Err(MutationFailure::NotMutated { error, .. }) => {
+                if error.kind() == io::ErrorKind::CrossesDevices {
+                    Err(NoReplaceRelocationError::CrossDevice)
+                } else if error.kind() == io::ErrorKind::Unsupported {
+                    Err(NoReplaceRelocationError::Unsupported)
+                } else {
+                    Err(NoReplaceRelocationError::Io(error))
+                }
+            }
+            Err(MutationFailure::MutatedUnverified { error, .. }) => {
+                Err(NoReplaceRelocationError::Io(error))
+            }
+        }
+    };
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        windows
+    )))]
+    let relocation = {
+        let _ = (
+            owner_parent,
+            owner_name,
+            destination_parent,
+            destination_name,
+        );
+        Err(NoReplaceRelocationError::Unsupported)
+    };
+    relocation?;
+
+    match expected_source {
+        ExactRelocationSource::File(expected) => {
+            let placed = observe_regular_file_bounded_exact(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.byte_len,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &placed != expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    destination_path,
+                    "relocation placed a file other than the exact durable owner",
+                )));
+            }
+        }
+        ExactRelocationSource::EmptyDirectory(expected) => {
+            let opened = open_directory_exact_impl(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(
+                    destination_parent,
+                    destination_name,
+                    &opened.directory,
+                    destination_path,
+                ),
+                expected,
+                0,
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+        }
+        ExactRelocationSource::Directory(expected) => {
+            let opened = open_directory_exact_impl(
+                destination_parent,
+                destination_name,
+                destination_path,
+                expected.directory.mode.posix_mode.unwrap_or(0o755),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            let inventory = inventory_directory_exact_bounded_impl(
+                DirectoryEndpoint::new(
+                    destination_parent,
+                    destination_name,
+                    &opened.directory,
+                    destination_path,
+                ),
+                &expected.directory,
+                expected.entries.len(),
+            )
+            .map_err(NoReplaceRelocationError::Io)?;
+            if &inventory != expected {
+                return Err(NoReplaceRelocationError::Io(changed_during_observation(
+                    destination_path,
+                    "relocation placed a directory other than the exact durable owner",
+                )));
+            }
+        }
+    }
+    require_name_absent(owner_parent, owner_name, owner_path).map_err(NoReplaceRelocationError::Io)
+}
+
+fn probe_noreplace_relocation_impl(
+    parent: &Dir,
+    path: &Path,
+) -> Result<(), NoReplaceRelocationError> {
+    directory_handle_metadata_state(parent, path).map_err(NoReplaceRelocationError::Io)?;
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+    {
+        match rustix::fs::renameat_with(
+            parent,
+            Path::new(""),
+            parent,
+            Path::new(""),
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+            Err(_) => Err(NoReplaceRelocationError::Unsupported),
+            Ok(()) => Err(NoReplaceRelocationError::Io(io::Error::other(
+                "no-replace capability probe unexpectedly renamed an empty path",
+            ))),
+        }
     }
     #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
     {
-        let _ = (candidate_parent, candidate_name, target_parent, target_name);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "capability-relative atomic no-replace directory rename is unavailable on this platform",
-        ))
+        let _ = parent;
+        Err(NoReplaceRelocationError::Unsupported)
     }
 }
 
+#[cfg(all(test, unix))]
 fn observe_published_directory<F>(
     fs: &F,
     candidate: DirectoryEndpoint<'_>,
@@ -1874,6 +2498,7 @@ where
     Ok(published)
 }
 
+#[cfg(all(test, unix))]
 fn publish_directory_absent_exact<F>(
     fs: &F,
     candidate: DirectoryEndpoint<'_>,
@@ -1887,7 +2512,6 @@ where
     F: FsOps + ?Sized,
 {
     let candidate_before = match (|| {
-        require_exact_identity_support()?;
         require_single_component_name(candidate.name, candidate.path)?;
         require_single_component_name(target_name, target_path)?;
         if candidate.name == target_name {
@@ -1896,12 +2520,6 @@ where
                 "prepared directory candidate and publication names must differ",
             ));
         }
-        ensure_same_parent(
-            candidate.parent,
-            target_parent.directory,
-            candidate.path,
-            target_path,
-        )?;
         let observed_parent = fs.observe_directory(target_parent)?;
         if observed_parent != *expected_target_parent {
             return Err(io::Error::new(
@@ -1938,6 +2556,7 @@ where
         candidate.parent,
         candidate.name,
         candidate.path,
+        expected_candidate,
         target_parent.directory,
         target_name,
         target_path,
@@ -2060,16 +2679,7 @@ fn create_exclusive_file_copy<F>(
 where
     F: FsOps + ?Sized,
 {
-    require_exact_identity_support()?;
-    ensure_same_parent(
-        source.parent,
-        destination.parent,
-        source.path,
-        destination.path,
-    )?;
-
-    let source_path_before =
-        regular_metadata_state(&source.parent.symlink_metadata(source.name)?, source.path)?;
+    let source_path_before = regular_path_metadata_state(source.parent, source.name, source.path)?;
     if !observation_matches_metadata(expected_source, source_path_before) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2081,7 +2691,7 @@ where
     }
     fs.before_read_handle(source.path)?;
     let mut source_file = open_regular_file_nofollow(source.parent, source.name)?;
-    let source_handle_before = regular_metadata_state(&source_file.metadata()?, source.path)?;
+    let source_handle_before = regular_handle_metadata_state(&source_file, source.path)?;
     if source_handle_before != source_path_before {
         return Err(changed_during_observation(
             source.path,
@@ -2089,7 +2699,6 @@ where
         ));
     }
 
-    let creation_mode = expected_source.mode.posix_mode.unwrap_or(0o600);
     let CreatedFile {
         file: mut destination_file,
         identity: destination_identity,
@@ -2097,10 +2706,10 @@ where
         destination.parent,
         destination.name,
         destination.path,
-        creation_mode,
+        0o600,
     )?;
 
-    let result = (|| {
+    (|| {
         if destination_identity == expected_source.identity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2130,9 +2739,9 @@ where
         fs.sync_handle(&destination_file, destination.path)?;
 
         let source_hash = format!("sha256:{:x}", source_hasher.finalize());
-        let source_handle_after = regular_metadata_state(&source_file.metadata()?, source.path)?;
+        let source_handle_after = regular_handle_metadata_state(&source_file, source.path)?;
         let source_path_after =
-            regular_metadata_state(&source.parent.symlink_metadata(source.name)?, source.path)?;
+            regular_path_metadata_state(source.parent, source.name, source.path)?;
         if source_handle_after != source_handle_before
             || source_path_after != source_handle_before
             || copied_len != expected_source.byte_len
@@ -2149,11 +2758,9 @@ where
         fs.before_read_handle(destination.path)?;
         let (copy_hash, copy_len) = hash_file(&mut destination_file)?;
         destination_file.seek(SeekFrom::End(0))?;
-        let copy_handle = regular_metadata_state(&destination_file.metadata()?, destination.path)?;
-        let copy_path = regular_metadata_state(
-            &destination.parent.symlink_metadata(destination.name)?,
-            destination.path,
-        )?;
+        let copy_handle = regular_handle_metadata_state(&destination_file, destination.path)?;
+        let copy_path =
+            regular_path_metadata_state(destination.parent, destination.name, destination.path)?;
         if copy_handle != copy_path || copy_handle.identity != destination_identity {
             return Err(changed_during_observation(
                 destination.path,
@@ -2184,13 +2791,6 @@ where
 
         Ok(ExclusiveFileCopy {
             file: destination_file,
-            source: ExactFileObservation {
-                identity: source_handle_after.identity,
-                byte_len: copied_len,
-                content_hash: source_hash,
-                mode: source_handle_after.mode,
-                link_count: source_handle_after.link_count,
-            },
             copy: ExactFileObservation {
                 identity: copy_handle.identity,
                 byte_len: copy_len,
@@ -2199,50 +2799,7 @@ where
                 link_count: copy_handle.link_count,
             },
         })
-    })();
-
-    match result {
-        Ok(copy) => Ok(copy),
-        Err(source_error) => {
-            let cleanup = remove_created_file_if_owned(
-                fs,
-                destination.parent,
-                destination.name,
-                destination.path,
-                destination_identity,
-            );
-            match cleanup {
-                Ok(()) => Err(source_error),
-                Err(cleanup_error) => Err(io::Error::other(format!(
-                    "{source_error}; additionally failed to remove exclusive copy {}: {cleanup_error}",
-                    destination.path.display()
-                ))),
-            }
-        }
-    }
-}
-
-fn remove_created_file_if_owned<F>(
-    fs: &F,
-    parent: &Dir,
-    name: &Path,
-    path: &Path,
-    expected_identity: (u64, u64),
-) -> io::Result<()>
-where
-    F: FsOps + ?Sized,
-{
-    let state = fs.observe_regular_file(parent, name, path)?;
-    if state.identity != expected_identity {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} was substituted before exclusive-copy cleanup",
-                path.display()
-            ),
-        ));
-    }
-    fs.remove_file_exact(parent, name, path, &state)
+    })()
 }
 
 fn remove_exact_file<F>(
@@ -2267,18 +2824,44 @@ where
     }
 
     let pinned = open_regular_file_nofollow(parent, name)?;
+    #[cfg(windows)]
+    let (delete_parent, delete_object) = {
+        let delete_parent = leptos_ui_kit_codegen_platform::adopt_root_directory(
+            parent.try_clone()?.into_std_file(),
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        let delete_object = leptos_ui_kit_codegen_platform::open_child_nofollow(
+            &delete_parent,
+            name.as_os_str(),
+            leptos_ui_kit_codegen_platform::ObjectKind::RegularFile,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Mutation,
+        )?;
+        if ExactObjectIdentity::from(delete_object.identity()) != expected.identity {
+            return Err(changed_during_observation(
+                path,
+                "the Windows cleanup capability does not match the exact journal identity",
+            ));
+        }
+        (delete_parent, delete_object)
+    };
     before_unlink()?;
-    let handle_state = regular_metadata_state(&pinned.metadata()?, path)?;
-    let path_state = regular_metadata_state(&parent.symlink_metadata(name)?, path)?;
+    let handle_state = regular_handle_metadata_state(&pinned, path)?;
+    let path_state = regular_path_metadata_state(parent, name, path)?;
     if handle_state != path_state || !observation_matches_metadata(expected, handle_state) {
         return Err(changed_during_observation(
             path,
             "the cleanup path changed after exact validation",
         ));
     }
+    #[cfg(windows)]
+    match leptos_ui_kit_codegen_platform::delete_exact(&delete_parent, delete_object) {
+        Ok(()) => {}
+        Err(error) => return Err(error.into_parts().0),
+    }
+    #[cfg(not(windows))]
     parent.remove_file(name)?;
 
-    let handle_after = regular_metadata_state(&pinned.metadata()?, path)?;
+    let handle_after = regular_handle_metadata_state(&pinned, path)?;
     if handle_after.identity != expected.identity
         || handle_after.byte_len != expected.byte_len
         || handle_after.mode != expected.mode
@@ -2299,15 +2882,123 @@ where
     match parent.symlink_metadata(name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(metadata)
-            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+            if ExactObjectIdentity::from_unix(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
         {
             // Another actor recreated the name after the exact object was
             // unlinked. It is not transaction-owned and must be preserved.
-            Ok(())
+            Err(changed_during_observation(
+                path,
+                "the cleanup name was recreated with a substituted object after exact unlink",
+            ))
         }
         Ok(_) => Err(changed_during_observation(
             path,
             "the exact object still occupies its name after unlink",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_exact_file_metadata<F>(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    expected: &ExactFileMetadataObservation,
+    before_unlink: F,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let actual = observe_regular_file_metadata_exact(parent, name, path, expected.byte_len)?;
+    if actual != *expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is not the exact metadata-bound owner residual",
+                path.display()
+            ),
+        ));
+    }
+    let pinned = open_regular_file_nofollow(parent, name)?;
+    #[cfg(windows)]
+    let (delete_parent, delete_object) = {
+        let delete_parent = leptos_ui_kit_codegen_platform::adopt_root_directory(
+            parent.try_clone()?.into_std_file(),
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        let delete_object = leptos_ui_kit_codegen_platform::open_child_nofollow(
+            &delete_parent,
+            name.as_os_str(),
+            leptos_ui_kit_codegen_platform::ObjectKind::RegularFile,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Mutation,
+        )?;
+        if ExactObjectIdentity::from(delete_object.identity()) != expected.identity {
+            return Err(changed_during_observation(
+                path,
+                "the Windows metadata cleanup capability does not match the exact journal identity",
+            ));
+        }
+        (delete_parent, delete_object)
+    };
+    before_unlink()?;
+    let handle_state = regular_handle_metadata_state(&pinned, path)?;
+    let path_state = regular_path_metadata_state(parent, name, path)?;
+    let expected_state = RegularMetadataState {
+        identity: expected.identity,
+        byte_len: expected.byte_len,
+        mode: expected.mode,
+        link_count: expected.link_count,
+    };
+    if handle_state != expected_state || path_state != expected_state {
+        return Err(changed_during_observation(
+            path,
+            "metadata-bound owner residual changed before unlink",
+        ));
+    }
+    #[cfg(windows)]
+    match leptos_ui_kit_codegen_platform::delete_exact(&delete_parent, delete_object) {
+        Ok(()) => {}
+        Err(error) => return Err(error.into_parts().0),
+    }
+    #[cfg(not(windows))]
+    parent.remove_file(name)?;
+    let handle_after = regular_handle_metadata_state(&pinned, path)?;
+    if handle_after.identity != expected.identity
+        || handle_after.byte_len != expected.byte_len
+        || handle_after.mode != expected.mode
+    {
+        return Err(changed_during_observation(
+            path,
+            "metadata-bound owner residual changed across unlink",
+        ));
+    }
+    if let Some(expected_links) = expected.link_count
+        && handle_after.link_count != expected_links.checked_sub(1)
+    {
+        return Err(changed_during_observation(
+            path,
+            "metadata-bound owner residual link count did not decrement exactly once",
+        ));
+    }
+    match parent.symlink_metadata(name) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata)
+            if ExactObjectIdentity::from_unix(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
+        {
+            Err(changed_during_observation(
+                path,
+                "the owner-residual name was recreated with a substituted object after exact unlink",
+            ))
+        }
+        Ok(_) => Err(changed_during_observation(
+            path,
+            "metadata-bound owner residual still occupies its name after unlink",
         )),
         Err(error) => Err(error),
     }
@@ -2321,32 +3012,39 @@ fn remove_empty_directory_exact_impl<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let initial = inventory_directory_exact_impl(endpoint, expected)?;
-    if !initial.entries.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::DirectoryNotEmpty,
-            format!(
-                "{} is not an exact empty directory",
-                endpoint.path.display()
-            ),
-        ));
-    }
+    require_exact_empty_directory(endpoint, expected)?;
 
+    #[cfg(windows)]
+    let (delete_parent, delete_object) = {
+        let delete_parent = leptos_ui_kit_codegen_platform::adopt_root_directory(
+            endpoint.parent.try_clone()?.into_std_file(),
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        let delete_object = leptos_ui_kit_codegen_platform::open_child_nofollow(
+            &delete_parent,
+            endpoint.name.as_os_str(),
+            leptos_ui_kit_codegen_platform::ObjectKind::Directory,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Mutation,
+        )?;
+        if ExactObjectIdentity::from(delete_object.identity()) != expected.identity {
+            return Err(changed_during_observation(
+                endpoint.path,
+                "the Windows directory cleanup capability does not match the exact journal identity",
+            ));
+        }
+        (delete_parent, delete_object)
+    };
     before_unlink()?;
-    let final_inventory = inventory_directory_exact_impl(endpoint, expected)?;
-    if !final_inventory.entries.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::DirectoryNotEmpty,
-            format!(
-                "{} gained children at the exact removal boundary",
-                endpoint.path.display()
-            ),
-        ));
+    require_exact_empty_directory(endpoint, expected)?;
+    #[cfg(windows)]
+    match leptos_ui_kit_codegen_platform::delete_exact(&delete_parent, delete_object) {
+        Ok(()) => {}
+        Err(error) => return Err(error.into_parts().0),
     }
+    #[cfg(not(windows))]
     endpoint.parent.remove_dir(endpoint.name)?;
 
-    let handle_after =
-        directory_metadata_state(&endpoint.directory.dir_metadata()?, endpoint.path)?;
+    let handle_after = directory_handle_metadata_state(endpoint.directory, endpoint.path)?;
     if handle_after.identity != expected.identity || handle_after.mode != expected.mode {
         return Err(changed_during_observation(
             endpoint.path,
@@ -2356,9 +3054,15 @@ where
     match endpoint.parent.symlink_metadata(endpoint.name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(metadata)
-            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+            if ExactObjectIdentity::from_unix(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
         {
-            Ok(())
+            Err(changed_during_observation(
+                endpoint.path,
+                "the directory cleanup name was recreated with a substituted object after exact removal",
+            ))
         }
         Ok(_) => Err(changed_during_observation(
             endpoint.path,
@@ -2368,7 +3072,34 @@ where
     }
 }
 
-fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
+fn require_exact_empty_directory(
+    endpoint: DirectoryEndpoint<'_>,
+    expected: &ExactDirectoryObservation,
+) -> io::Result<()> {
+    require_exact_directory_state(endpoint, expected)?;
+    if endpoint.directory.entries()?.next().transpose()?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::DirectoryNotEmpty,
+            format!(
+                "{} is not an exact empty directory",
+                endpoint.path.display()
+            ),
+        ));
+    }
+    require_exact_directory_state(endpoint, expected)?;
+    if endpoint.directory.entries()?.next().transpose()?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::DirectoryNotEmpty,
+            format!(
+                "{} gained children at the exact removal boundary",
+                endpoint.path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn opened_regular_file_identity(file: &File) -> io::Result<ExactObjectIdentity> {
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -2383,10 +3114,29 @@ fn opened_regular_file_identity(file: &File) -> io::Result<(u64, u64)> {
             "controlled file is a Windows reparse point",
         ));
     }
-    Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
+    #[cfg(windows)]
+    {
+        let capability = leptos_ui_kit_codegen_platform::adopt_object(
+            file.try_clone()?.into_std(),
+            leptos_ui_kit_codegen_platform::ObjectKind::RegularFile,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Inspect,
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        Ok(capability.identity().into())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ExactObjectIdentity::from_unix(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ))
+    }
 }
 
-pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn current_regular_file_identity(
+    parent: &Dir,
+    name: &Path,
+) -> io::Result<ExactObjectIdentity> {
     let metadata = parent.symlink_metadata(name)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -2401,7 +3151,18 @@ pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Re
             "controlled path is a Windows reparse point",
         ));
     }
-    Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
+    #[cfg(windows)]
+    {
+        let file = open_regular_file_nofollow(parent, name)?;
+        opened_regular_file_identity(&file)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ExactObjectIdentity::from_unix(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -2412,11 +3173,15 @@ pub(crate) enum FsOperation {
     InspectMetadata,
     ReadHandle,
     ObserveRegularFile,
+    ObserveRegularFileBounded,
+    ObserveRegularFileMetadata,
+    ObserveCreatedFileExact,
     ReadRegularFileExact,
     ObserveDirectory,
     OpenDirectoryExact,
     CreateDirectoryExact,
     InventoryDirectoryExact,
+    InventoryDirectoryExactBounded,
     CreateNewFile,
     CreateExclusiveCopy,
     #[cfg(windows)]
@@ -2435,20 +3200,22 @@ pub(crate) enum FsOperation {
     HardLink,
     PublishAbsent,
     PublishImmutable,
+    #[cfg(unix)]
     RenameDirectoryNoReplace,
+    RelocateNoReplace,
+    ProbeRelocateNoReplace,
+    #[cfg(unix)]
     PublishDirectoryAbsent,
+    #[cfg(not(windows))]
     RemoveFile,
     RemoveFileExact,
+    RemoveFileMetadataExact,
     BeforeExactUnlink,
     #[cfg(windows)]
     RemoveFileByHandle,
-    RemoveDirectory,
     RemoveDirectoryExact,
-    BeforeFinalRevalidation,
-    AfterFinalRevalidation,
-    Rename,
+    BeforeMutationRebind,
     ReplaceExisting,
-    RenameJournal,
 }
 
 #[cfg(test)]
@@ -2466,7 +3233,14 @@ enum FinalRevalidationMutation {
         target: PathBuf,
         content: Vec<u8>,
     },
+    #[cfg(unix)]
     ReplaceFile {
+        target: PathBuf,
+        moved_target: PathBuf,
+        content: Vec<u8>,
+    },
+    ReplaceFileOnChildMutation {
+        trigger_parent: PathBuf,
         target: PathBuf,
         moved_target: PathBuf,
         content: Vec<u8>,
@@ -2484,6 +3258,12 @@ enum FinalRevalidationMutation {
         parent: PathBuf,
         moved_parent: PathBuf,
     },
+    #[cfg(unix)]
+    ReplaceParentWithDirectoryOnChildMutation {
+        trigger_parent: PathBuf,
+        parent: PathBuf,
+        moved_parent: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -2497,24 +3277,41 @@ struct PauseAfterSuccess {
 
 #[cfg(test)]
 impl FinalRevalidationMutation {
-    fn target(&self) -> &Path {
+    fn matches_trigger(&self, path: &Path) -> bool {
         match self {
-            Self::WriteFile { target, .. } => target,
-            Self::ReplaceFile { target, .. } => target,
+            Self::WriteFile { target, .. } => target == path,
             #[cfg(unix)]
-            Self::ReplaceParentWithSymlink { target, .. } => target,
+            Self::ReplaceFile { target, .. } => target == path,
+            Self::ReplaceFileOnChildMutation { trigger_parent, .. } => {
+                path.parent() == Some(trigger_parent.as_path())
+            }
             #[cfg(unix)]
-            Self::ReplaceParentWithDirectory { target, .. } => target,
+            Self::ReplaceParentWithSymlink { target, .. }
+            | Self::ReplaceParentWithDirectory { target, .. } => target == path,
+            #[cfg(unix)]
+            Self::ReplaceParentWithDirectoryOnChildMutation { trigger_parent, .. } => {
+                path.parent() == Some(trigger_parent.as_path())
+            }
         }
     }
 
     fn apply(self) -> io::Result<()> {
         match self {
             Self::WriteFile { target, content } => fs::write(target, content),
+            #[cfg(unix)]
             Self::ReplaceFile {
                 target,
                 moved_target,
                 content,
+            } => {
+                fs::rename(&target, moved_target)?;
+                fs::write(target, content)
+            }
+            Self::ReplaceFileOnChildMutation {
+                target,
+                moved_target,
+                content,
+                ..
             } => {
                 fs::rename(&target, moved_target)?;
                 fs::write(target, content)
@@ -2534,6 +3331,11 @@ impl FinalRevalidationMutation {
                 parent,
                 moved_parent,
                 ..
+            }
+            | Self::ReplaceParentWithDirectoryOnChildMutation {
+                parent,
+                moved_parent,
+                ..
             } => {
                 fs::rename(&parent, moved_parent)?;
                 fs::create_dir(parent)
@@ -2546,11 +3348,14 @@ impl FinalRevalidationMutation {
 #[derive(Debug)]
 pub(crate) struct FaultFs {
     fail: std::sync::Mutex<Option<FaultMode>>,
+    crash: std::sync::Mutex<Option<TransitionFaultMode>>,
     counts: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
     events: std::sync::Mutex<Vec<FsEvent>>,
+    transition_counts:
+        std::sync::Mutex<std::collections::BTreeMap<super::runtime::TransitionKey, usize>>,
+    transition_events: std::sync::Mutex<Vec<super::runtime::TransitionKey>>,
     pauses_after_success: Vec<PauseAfterSuccess>,
-    final_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
-    post_revalidation_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
+    mutation_rebind_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
     exact_unlink_mutation: std::sync::Mutex<Option<FinalRevalidationMutation>>,
 }
 
@@ -2568,15 +3373,40 @@ enum FaultMode {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct TransitionFaultMode {
+    key: super::runtime::TransitionKey,
+    ordinal: usize,
+}
+
+#[cfg(test)]
+impl FaultMode {
+    fn matches(self, operation: FsOperation, ordinal: usize) -> bool {
+        match self {
+            Self::Once {
+                operation: target,
+                ordinal: target_ordinal,
+            } => target == operation && target_ordinal == ordinal,
+            Self::From {
+                operation: target,
+                ordinal: target_ordinal,
+            } => target == operation && ordinal >= target_ordinal,
+        }
+    }
+}
+
+#[cfg(test)]
 impl FaultFs {
     pub(crate) fn passthrough() -> Self {
         Self {
             fail: std::sync::Mutex::new(None),
+            crash: std::sync::Mutex::new(None),
             counts: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             events: std::sync::Mutex::new(Vec::new()),
+            transition_counts: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            transition_events: std::sync::Mutex::new(Vec::new()),
             pauses_after_success: Vec::new(),
-            final_revalidation_mutation: std::sync::Mutex::new(None),
-            post_revalidation_mutation: std::sync::Mutex::new(None),
+            mutation_rebind_mutation: std::sync::Mutex::new(None),
             exact_unlink_mutation: std::sync::Mutex::new(None),
         }
     }
@@ -2595,8 +3425,44 @@ impl FaultFs {
         fs
     }
 
+    /// Panics at one exact semantic protocol transition, modelling abrupt
+    /// process death without allowing in-process error reconciliation to run.
+    pub(crate) fn crash_nth(key: super::runtime::TransitionKey, ordinal: usize) -> Self {
+        assert!(ordinal > 0, "crash ordinal is one-based");
+        let fs = Self::passthrough();
+        *fs.crash.lock().expect("crash lock") = Some(TransitionFaultMode { key, ordinal });
+        fs
+    }
+
+    pub(crate) fn fail_nth_and_crash_nth(
+        failed_operation: FsOperation,
+        failed_ordinal: usize,
+        crash_key: super::runtime::TransitionKey,
+        crash_ordinal: usize,
+    ) -> Self {
+        assert!(failed_ordinal > 0, "fault ordinal is one-based");
+        assert!(crash_ordinal > 0, "crash ordinal is one-based");
+        let fs = Self::passthrough();
+        *fs.fail.lock().expect("fault lock") = Some(FaultMode::Once {
+            operation: failed_operation,
+            ordinal: failed_ordinal,
+        });
+        *fs.crash.lock().expect("crash lock") = Some(TransitionFaultMode {
+            key: crash_key,
+            ordinal: crash_ordinal,
+        });
+        fs
+    }
+
     pub(crate) fn events(&self) -> Vec<FsEvent> {
         self.events.lock().expect("event lock").clone()
+    }
+
+    pub(crate) fn transition_events(&self) -> Vec<super::runtime::TransitionKey> {
+        self.transition_events
+            .lock()
+            .expect("transition event lock")
+            .clone()
     }
 
     pub(crate) fn pause_after_success(
@@ -2637,18 +3503,7 @@ impl FaultFs {
 
     pub(crate) fn mutate_before_final_revalidation(path: PathBuf, content: Vec<u8>) -> Self {
         let fs = Self::passthrough();
-        *fs.final_revalidation_mutation
-            .lock()
-            .expect("mutation lock") = Some(FinalRevalidationMutation::WriteFile {
-            target: path,
-            content,
-        });
-        fs
-    }
-
-    pub(crate) fn mutate_after_final_revalidation(path: PathBuf, content: Vec<u8>) -> Self {
-        let fs = Self::passthrough();
-        *fs.post_revalidation_mutation.lock().expect("mutation lock") =
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::WriteFile {
                 target: path,
                 content,
@@ -2656,6 +3511,28 @@ impl FaultFs {
         fs
     }
 
+    #[cfg(unix)]
+    pub(crate) fn mutate_before_mutation_rebind(path: PathBuf, content: Vec<u8>) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::WriteFile {
+                target: path,
+                content,
+            });
+        fs
+    }
+
+    pub(crate) fn mutate_after_final_revalidation(path: PathBuf, content: Vec<u8>) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::WriteFile {
+                target: path,
+                content,
+            });
+        fs
+    }
+
+    #[cfg(unix)]
     pub(crate) fn substitute_before_exact_unlink(
         target: PathBuf,
         moved_target: PathBuf,
@@ -2671,6 +3548,39 @@ impl FaultFs {
         fs
     }
 
+    pub(crate) fn substitute_file_before_child_mutation(
+        trigger_parent: PathBuf,
+        target: PathBuf,
+        moved_target: PathBuf,
+        content: Vec<u8>,
+    ) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::ReplaceFileOnChildMutation {
+                trigger_parent,
+                target,
+                moved_target,
+                content,
+            });
+        fs
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn replace_parent_with_directory_before_child_mutation(
+        parent: PathBuf,
+        moved_parent: PathBuf,
+    ) -> Self {
+        let fs = Self::passthrough();
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") = Some(
+            FinalRevalidationMutation::ReplaceParentWithDirectoryOnChildMutation {
+                trigger_parent: parent.clone(),
+                parent,
+                moved_parent,
+            },
+        );
+        fs
+    }
+
     #[cfg(unix)]
     pub(crate) fn replace_parent_before_final_revalidation(
         target: PathBuf,
@@ -2679,14 +3589,13 @@ impl FaultFs {
         referent: PathBuf,
     ) -> Self {
         let fs = Self::passthrough();
-        *fs.final_revalidation_mutation
-            .lock()
-            .expect("mutation lock") = Some(FinalRevalidationMutation::ReplaceParentWithSymlink {
-            target,
-            parent,
-            moved_parent,
-            referent,
-        });
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
+            Some(FinalRevalidationMutation::ReplaceParentWithSymlink {
+                target,
+                parent,
+                moved_parent,
+                referent,
+            });
         fs
     }
 
@@ -2698,7 +3607,7 @@ impl FaultFs {
         referent: PathBuf,
     ) -> Self {
         let fs = Self::passthrough();
-        *fs.post_revalidation_mutation.lock().expect("mutation lock") =
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::ReplaceParentWithSymlink {
                 target,
                 parent,
@@ -2715,7 +3624,7 @@ impl FaultFs {
         moved_parent: PathBuf,
     ) -> Self {
         let fs = Self::passthrough();
-        *fs.post_revalidation_mutation.lock().expect("mutation lock") =
+        *fs.mutation_rebind_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::ReplaceParentWithDirectory {
                 target,
                 parent,
@@ -2730,38 +3639,57 @@ impl FaultFs {
         path: &Path,
         destination: Option<&Path>,
     ) -> io::Result<()> {
-        self.events.lock().expect("event lock").push(FsEvent {
-            operation,
-            path: path.to_path_buf(),
-            destination: destination.map(Path::to_path_buf),
-        });
-        let key = format!("{operation:?}");
-        let ordinal = {
-            let mut counts = self.counts.lock().expect("count lock");
-            let count = counts.entry(key).or_default();
-            *count += 1;
-            *count
-        };
+        let ordinal = self.record(operation, path, destination);
         if self
             .fail
             .lock()
             .expect("fault lock")
-            .is_some_and(|mode| match mode {
-                FaultMode::Once {
-                    operation: target,
-                    ordinal: target_ordinal,
-                } => target == operation && target_ordinal == ordinal,
-                FaultMode::From {
-                    operation: target,
-                    ordinal: target_ordinal,
-                } => target == operation && ordinal >= target_ordinal,
-            })
+            .is_some_and(|mode| mode.matches(operation, ordinal))
         {
             Err(io::Error::other(format!(
                 "injected {operation:?} failure at ordinal {ordinal}"
             )))
         } else {
             Ok(())
+        }
+    }
+
+    fn record(&self, operation: FsOperation, path: &Path, destination: Option<&Path>) -> usize {
+        self.events.lock().expect("event lock").push(FsEvent {
+            operation,
+            path: path.to_path_buf(),
+            destination: destination.map(Path::to_path_buf),
+        });
+        let key = format!("{operation:?}");
+        {
+            let mut counts = self.counts.lock().expect("count lock");
+            let count = counts.entry(key).or_default();
+            *count += 1;
+            *count
+        }
+    }
+
+    fn observe_semantic_transition(&self, key: super::runtime::TransitionKey) {
+        self.transition_events
+            .lock()
+            .expect("transition event lock")
+            .push(key);
+        let ordinal = {
+            let mut counts = self
+                .transition_counts
+                .lock()
+                .expect("transition count lock");
+            let count = counts.entry(key).or_default();
+            *count += 1;
+            *count
+        };
+        if self
+            .crash
+            .lock()
+            .expect("crash lock")
+            .is_some_and(|mode| mode.key == key && mode.ordinal == ordinal)
+        {
+            panic!("injected crash at {key:?} occurrence {ordinal}");
         }
     }
 
@@ -2800,7 +3728,7 @@ impl FaultFs {
             let mut mutation = self.exact_unlink_mutation.lock().expect("mutation lock");
             if mutation
                 .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
+                .is_some_and(|mutation| mutation.matches_trigger(path))
             {
                 mutation.take()
             } else {
@@ -2816,6 +3744,10 @@ impl FaultFs {
 
 #[cfg(test)]
 impl FsOps for FaultFs {
+    fn observe_transition(&self, key: super::runtime::TransitionKey) {
+        self.observe_semantic_transition(key);
+    }
+
     fn before_create_directory(&self, path: &Path) -> io::Result<()> {
         self.before(FsOperation::CreateDirectory, path, None)
     }
@@ -2845,6 +3777,47 @@ impl FsOps for FaultFs {
         self.before(FsOperation::ObserveRegularFile, path, None)?;
         let observation = SystemFs.observe_regular_file(parent, name, path)?;
         self.after_success(FsOperation::ObserveRegularFile, path)?;
+        Ok(observation)
+    }
+
+    fn observe_regular_file_bounded(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        self.before(FsOperation::ObserveRegularFileBounded, path, None)?;
+        let observation = SystemFs.observe_regular_file_bounded(parent, name, path, max_bytes)?;
+        self.after_success(FsOperation::ObserveRegularFileBounded, path)?;
+        Ok(observation)
+    }
+
+    fn observe_regular_file_metadata(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileMetadataObservation> {
+        self.before(FsOperation::ObserveRegularFileMetadata, path, None)?;
+        let observation = SystemFs.observe_regular_file_metadata(parent, name, path, max_bytes)?;
+        self.after_success(FsOperation::ObserveRegularFileMetadata, path)?;
+        Ok(observation)
+    }
+
+    fn observe_created_file_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        created: &mut CreatedFile,
+        max_bytes: u64,
+    ) -> io::Result<ExactFileObservation> {
+        self.before(FsOperation::ObserveCreatedFileExact, path, None)?;
+        let observation =
+            SystemFs.observe_created_file_exact(parent, name, path, created, max_bytes)?;
+        self.after_success(FsOperation::ObserveCreatedFileExact, path)?;
         Ok(observation)
     }
 
@@ -2905,6 +3878,23 @@ impl FsOps for FaultFs {
         self.before(FsOperation::InventoryDirectoryExact, endpoint.path, None)?;
         let inventory = SystemFs.inventory_directory_exact(endpoint, expected)?;
         self.after_success(FsOperation::InventoryDirectoryExact, endpoint.path)?;
+        Ok(inventory)
+    }
+
+    fn inventory_directory_exact_bounded(
+        &self,
+        endpoint: DirectoryEndpoint<'_>,
+        expected: &ExactDirectoryObservation,
+        max_entries: usize,
+    ) -> io::Result<ExactDirectoryInventory> {
+        self.before(
+            FsOperation::InventoryDirectoryExactBounded,
+            endpoint.path,
+            None,
+        )?;
+        let inventory =
+            SystemFs.inventory_directory_exact_bounded(endpoint, expected, max_entries)?;
+        self.after_success(FsOperation::InventoryDirectoryExactBounded, endpoint.path)?;
         Ok(inventory)
     }
 
@@ -3081,11 +4071,13 @@ impl FsOps for FaultFs {
         )
     }
 
+    #[cfg(all(test, unix))]
     fn rename_directory_noreplace(
         &self,
         candidate_parent: &Dir,
         candidate_name: &Path,
         candidate_path: &Path,
+        expected_candidate: &ExactDirectoryInventory,
         target_parent: &Dir,
         target_name: &Path,
         target_path: &Path,
@@ -3099,6 +4091,7 @@ impl FsOps for FaultFs {
             candidate_parent,
             candidate_name,
             candidate_path,
+            expected_candidate,
             target_parent,
             target_name,
             target_path,
@@ -3106,6 +4099,48 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::RenameDirectoryNoReplace, candidate_path)
     }
 
+    fn relocate_noreplace(
+        &self,
+        owner_parent: &Dir,
+        owner_name: &Path,
+        owner_path: &Path,
+        destination_parent: &Dir,
+        destination_name: &Path,
+        destination_path: &Path,
+        expected_source: &ExactRelocationSource,
+    ) -> Result<(), NoReplaceRelocationError> {
+        self.before(
+            FsOperation::RelocateNoReplace,
+            owner_path,
+            Some(destination_path),
+        )
+        .map_err(NoReplaceRelocationError::Io)?;
+        SystemFs.relocate_noreplace(
+            owner_parent,
+            owner_name,
+            owner_path,
+            destination_parent,
+            destination_name,
+            destination_path,
+            expected_source,
+        )?;
+        self.after_success(FsOperation::RelocateNoReplace, owner_path)
+            .map_err(NoReplaceRelocationError::Io)
+    }
+
+    fn probe_noreplace_relocation(
+        &self,
+        parent: &Dir,
+        path: &Path,
+    ) -> Result<(), NoReplaceRelocationError> {
+        self.before(FsOperation::ProbeRelocateNoReplace, path, None)
+            .map_err(NoReplaceRelocationError::Io)?;
+        SystemFs.probe_noreplace_relocation(parent, path)?;
+        self.after_success(FsOperation::ProbeRelocateNoReplace, path)
+            .map_err(NoReplaceRelocationError::Io)
+    }
+
+    #[cfg(all(test, unix))]
     fn publish_directory_absent(
         &self,
         candidate: DirectoryEndpoint<'_>,
@@ -3136,6 +4171,7 @@ impl FsOps for FaultFs {
         )
     }
 
+    #[cfg(not(windows))]
     fn remove_file(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
         self.before(FsOperation::RemoveFile, path, None)?;
         SystemFs.remove_file(parent, name, path)
@@ -3155,17 +4191,26 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::RemoveFileExact, path)
     }
 
+    fn remove_file_metadata_exact(
+        &self,
+        parent: &Dir,
+        name: &Path,
+        path: &Path,
+        expected: &ExactFileMetadataObservation,
+    ) -> io::Result<()> {
+        self.before(FsOperation::RemoveFileMetadataExact, path, None)?;
+        remove_exact_file_metadata(parent, name, path, expected, || {
+            self.before_exact_unlink(path)
+        })?;
+        self.after_success(FsOperation::RemoveFileMetadataExact, path)
+    }
+
     #[cfg(windows)]
     fn remove_file_by_handle(&self, file: File, path: &Path) -> Result<(), HandleDeleteError> {
         if let Err(source) = self.before(FsOperation::RemoveFileByHandle, path, None) {
             return Err(HandleDeleteError { file, source });
         }
         SystemFs.remove_file_by_handle(file, path)
-    }
-
-    fn remove_dir(&self, parent: &Dir, name: &Path, path: &Path) -> io::Result<()> {
-        self.before(FsOperation::RemoveDirectory, path, None)?;
-        SystemFs.remove_dir(parent, name, path)
     }
 
     fn remove_empty_directory_exact(
@@ -3180,16 +4225,13 @@ impl FsOps for FaultFs {
         self.after_success(FsOperation::RemoveDirectoryExact, endpoint.path)
     }
 
-    fn before_final_revalidation(&self, path: &Path) -> io::Result<()> {
-        self.before(FsOperation::BeforeFinalRevalidation, path, None)?;
+    fn before_mutation_rebind(&self, path: &Path) -> io::Result<()> {
+        self.before(FsOperation::BeforeMutationRebind, path, None)?;
         let mutation = {
-            let mut mutation = self
-                .final_revalidation_mutation
-                .lock()
-                .expect("mutation lock");
+            let mut mutation = self.mutation_rebind_mutation.lock().expect("mutation lock");
             if mutation
                 .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
+                .is_some_and(|mutation| mutation.matches_trigger(path))
             {
                 mutation.take()
             } else {
@@ -3200,41 +4242,6 @@ impl FsOps for FaultFs {
             mutation.apply()?;
         }
         Ok(())
-    }
-
-    fn after_final_revalidation(&self, path: &Path) -> io::Result<()> {
-        self.before(FsOperation::AfterFinalRevalidation, path, None)?;
-        let mutation = {
-            let mut mutation = self
-                .post_revalidation_mutation
-                .lock()
-                .expect("mutation lock");
-            if mutation
-                .as_ref()
-                .is_some_and(|mutation| mutation.target() == path)
-            {
-                mutation.take()
-            } else {
-                None
-            }
-        };
-        if let Some(mutation) = mutation {
-            mutation.apply()?;
-        }
-        Ok(())
-    }
-
-    fn rename(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.before(FsOperation::Rename, from, Some(to))?;
-        SystemFs.rename(from_parent, from_name, from, to_parent, to_name, to)
     }
 
     fn replace_existing(
@@ -3248,19 +4255,6 @@ impl FsOps for FaultFs {
         SystemFs.replace_existing(staged, expected_stage, target, expected_target)?;
         self.after_success(FsOperation::ReplaceExisting, staged.path)
     }
-
-    fn rename_journal(
-        &self,
-        from_parent: &Dir,
-        from_name: &Path,
-        from: &Path,
-        to_parent: &Dir,
-        to_name: &Path,
-        to: &Path,
-    ) -> io::Result<()> {
-        self.before(FsOperation::RenameJournal, from, Some(to))?;
-        SystemFs.rename_journal(from_parent, from_name, from, to_parent, to_name, to)
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -3271,9 +4265,8 @@ mod exact_state_tests {
     use tempfile::TempDir;
 
     use super::{
-        DirectoryEndpoint, DirectoryPublicationOutcome, ExactDirectoryEntryKind,
-        ExactIdentitySupport, FsOperation, FsOps, HardLinkEndpoint, ImmutablePublicationOutcome,
-        ParentSyncKind, SystemFs, exact_identity_support,
+        DirectoryEndpoint, DirectoryPublicationOutcome, ExactDirectoryEntryKind, FsOperation,
+        FsOps, HardLinkEndpoint, ImmutablePublicationOutcome, ParentSyncKind, SystemFs,
     };
 
     struct Fixture {
@@ -3281,6 +4274,30 @@ mod exact_state_tests {
         root: Dir,
         files: Dir,
         files_path: PathBuf,
+    }
+
+    #[test]
+    fn mutation_rebind_hook_is_semantically_faultable() {
+        let fixture = Fixture::new();
+        fixture.write("target", b"planned bytes\n");
+        let target_path = fixture.path("target");
+        let fault = super::FaultFs::mutate_before_mutation_rebind(
+            target_path.clone(),
+            b"concurrent bytes\n".to_vec(),
+        );
+
+        fault
+            .before_mutation_rebind(&target_path)
+            .expect("run mutation rebind hook");
+
+        assert_eq!(
+            std::fs::read(&target_path).expect("read mutated target"),
+            b"concurrent bytes\n"
+        );
+        assert_eq!(
+            fault.events()[0].operation,
+            FsOperation::BeforeMutationRebind
+        );
     }
 
     impl Fixture {
@@ -3314,7 +4331,6 @@ mod exact_state_tests {
 
     #[test]
     fn exact_observation_copy_publish_sync_and_cleanup_preserve_recorded_state() {
-        assert_eq!(exact_identity_support(), ExactIdentitySupport::Complete);
         let fixture = Fixture::new();
         fixture.write("source", b"independent recovery bytes\n");
 
@@ -3345,7 +4361,6 @@ mod exact_state_tests {
                 fixture.endpoint("copy", &copy_path),
             )
             .expect("create independent copy");
-        assert_eq!(copy.source, source);
         assert_ne!(copy.copy.identity, source.identity);
         assert_eq!(copy.copy.content_hash, source.content_hash);
         assert_eq!(copy.copy.mode, source.mode);
@@ -3781,10 +4796,11 @@ mod exact_state_tests {
             &target_path,
         ) {
             DirectoryPublicationOutcome::VisibleDurabilityUnknown {
+                candidate,
                 published: Some(published),
                 source,
-                ..
             } => {
+                assert_eq!(candidate, candidate_inventory);
                 assert_eq!(published, candidate_inventory);
                 assert!(source.to_string().contains("SyncTargetParent"));
             }

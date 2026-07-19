@@ -4,7 +4,10 @@ use leptos_ui_kit_registry::{
     ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, canonical_kit_json, parse_kit_json_str,
 };
 
-use super::{empty_lock_json, planned_or_existing_kit_config_content, push_file_plan};
+use super::{
+    empty_lock_json, planned_or_existing_kit_config_content, push_file_plan,
+    read_canonical_install_lock, upsert_planned_install_lock,
+};
 use crate::patch::plan_index_html;
 use crate::path_safety::PlanningContext;
 use crate::{
@@ -156,18 +159,10 @@ fn plan_empty_state(
     let config_content = planned_or_existing_kit_config_content(context, files)?;
     let config = parse_kit_json_str(&config_content)?;
     let state_path = install_lock_path(&config);
-    if context.read_optional_string(&state_path)?.is_some() {
-        return Ok(());
-    }
-
-    let content = empty_lock_json(&config_content, &state_path)?;
-    push_file_plan(
-        files,
-        changes,
-        &state_path,
-        PlannedFileAction::Create,
-        content,
-        ChangeKind::WriteLockFile,
-    );
-    Ok(())
+    let content = match read_canonical_install_lock(context, &state_path)? {
+        Some((_, canonical)) => canonical,
+        None => empty_lock_json(&config_content, &state_path)?,
+    };
+    let force_publication = !files.is_empty();
+    upsert_planned_install_lock(context, files, changes, content, force_publication)
 }
