@@ -4,6 +4,7 @@ members = [
     "crates/leptos_ui_kit",
     "crates/leptos_ui_kit_cli",
     "crates/leptos_ui_kit_codegen",
+    "crates/leptos_ui_kit_codegen_platform",
     "crates/leptos_ui_kit_primitives",
     "crates/leptos_ui_kit_registry",
 ]
@@ -35,6 +36,7 @@ sha2 = "0.10.9"
 tempfile = "3.23.0"
 toml = "0.9.8"
 leptos_ui_kit_codegen = { version = "0.1.0", path = "crates/leptos_ui_kit_codegen" }
+leptos_ui_kit_codegen_platform = { version = "0.1.0", path = "crates/leptos_ui_kit_codegen_platform" }
 leptos_ui_kit_primitives = { version = "0.1.0", path = "crates/leptos_ui_kit_primitives" }
 leptos_ui_kit_registry = { version = "0.1.0", path = "crates/leptos_ui_kit_registry" }
 

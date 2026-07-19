@@ -1,0 +1,36 @@
+[package]
+name = "leptos_ui_kit_codegen_platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Audited capability-relative platform operations for leptos_ui_kit code generation."
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["src/lib.rs", "src/windows.rs"]
+
+[target.'cfg(windows)'.dependencies]
+fs_at = "0.2.1"
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemServices",
+    "Win32_System_WindowsProgramming",
+] }
+
+# This crate is the workspace's single audited operating-system FFI boundary.
+# Every consumer, including the transaction engine, continues to inherit the
+# workspace-wide `unsafe_code = "forbid"` policy.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

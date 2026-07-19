@@ -21,6 +21,10 @@ crate family.
   registry item loading.
 - `crates/leptos_ui_kit_codegen` owns dry-run planning, write transactions,
   path safety, CSS/module patching, lock metadata, and command envelope types.
+- `crates/leptos_ui_kit_codegen_platform` is the narrow audited Windows FFI
+  boundary for capability-relative transaction filesystem operations. It is
+  the only workspace crate permitted to contain unsafe code; consumers use its
+  safe handle-based API.
 - `crates/leptos_ui_kit_cli` owns the `leptos_ui_kit` binary, the
   `cargo leptos_ui_kit` entrypoint, and command output.
 - `crates/leptos_ui_kit_registry/registry` contains built-in registry items and

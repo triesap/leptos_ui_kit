@@ -58,6 +58,7 @@ rustix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 fs_at = "0.2.1"
+leptos_ui_kit_codegen_platform.workspace = true
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

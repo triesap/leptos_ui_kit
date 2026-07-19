@@ -1213,6 +1213,7 @@ dependencies = [
  "cap-std",
  "fs_at",
  "getrandom 0.3.4",
+ "leptos_ui_kit_codegen_platform",
  "leptos_ui_kit_registry",
  "rustix",
  "serde",
@@ -1220,6 +1221,14 @@ dependencies = [
  "sha2",
  "tempfile",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "leptos_ui_kit_codegen_platform"
+version = "0.1.0"
+dependencies = [
+ "fs_at",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
