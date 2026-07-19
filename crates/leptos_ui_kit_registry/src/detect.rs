@@ -9,7 +9,8 @@ use toml::Value as TomlValue;
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    RenderMode, WorkspaceMode, normalize_single_crate_project, parse_kit_json_str,
+    RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan, normalize_single_crate_project,
+    parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -24,6 +25,7 @@ pub enum DetectionError {
     MissingSourceRoot(PathBuf),
     UnsupportedProject(String),
     Config(ConfigError),
+    Registry(RegistryError),
 }
 
 impl fmt::Display for DetectionError {
@@ -40,6 +42,7 @@ impl fmt::Display for DetectionError {
             }
             Self::UnsupportedProject(reason) => write!(f, "unsupported project: {reason}"),
             Self::Config(error) => write!(f, "{error}"),
+            Self::Registry(error) => write!(f, "{error}"),
         }
     }
 }
@@ -49,6 +52,12 @@ impl std::error::Error for DetectionError {}
 impl From<ConfigError> for DetectionError {
     fn from(value: ConfigError) -> Self {
         Self::Config(value)
+    }
+}
+
+impl From<RegistryError> for DetectionError {
+    fn from(value: RegistryError) -> Self {
+        Self::Registry(value)
     }
 }
 
@@ -242,7 +251,7 @@ pub fn detect_cargo_plan_requirements(
     let manifest: TomlValue =
         toml::from_str(&cargo_toml).map_err(DetectionError::CargoTomlParse)?;
 
-    Ok(cargo_plan
+    Ok(normalize_cargo_plan(cargo_plan)?
         .iter()
         .map(|entry| dependency_requirement_for_cargo_plan(&manifest, entry))
         .collect())
@@ -336,16 +345,15 @@ fn source_matches_requirement(
     found: &DetectedDependencySource,
     required: &CargoPlanSource,
 ) -> bool {
-    match required.kind {
-        CargoPlanSourceKind::Version => {
-            found.kind == CargoPlanSourceKind::Version && found.version == required.version
-        }
-        CargoPlanSourceKind::Git => {
-            found.kind == CargoPlanSourceKind::Git
-                && found.url == required.url
-                && found.rev == required.rev
-        }
+    let found = CargoPlanSource {
+        kind: found.kind,
+        version: found.version.clone(),
+        url: found.url.clone(),
+        rev: found.rev.clone(),
     }
+    .normalized();
+    let required = required.normalized();
+    matches!((found, required), (Ok(found), Ok(required)) if found == required)
 }
 
 fn required_features_are_present(found: &[String], required: &[String]) -> bool {
@@ -555,6 +563,30 @@ web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
             crate_name: "web_ui_primitives".to_owned(),
             source: CargoPlanSource::version("0.1.0"),
             features: vec!["leptos".to_owned()],
+            required: true,
+        };
+
+        let requirement = dependency_requirement_for_cargo_plan(&manifest, &entry);
+
+        assert_eq!(requirement.status, DependencyStatus::Satisfied);
+    }
+
+    #[test]
+    fn dependency_requirement_uses_canonical_git_source_comparison() {
+        let manifest: TomlValue = toml::from_str(
+            r#"
+[dependencies]
+leptos = { git = "SSH://git@EXAMPLE.COM:22/Org/Repo/", rev = "ABCDEF0123456789ABCDEF0123456789ABCDEF01", features = ["csr"] }
+"#,
+        )
+        .expect("parse manifest");
+        let entry = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::git(
+                "ssh://git@example.com/Org/Repo",
+                "abcdef0123456789abcdef0123456789abcdef01",
+            ),
+            features: vec!["csr".to_owned()],
             required: true,
         };
 

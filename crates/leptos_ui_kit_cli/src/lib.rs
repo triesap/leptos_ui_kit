@@ -1000,7 +1000,12 @@ fn build_doctor_registry_snapshot(
     let mut expected_items = BTreeMap::new();
     let mut files_by_path = BTreeMap::new();
     let mut style_blocks_by_id = BTreeMap::new();
-    let mut cargo_plan = Vec::new();
+    let cargo_plan_entries = resolved
+        .iter()
+        .flat_map(|item| item.item.cargo_plan.iter().cloned())
+        .collect::<Vec<_>>();
+    let cargo_plan = leptos_ui_kit_registry::normalize_cargo_plan(&cargo_plan_entries)
+        .map_err(|error| error.to_string())?;
     let style_ids_by_item = resolved
         .iter()
         .map(|item| {
@@ -1020,8 +1025,6 @@ fn build_doctor_registry_snapshot(
         let item_id = format!("builtin:{}", item.item.name);
         resolved_names.insert(item.item.name.clone());
         resolved_order.push(item.item.name.clone());
-        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
-
         let mut files = Vec::new();
         for target in &item.targets.ui_files {
             let generated =
@@ -1757,18 +1760,6 @@ fn registry_dependency_checks(
             format!("failed to inspect registry dependency plan: {error}"),
         )],
     }
-}
-
-fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
-    for entry in entries {
-        let mut entry = entry.clone();
-        entry.features.sort();
-        entry.features.dedup();
-        if !plan.contains(&entry) {
-            plan.push(entry);
-        }
-    }
-    plan.sort();
 }
 
 fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) -> DoctorCheck {

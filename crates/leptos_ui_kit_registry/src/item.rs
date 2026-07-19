@@ -4,8 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::Error as _,
+    ser::{Error as _, SerializeMap},
+};
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::{
     LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION, THEME_CONTRACT_VERSION,
@@ -470,8 +475,16 @@ impl RegistryItem {
             }
         }
 
+        let mut cargo_crates = BTreeSet::new();
         for entry in &self.cargo_plan {
             entry.validate()?;
+            if !cargo_crates.insert(&entry.crate_name) {
+                return Err(RegistryError::InvalidValue {
+                    field: "cargoPlan[].crate",
+                    expected: "one entry per crate within a registry manifest".to_owned(),
+                    actual: entry.crate_name.clone(),
+                });
+            }
         }
 
         match self.kind {
@@ -687,21 +700,15 @@ impl CargoPlanEntry {
         validate_features("cargoPlan[].features", &self.features)?;
 
         match self.crate_name.as_str() {
-            "leptos" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", LEPTOS_VERSION)?;
-                expect_features("cargoPlan[].features", &["csr"], &self.features)
-            }
-            "leptos_router" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", LEPTOS_ROUTER_VERSION)?;
-                expect_features("cargoPlan[].features", &[], &self.features)
-            }
-            "web_ui_primitives" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", WEB_UI_PRIMITIVES_VERSION)?;
-                expect_features("cargoPlan[].features", &["leptos"], &self.features)
-            }
+            "leptos" => self
+                .source
+                .expect_current_version_if_version(LEPTOS_VERSION),
+            "leptos_router" => self
+                .source
+                .expect_current_version_if_version(LEPTOS_ROUTER_VERSION),
+            "web_ui_primitives" => self
+                .source
+                .expect_current_version_if_version(WEB_UI_PRIMITIVES_VERSION),
             value => Err(RegistryError::InvalidValue {
                 field: "cargoPlan[].crate",
                 expected: "leptos, leptos_router, or web_ui_primitives".to_owned(),
@@ -711,15 +718,11 @@ impl CargoPlanEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CargoPlanSource {
     pub kind: CargoPlanSourceKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
 }
 
@@ -742,58 +745,279 @@ impl CargoPlanSource {
         }
     }
 
-    fn validate(&self) -> Result<(), RegistryError> {
+    pub fn normalized(&self) -> Result<Self, RegistryError> {
         match self.kind {
             CargoPlanSourceKind::Version => {
                 if self.url.is_some() || self.rev.is_some() {
-                    return Err(RegistryError::InvalidValue {
-                        field: "cargoPlan[].source",
-                        expected: "version source without url or rev".to_owned(),
-                        actual: format!("{self:?}"),
-                    });
+                    return Err(invalid_cargo_source(
+                        "version source without url or rev",
+                        self,
+                    ));
                 }
-                if self.version.as_deref().is_none_or(str::is_empty) {
+                let Some(version) = self.version.as_deref() else {
                     return Err(RegistryError::InvalidValue {
                         field: "cargoPlan[].source.version",
-                        expected: "non-empty version".to_owned(),
-                        actual: String::new(),
+                        expected: "nonblank version".to_owned(),
+                        actual: "missing".to_owned(),
                     });
-                }
-                Ok(())
+                };
+                validate_non_empty_string("cargoPlan[].source.version", version)?;
+                Ok(Self::version(version))
             }
             CargoPlanSourceKind::Git => {
                 if self.version.is_some() {
-                    return Err(RegistryError::InvalidValue {
-                        field: "cargoPlan[].source",
-                        expected: "git source without version".to_owned(),
-                        actual: format!("{self:?}"),
-                    });
+                    return Err(invalid_cargo_source("git source without version", self));
                 }
-                if self.url.as_deref().is_none_or(str::is_empty) {
+                let Some(url) = self.url.as_deref() else {
                     return Err(RegistryError::InvalidValue {
                         field: "cargoPlan[].source.url",
-                        expected: "non-empty git url".to_owned(),
-                        actual: String::new(),
+                        expected: "canonical absolute HTTPS or SSH repository URL".to_owned(),
+                        actual: "missing".to_owned(),
                     });
-                }
-                let rev = self.rev.as_deref().unwrap_or_default();
-                validate_git_rev("cargoPlan[].source.rev", rev)
+                };
+                let Some(rev) = self.rev.as_deref() else {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source.rev",
+                        expected: "lowercase full 40-hex revision".to_owned(),
+                        actual: "missing".to_owned(),
+                    });
+                };
+                Ok(Self::git(normalize_git_url(url)?, normalize_git_rev(rev)?))
             }
         }
     }
 
-    fn expect_version(&self, field: &'static str, expected: &str) -> Result<(), RegistryError> {
-        match (self.kind, self.version.as_deref()) {
-            (CargoPlanSourceKind::Version, Some(version)) => {
-                expect_string(field, expected, version)
-            }
-            _ => Err(RegistryError::InvalidValue {
-                field,
-                expected: expected.to_owned(),
+    fn validate(&self) -> Result<(), RegistryError> {
+        if &self.normalized()? == self {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "cargoPlan[].source",
+                expected: "canonical Cargo source".to_owned(),
                 actual: format!("{self:?}"),
-            }),
+            })
         }
     }
+
+    fn expect_current_version_if_version(&self, expected: &str) -> Result<(), RegistryError> {
+        match self.kind {
+            CargoPlanSourceKind::Version => expect_string(
+                "cargoPlan[].source.version",
+                expected,
+                self.version.as_deref().unwrap_or_default(),
+            ),
+            CargoPlanSourceKind::Git => Ok(()),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum StrictCargoPlanSource {
+    Version { version: String },
+    Git { url: String, rev: String },
+}
+
+impl Serialize for CargoPlanSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let normalized = self.normalized().map_err(S::Error::custom)?;
+        let mut map = serializer.serialize_map(Some(match normalized.kind {
+            CargoPlanSourceKind::Version => 2,
+            CargoPlanSourceKind::Git => 3,
+        }))?;
+        match normalized.kind {
+            CargoPlanSourceKind::Version => {
+                map.serialize_entry("kind", "version")?;
+                map.serialize_entry(
+                    "version",
+                    normalized
+                        .version
+                        .as_deref()
+                        .expect("normalized version source has a version"),
+                )?;
+            }
+            CargoPlanSourceKind::Git => {
+                map.serialize_entry("kind", "git")?;
+                map.serialize_entry(
+                    "url",
+                    normalized
+                        .url
+                        .as_deref()
+                        .expect("normalized git source has a URL"),
+                )?;
+                map.serialize_entry(
+                    "rev",
+                    normalized
+                        .rev
+                        .as_deref()
+                        .expect("normalized git source has a revision"),
+                )?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CargoPlanSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let strict = StrictCargoPlanSource::deserialize(deserializer)?;
+        let source = match strict {
+            StrictCargoPlanSource::Version { version } => Self::version(version),
+            StrictCargoPlanSource::Git { url, rev } => Self::git(url, rev),
+        };
+        source.normalized().map_err(D::Error::custom)
+    }
+}
+
+fn invalid_cargo_source(expected: &str, source: &CargoPlanSource) -> RegistryError {
+    RegistryError::InvalidValue {
+        field: "cargoPlan[].source",
+        expected: expected.to_owned(),
+        actual: format!("{source:?}"),
+    }
+}
+
+fn normalize_git_rev(rev: &str) -> Result<String, RegistryError> {
+    if rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(rev.to_ascii_lowercase())
+    } else {
+        Err(RegistryError::InvalidValue {
+            field: "cargoPlan[].source.rev",
+            expected: "lowercase full 40-hex revision".to_owned(),
+            actual: rev.to_owned(),
+        })
+    }
+}
+
+fn normalize_git_url(input: &str) -> Result<String, RegistryError> {
+    let invalid = || RegistryError::InvalidValue {
+        field: "cargoPlan[].source.url",
+        expected: "canonical absolute HTTPS or SSH repository URL".to_owned(),
+        actual: input.to_owned(),
+    };
+    if input.is_empty()
+        || !input.is_ascii()
+        || input
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || input.contains(['%', '\\', '?', '#'])
+    {
+        return Err(invalid());
+    }
+
+    let (raw_authority, raw_path) = input
+        .split_once("://")
+        .and_then(|(_, authority_and_path)| {
+            authority_and_path
+                .find('/')
+                .map(|at| (&authority_and_path[..at], &authority_and_path[at + 1..]))
+        })
+        .ok_or_else(invalid)?;
+    let raw_segments = raw_path.split('/').collect::<Vec<_>>();
+    if raw_segments.is_empty()
+        || raw_segments.iter().enumerate().any(|(index, segment)| {
+            segment.is_empty() && index + 1 != raw_segments.len() || matches!(*segment, "." | "..")
+        })
+        || raw_segments
+            .last()
+            .is_some_and(|segment| segment.is_empty())
+            && raw_segments.len() == 1
+    {
+        return Err(invalid());
+    }
+
+    let parsed = Url::parse(input).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "https" | "ssh")
+        || parsed.host_str().is_none_or(str::is_empty)
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || raw_authority.matches('@').count() > 1
+        || (parsed.scheme() == "https" && raw_authority.contains('@'))
+        || (parsed.scheme() == "ssh"
+            && raw_authority
+                .split_once('@')
+                .is_some_and(|(username, _)| username.is_empty()))
+    {
+        return Err(invalid());
+    }
+
+    let path = parsed.path();
+    if path == "/" || !path.starts_with('/') {
+        return Err(invalid());
+    }
+    let segments = path[1..].split('/').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments.iter().enumerate().any(|(index, segment)| {
+            segment.is_empty() && index + 1 != segments.len() || matches!(*segment, "." | "..")
+        })
+        || segments.last().is_some_and(|segment| segment.is_empty()) && segments.len() == 1
+    {
+        return Err(invalid());
+    }
+
+    let mut normalized = parsed;
+    let normalized_host = normalized
+        .host_str()
+        .expect("validated URL has a host")
+        .to_ascii_lowercase();
+    normalized
+        .set_host(Some(&normalized_host))
+        .map_err(|_| invalid())?;
+    if matches!(
+        (normalized.scheme(), normalized.port()),
+        ("https", Some(443)) | ("ssh", Some(22))
+    ) {
+        normalized.set_port(None).map_err(|()| invalid())?;
+    }
+    if normalized.path().ends_with('/') {
+        let path = normalized.path().trim_end_matches('/').to_owned();
+        normalized.set_path(&path);
+    }
+    Ok(normalized.to_string())
+}
+
+pub fn normalize_cargo_plan(
+    entries: &[CargoPlanEntry],
+) -> Result<Vec<CargoPlanEntry>, RegistryError> {
+    let mut normalized = BTreeMap::<String, CargoPlanEntry>::new();
+    for entry in entries {
+        let mut entry = entry.clone();
+        entry.source = entry.source.normalized()?;
+        entry.features.sort();
+        entry.features.dedup();
+        entry.validate()?;
+
+        match normalized.entry(entry.crate_name.clone()) {
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let current = occupied.get_mut();
+                if current.source != entry.source {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source",
+                        expected: format!(
+                            "one identical normalized source for crate {}",
+                            current.crate_name
+                        ),
+                        actual: format!("{:?} versus {:?}", current.source, entry.source),
+                    });
+                }
+                current.required |= entry.required;
+                current.features.extend(entry.features);
+                current.features.sort();
+                current.features.dedup();
+            }
+        }
+    }
+    Ok(normalized.into_values().collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1639,37 +1863,6 @@ fn validate_features(field: &'static str, features: &[String]) -> Result<(), Reg
     Ok(())
 }
 
-fn expect_features(
-    field: &'static str,
-    expected: &[&str],
-    actual: &[String],
-) -> Result<(), RegistryError> {
-    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
-    let actual = actual.iter().map(String::as_str).collect::<BTreeSet<_>>();
-
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(RegistryError::InvalidValue {
-            field,
-            expected: expected.into_iter().collect::<Vec<_>>().join(", "),
-            actual: actual.into_iter().collect::<Vec<_>>().join(", "),
-        })
-    }
-}
-
-fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), RegistryError> {
-    if (7..=40).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(RegistryError::InvalidValue {
-            field,
-            expected: "7 to 40 hex characters".to_owned(),
-            actual: rev.to_owned(),
-        })
-    }
-}
-
 fn looks_like_local_path(source: &str) -> bool {
     source.ends_with(".json")
         || source.contains(std::path::MAIN_SEPARATOR)
@@ -1853,6 +2046,207 @@ mod tests {
         .expect("parse item");
 
         item.validate().expect("validate item");
+    }
+
+    #[test]
+    fn cargo_sources_round_trip_through_one_strict_normalizer() {
+        let version: CargoPlanSource = serde_json::from_value(serde_json::json!({
+            "kind": "version",
+            "version": "0.9.0-alpha"
+        }))
+        .expect("version source");
+        assert_eq!(version, CargoPlanSource::version("0.9.0-alpha"));
+        assert_eq!(
+            serde_json::to_value(&version).expect("serialize version"),
+            serde_json::json!({"kind": "version", "version": "0.9.0-alpha"})
+        );
+
+        let git: CargoPlanSource = serde_json::from_value(serde_json::json!({
+            "kind": "git",
+            "url": "HTTPS://GitHub.COM:443/Org/Repo.git/",
+            "rev": "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+        }))
+        .expect("git source");
+        assert_eq!(
+            git,
+            CargoPlanSource::git(
+                "https://github.com/Org/Repo.git",
+                "abcdef0123456789abcdef0123456789abcdef01"
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(&git).expect("serialize git"),
+            serde_json::json!({
+                "kind": "git",
+                "url": "https://github.com/Org/Repo.git",
+                "rev": "abcdef0123456789abcdef0123456789abcdef01"
+            })
+        );
+
+        let ssh = CargoPlanSource::git(
+            "ssh://git@EXAMPLE.COM:22/Org/Repo",
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .normalized()
+        .expect("normalize SSH");
+        assert_eq!(ssh.url.as_deref(), Some("ssh://git@example.com/Org/Repo"));
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://git@example.com:2222/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("nondefault port")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "https://example.com/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different transport")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://example.com/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different username")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://git@example.com/org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different path case")
+        );
+        assert_ne!(
+            git,
+            CargoPlanSource::git(
+                "https://github.com/Org/Repo",
+                "abcdef0123456789abcdef0123456789abcdef01"
+            )
+        );
+    }
+
+    #[test]
+    fn cargo_source_deserialization_rejects_null_cross_fields_and_unsafe_urls() {
+        for source in [
+            serde_json::json!({"kind": "version"}),
+            serde_json::json!({"kind": "version", "version": null}),
+            serde_json::json!({"kind": "version", "version": " "}),
+            serde_json::json!({"kind": "version", "version": "1", "url": "https://x/y"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y"}),
+            serde_json::json!({"kind": "git", "url": null, "rev": "0123456789abcdef0123456789abcdef01234567"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": null}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456789abcdef0123456789abcdef01234567", "version": "1"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456789abcdef0123456789abcdef01234567", "branch": "main"}),
+        ] {
+            assert!(
+                serde_json::from_value::<CargoPlanSource>(source.clone()).is_err(),
+                "{source}"
+            );
+        }
+
+        for url in [
+            "http://example.com/org/repo",
+            "git://example.com/org/repo",
+            "file:///tmp/repo",
+            "git@example.com:org/repo",
+            "./repo",
+            "https://example.com",
+            "https://@example.com/org/repo",
+            "https://user@example.com/org/repo",
+            "https://user:pass@example.com/org/repo",
+            "ssh://@example.com/org/repo",
+            "ssh://user:pass@example.com/org/repo",
+            "https://example.com/org//repo",
+            "https://example.com/org/./repo",
+            "https://example.com/org/../repo",
+            "https://example.com/org/%72epo",
+            "https://example.com/org/repo?branch=main",
+            "https://example.com/org/repo#main",
+            "https://example.com/org\\repo",
+            "https://example.com/org/répô",
+        ] {
+            let source = serde_json::json!({
+                "kind": "git",
+                "url": url,
+                "rev": "0123456789abcdef0123456789abcdef01234567"
+            });
+            assert!(
+                serde_json::from_value::<CargoPlanSource>(source).is_err(),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_plan_normalization_merges_features_required_and_rejects_conflicts() {
+        let first = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["csr".to_owned()],
+            required: false,
+        };
+        let second = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["nightly".to_owned(), "csr".to_owned()],
+            required: true,
+        };
+        let router = CargoPlanEntry {
+            crate_name: "leptos_router".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_ROUTER_VERSION),
+            features: Vec::new(),
+            required: false,
+        };
+        let normalized =
+            normalize_cargo_plan(&[router.clone(), second, first]).expect("normalize plan");
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|entry| entry.crate_name.as_str())
+                .collect::<Vec<_>>(),
+            ["leptos", "leptos_router"]
+        );
+        assert_eq!(normalized[0].features, ["csr", "nightly"]);
+        assert!(normalized[0].required);
+
+        let mut conflict = router;
+        conflict.source = CargoPlanSource::git(
+            "https://github.com/leptos-rs/leptos",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+        assert!(normalize_cargo_plan(&[normalized[1].clone(), conflict]).is_err());
+    }
+
+    #[test]
+    fn registry_item_rejects_duplicate_cargo_crates_before_resolution() {
+        let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
+        let entry = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["csr".to_owned()],
+            required: true,
+        };
+        item.cargo_plan = vec![entry.clone(), entry];
+
+        assert!(matches!(
+            item.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "cargoPlan[].crate",
+                ..
+            })
+        ));
     }
 
     #[test]

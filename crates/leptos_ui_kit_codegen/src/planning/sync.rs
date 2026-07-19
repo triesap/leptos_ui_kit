@@ -85,7 +85,7 @@ fn project_desired_state_from_resolved(
         .cloned()
         .collect();
     let mut lock = InstallLock::empty(config_hash);
-    let mut cargo_plan = Vec::new();
+    let mut cargo_plan_entries = Vec::new();
     let mut css_operations = Vec::new();
     let mut css_retirements = Vec::new();
 
@@ -168,9 +168,10 @@ fn project_desired_state_from_resolved(
                 style_blocks: installed_style_blocks,
             },
         );
-        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
+        cargo_plan_entries.extend(item.item.cargo_plan.iter().cloned());
     }
 
+    let cargo_plan = leptos_ui_kit_registry::normalize_cargo_plan(&cargo_plan_entries)?;
     let css_dependencies = managed_css_dependencies(&resolved_items);
     Ok(DesiredStateProjection {
         desired_items,
@@ -352,18 +353,6 @@ pub(crate) fn prepare_kit_config_write(
     let config = config_writer(config)?;
     let content = kit_config_to_json(&config)?;
     Ok((config, content))
-}
-
-fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
-    for entry in entries {
-        let mut entry = entry.clone();
-        entry.features.sort();
-        entry.features.dedup();
-        if !plan.contains(&entry) {
-            plan.push(entry);
-        }
-    }
-    plan.sort();
 }
 
 fn managed_css_dependencies(

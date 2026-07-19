@@ -150,7 +150,7 @@ impl ToolConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ToolSourceConfig {
     Git { url: String, rev: String },
 }
@@ -603,7 +603,11 @@ fn validate_desired_items(items: &[DesiredItemConfig]) -> Result<(), ConfigError
 }
 
 fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), ConfigError> {
-    if rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if rev.len() == 40
+        && rev
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         Ok(())
     } else {
         Err(ConfigError::InvalidValue {
@@ -1084,6 +1088,23 @@ mod tests {
         assert!(
             matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.url")
         );
+    }
+
+    #[test]
+    fn rejects_null_missing_cross_kind_and_unknown_tool_source_fields() {
+        for source in [
+            serde_json::json!({"kind": "git", "url": null, "rev": TEST_REV_A}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": null}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": TEST_REV_A, "version": "1"}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": TEST_REV_A, "branch": "main"}),
+        ] {
+            let mut config: serde_json::Value =
+                serde_json::from_str(&valid_config_json()).expect("parse fixture");
+            config["tool"]["source"] = source.clone();
+            let input = serde_json::to_string(&config).expect("serialize fixture");
+            assert!(parse_kit_json_str(&input).is_err(), "{source}");
+        }
     }
 
     #[test]
