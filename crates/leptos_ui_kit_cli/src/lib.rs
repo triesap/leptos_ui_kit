@@ -2062,8 +2062,9 @@ mod tests {
 
     use leptos_ui_kit_codegen::{extract_managed_css_block, lock_to_json, plan_init};
     use leptos_ui_kit_registry::{
-        canonical_kit_config, desired_builtin_button_item, kit_config_to_json,
-        kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
+        canonical_kit_config, desired_builtin_button_item, desired_builtin_spinner_item,
+        desired_builtin_tokens_item, kit_config_to_json, kit_config_with_desired_item,
+        load_built_in_registry_item, parse_kit_json_str,
     };
     use tempfile::tempdir;
 
@@ -2382,6 +2383,61 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("managed CSS block tokens matches the registry snapshot"));
         assert!(
             output.contains("install lock item membership equals the resolved registry closure")
+        );
+    }
+
+    #[test]
+    fn doctor_ignores_retired_application_owned_rust_outside_the_lock() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let button_path = root.join("src/components/ui/button.rs");
+        let module_path = root.join("src/components/ui/mod.rs");
+        let button_before = fs::read(&button_path).expect("read button source");
+        let module_before = fs::read(&module_path).expect("read UI module");
+
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read config"))
+                .expect("parse config");
+        config.items = vec![
+            desired_builtin_tokens_item(),
+            desired_builtin_spinner_item(),
+        ];
+        let config_json = kit_config_to_json(&config).expect("serialize retained config");
+        fs::write(&config_path, &config_json).expect("write retained config");
+
+        let mut lock = read_install_lock(root);
+        let retired = lock.items.remove("builtin:button").expect("retired button");
+        for file in retired.files {
+            assert_eq!(
+                lock.files_by_path.remove(&file.path).as_deref(),
+                Some("builtin:button")
+            );
+        }
+        for block in retired.style_blocks {
+            assert_eq!(
+                lock.style_blocks_by_id.remove(&block.block_id).as_deref(),
+                Some("builtin:button")
+            );
+        }
+        lock.project.config_hash = hash_content_bytes(config_json.as_bytes());
+        write_install_lock(root, &lock);
+
+        let css_path = root.join(DEFAULT_CSS_PATH);
+        let css = fs::read_to_string(&css_path).expect("read stylesheet");
+        fs::write(&css_path, remove_managed_css_block(css, "button")).expect("retire button CSS");
+
+        let doctor = build_doctor_output(root, true, false, false);
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert_eq!(
+            fs::read(button_path).expect("read retained button"),
+            button_before
+        );
+        assert_eq!(
+            fs::read(module_path).expect("read retained module"),
+            module_before
         );
     }
 

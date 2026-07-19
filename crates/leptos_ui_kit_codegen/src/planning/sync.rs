@@ -39,6 +39,11 @@ pub(crate) struct DesiredStateProjection {
     pub(crate) css_retirements: Vec<ManagedCssRetirement>,
 }
 
+pub(crate) struct ItemLockTransition<'a> {
+    pub(crate) prior: &'a InstallLock,
+    pub(crate) output: &'a mut InstallLock,
+}
+
 pub(crate) fn project_desired_state(
     config: &KitConfig,
     config_hash: String,
@@ -284,7 +289,10 @@ pub(crate) fn plan_sync_from_config(
             context,
             &mut files,
             &mut changes,
-            &mut lock,
+            ItemLockTransition {
+                prior: &prior_lock,
+                output: &mut lock,
+            },
             &config,
             item,
             &mut css_operations,
@@ -396,7 +404,7 @@ pub(crate) fn plan_built_in_item(
     context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
-    lock: &mut InstallLock,
+    locks: ItemLockTransition<'_>,
     config: &KitConfig,
     item: &leptos_ui_kit_registry::ResolvedRegistryItem,
     css_operations: &mut Vec<ManagedCssOperation>,
@@ -414,7 +422,7 @@ pub(crate) fn plan_built_in_item(
             context,
             files,
             changes,
-            lock,
+            locks.prior,
             &item_id,
             &logical_path,
             &generated,
@@ -426,7 +434,10 @@ pub(crate) fn plan_built_in_item(
             generated_hash: generated_hash.clone(),
             local_hash_at_install: generated_hash,
         });
-        lock.files_by_path.insert(logical_path, item_id.clone());
+        locks
+            .output
+            .files_by_path
+            .insert(logical_path, item_id.clone());
     }
 
     if !item.targets.ui_files.is_empty() {
@@ -476,11 +487,13 @@ pub(crate) fn plan_built_in_item(
             block_id: style.id.clone(),
             generated_hash,
         });
-        lock.style_blocks_by_id
+        locks
+            .output
+            .style_blocks_by_id
             .insert(style.id.clone(), item_id.clone());
     }
 
-    lock.items.insert(
+    locks.output.items.insert(
         item_id.clone(),
         InstalledItem {
             id: item_id.clone(),
@@ -556,4 +569,57 @@ pub(crate) fn plan_managed_stylesheet_batch_with_retirements(
         ChangeKind::UpdateCssBlock,
         None,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn plan_desired_ownership_cohort(
+    context: &PlanningContext,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    prior_lock: &InstallLock,
+    config: &KitConfig,
+    projection: &DesiredStateProjection,
+) -> Result<InstallLock, CodegenError> {
+    for item in &projection.resolved_items {
+        let item_id = built_in_item_id(&item.item.name);
+        for ui_file in &item.targets.ui_files {
+            let generated = read_built_in_registry_source(&ui_file.source)?;
+            let logical_path = format!("{}/{}", config.install.ui_dir, ui_file.path);
+            plan_generated_source_file(
+                context,
+                files,
+                changes,
+                prior_lock,
+                &item_id,
+                &logical_path,
+                &generated,
+            )?;
+        }
+    }
+
+    plan_managed_stylesheet_batch_with_retirements(
+        context,
+        files,
+        changes,
+        prior_lock,
+        config,
+        ManagedStylesheetProjection {
+            operations: &projection.css_operations,
+            dependencies: &projection.css_dependencies,
+            retirements: &projection.css_retirements,
+        },
+    )?;
+
+    let output_lock = projection.lock.clone();
+    let lock_path = install_lock_path(config);
+    output_lock.validate_at_path(Path::new(&lock_path))?;
+    let lock_json = lock_to_json_at_path(&output_lock, Path::new(&lock_path))?;
+    let force_lock_publication = !files.is_empty();
+    upsert_planned_install_lock(context, files, changes, lock_json, force_lock_publication)?;
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    validate_planned_write_paths(&paths)?;
+    Ok(output_lock)
 }

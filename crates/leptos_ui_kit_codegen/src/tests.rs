@@ -17,6 +17,8 @@ use leptos_ui_kit_registry::{
 };
 use serde::Serialize;
 
+use crate::planning::ItemLockTransition;
+
 use super::*;
 
 #[derive(Serialize)]
@@ -404,12 +406,16 @@ fn item_planner_supports_nested_ui_targets() {
     .expect("parse config");
     let item = nested_registry_item();
     let context = PlanningContext::open(root).expect("open planning context");
+    let prior_lock = lock.clone();
 
     let item_id = plan_built_in_item(
         &context,
         &mut files,
         &mut changes,
-        &mut lock,
+        ItemLockTransition {
+            prior: &prior_lock,
+            output: &mut lock,
+        },
         &config,
         &item,
         &mut css_operations,
@@ -781,6 +787,162 @@ fn internal_retirement_seam_is_atomic_on_default_and_custom_stylesheets() {
             planned_css.content
         );
     }
+}
+
+#[test]
+fn internal_desired_cohort_prunes_ownership_without_touching_app_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let protected_paths = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ];
+    let protected = protected_paths
+        .iter()
+        .map(|path| {
+            (
+                (*path).to_owned(),
+                fs::read(root.join(path)).expect("read source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    config.items = vec![desired_builtin_spinner_item()];
+    let config_content = kit_config_to_json(&config).expect("serialize retained config");
+    fs::write(&config_path, &config_content).expect("write retained config");
+    let prior_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+    )
+    .expect("parse installed lock");
+    let projection =
+        project_desired_state(&config, hash_bytes(config_content.as_bytes()), &prior_lock)
+            .expect("project desired ownership");
+    let context = PlanningContext::open(root).expect("open planning context");
+    let mut files = Vec::new();
+    let mut changes = Vec::new();
+    let output_lock = plan_desired_ownership_cohort(
+        &context,
+        &mut files,
+        &mut changes,
+        &prior_lock,
+        &config,
+        &projection,
+    )
+    .expect("plan desired ownership cohort");
+    let snapshot = context.finish_snapshot();
+
+    assert!(!output_lock.items.contains_key("builtin:button"));
+    assert!(
+        !output_lock
+            .files_by_path
+            .contains_key("src/components/ui/button.rs")
+    );
+    assert!(output_lock.items.contains_key("builtin:spinner"));
+    assert!(
+        files
+            .iter()
+            .all(|file| !protected_paths.contains(&file.path.as_str()))
+    );
+    assert_eq!(
+        files.last().expect("final lock target").path,
+        DEFAULT_KIT_LOCK_PATH
+    );
+
+    apply_planned_files_with_snapshot(
+        root,
+        &files,
+        &changes,
+        &snapshot,
+        Arc::new(FaultFs::passthrough()),
+    )
+    .expect("apply desired ownership cohort");
+    for (path, expected) in &protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read protected source"),
+            *expected
+        );
+    }
+    let applied_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read pruned lock"),
+    )
+    .expect("parse pruned lock");
+    assert_eq!(applied_lock, output_lock);
+
+    let readopt = plan_add(root, "button").expect("plan exact source re-adoption");
+    assert!(
+        !readopt
+            .files
+            .iter()
+            .any(|file| file.path == "src/components/ui/button.rs")
+    );
+    assert_eq!(
+        readopt
+            .lock
+            .files_by_path
+            .get("src/components/ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+    apply_add(root, "button").expect("apply exact source re-adoption");
+    assert_eq!(
+        fs::read(root.join("src/components/ui/button.rs")).expect("read re-adopted source"),
+        protected["src/components/ui/button.rs"]
+    );
+}
+
+#[test]
+fn untracked_exact_source_re_adopts_but_modified_source_has_recovery_guidance() {
+    let exact_dir = tempfile::tempdir().expect("exact tempdir");
+    let exact_root = exact_dir.path();
+    setup_empty_project(exact_root);
+    apply_init(exact_root).expect("init exact project");
+    let generated = read_built_in_registry_source("ui/button.rs").expect("read button source");
+    fs::write(exact_root.join("src/components/ui/button.rs"), &generated)
+        .expect("write exact app-owned source");
+
+    let exact = plan_add(exact_root, "button").expect("plan exact re-adoption");
+    assert!(
+        !exact
+            .files
+            .iter()
+            .any(|file| file.path == "src/components/ui/button.rs")
+    );
+    assert_eq!(
+        exact.lock.files_by_path.get("src/components/ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+
+    let modified_dir = tempfile::tempdir().expect("modified tempdir");
+    let modified_root = modified_dir.path();
+    setup_empty_project(modified_root);
+    apply_init(modified_root).expect("init modified project");
+    fs::write(
+        modified_root.join("src/components/ui/button.rs"),
+        "// application-owned\n",
+    )
+    .expect("write modified app-owned source");
+    let before = snapshot_project_files(modified_root);
+
+    let error = plan_add(modified_root, "button").expect_err("modified source must conflict");
+    assert!(
+        matches!(
+            &error,
+            CodegenError::UnsafePatch { path, reason }
+                if path == Path::new("src/components/ui/button.rs")
+                    && reason.contains("application-owned")
+                    && reason.contains("reconcile or move")
+        ),
+        "unexpected re-adoption error: {error}"
+    );
+    assert_eq!(snapshot_project_files(modified_root), before);
 }
 
 #[test]

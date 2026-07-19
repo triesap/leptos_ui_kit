@@ -94,8 +94,14 @@ pub(crate) fn plan_generated_source_file(
         );
     }
 
-    if context.read_optional_string(logical_path)?.is_some() {
-        return unsafe_patch(logical_path, "target exists but is not tracked in lock");
+    if let Some(current) = context.read_optional_string(logical_path)? {
+        if current == generated {
+            return Ok(());
+        }
+        return unsafe_patch(
+            logical_path,
+            "target is application-owned and differs from the current registry source; reconcile or move it before re-adding the item",
+        );
     }
 
     upsert_planned_file(

@@ -17,9 +17,9 @@ pub use sync::plan_sync;
 pub(crate) use sync::plan_sync_with_context;
 #[cfg(test)]
 pub(crate) use sync::{
-    ManagedStylesheetProjection, plan_built_in_item,
-    plan_managed_stylesheet_batch_with_retirements, plan_sync_with_config_writer,
-    project_desired_state,
+    ItemLockTransition, ManagedStylesheetProjection, plan_built_in_item,
+    plan_desired_ownership_cohort, plan_managed_stylesheet_batch_with_retirements,
+    plan_sync_with_config_writer, project_desired_state,
 };
 pub(crate) use sync::{plan_sync_from_config, prepare_kit_config_write};
 
