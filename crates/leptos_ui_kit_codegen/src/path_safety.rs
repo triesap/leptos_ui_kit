@@ -27,6 +27,58 @@ pub struct PreservedFileMode {
     pub posix_mode: Option<u32>,
 }
 
+/// A full-width filesystem identity.
+///
+/// Unix device and inode values are zero-extended. Windows identities retain
+/// the complete volume serial and 128-bit `FILE_ID_INFO` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ObjectIdentity {
+    namespace: [u8; 16],
+    object: [u8; 16],
+}
+
+impl ObjectIdentity {
+    pub(crate) const fn from_u64(namespace: u64, object: u64) -> Self {
+        Self::from_u128(namespace as u128, object as u128)
+    }
+
+    pub(crate) const fn from_u128(namespace: u128, object: u128) -> Self {
+        Self {
+            namespace: namespace.to_le_bytes(),
+            object: object.to_le_bytes(),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) const fn from_windows(
+        identity: leptos_ui_kit_codegen_platform::FileIdentity,
+    ) -> Self {
+        let mut namespace = [0_u8; 16];
+        let serial = identity.volume_serial_number.to_le_bytes();
+        let mut index = 0;
+        while index < serial.len() {
+            namespace[index] = serial[index];
+            index += 1;
+        }
+        Self {
+            namespace,
+            object: identity.file_id,
+        }
+    }
+
+    pub(crate) const fn namespace(self) -> [u8; 16] {
+        self.namespace
+    }
+
+    pub(crate) const fn namespace_u128(self) -> u128 {
+        u128::from_le_bytes(self.namespace)
+    }
+
+    pub(crate) const fn object_u128(self) -> u128 {
+        u128::from_le_bytes(self.object)
+    }
+}
+
 /// The exact supported state observed for a mutable project path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -42,19 +94,14 @@ pub enum PathPreimage {
 struct ProjectRootIdentity {
     requested_root: PathBuf,
     canonical_root: PathBuf,
-    device: u64,
-    inode: u64,
+    identity: ObjectIdentity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DirectoryIdentity {
-    device: u64,
-    inode: u64,
-}
+type DirectoryIdentity = ObjectIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExactRegularFileObservation {
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     byte_len: u64,
 }
 
@@ -95,7 +142,7 @@ impl PlanSnapshot {
         self.observations.is_empty()
     }
 
-    pub(crate) fn regular_file_identity(&self, logical_path: &str) -> Option<(u64, u64)> {
+    pub(crate) fn regular_file_identity(&self, logical_path: &str) -> Option<ObjectIdentity> {
         self.observations
             .get(logical_path)
             .and_then(|observation| observation.regular_file)
@@ -109,20 +156,18 @@ impl PlanSnapshot {
             .map(|regular_file| regular_file.byte_len)
     }
 
-    pub(crate) fn directory_identity(&self, logical_path: &str) -> Option<(u64, u64)> {
+    pub(crate) fn directory_identity(&self, logical_path: &str) -> Option<ObjectIdentity> {
         if logical_path.is_empty() {
-            return Some((self.root.device, self.root.inode));
+            return Some(self.root.identity);
         }
-        self.directories
-            .get(logical_path)
-            .map(|identity| (identity.device, identity.inode))
+        self.directories.get(logical_path).copied()
     }
 
-    pub(crate) fn directory_identities(&self) -> impl Iterator<Item = (&str, (u64, u64))> + '_ {
-        std::iter::once(("", (self.root.device, self.root.inode))).chain(
+    pub(crate) fn directory_identities(&self) -> impl Iterator<Item = (&str, ObjectIdentity)> + '_ {
+        std::iter::once(("", self.root.identity)).chain(
             self.directories
                 .iter()
-                .map(|(path, identity)| (path.as_str(), (identity.device, identity.inode))),
+                .map(|(path, identity)| (path.as_str(), *identity)),
         )
     }
 
@@ -200,7 +245,7 @@ impl PlanSnapshot {
                 path: context.root.canonical_root.clone(),
                 source,
             })?;
-        if metadata_identity(&metadata) != (self.root.device, self.root.inode) {
+        if metadata_identity(&metadata) != self.root.identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: context.root.canonical_root.clone(),
                 reason: "held project-root capability no longer has the planned identity"
@@ -244,7 +289,7 @@ impl PlanningContext {
         })?;
         ensure_directory_metadata(".", &metadata)?;
         let actual_identity = metadata_identity(&metadata);
-        if actual_identity != (root.device, root.inode) {
+        if actual_identity != root.identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: project_root.to_path_buf(),
                 reason: "project root changed while its capability was opened".to_owned(),
@@ -263,14 +308,14 @@ impl PlanningContext {
         &self.root.canonical_root
     }
 
-    pub(crate) fn project_identity(&self) -> (&Path, u64, u64) {
-        (&self.root.canonical_root, self.root.device, self.root.inode)
+    pub(crate) fn project_identity(&self) -> (&Path, ObjectIdentity) {
+        (&self.root.canonical_root, self.root.identity)
     }
 
     pub(crate) fn inspect_directory_identity(
         &self,
         logical_path: &str,
-    ) -> Result<Option<(u64, u64)>, CodegenError> {
+    ) -> Result<Option<ObjectIdentity>, CodegenError> {
         self.revalidate_project_root_identity()?;
         if logical_path.is_empty() {
             let metadata = self.dir.dir_metadata().map_err(|source| CodegenError::Io {
@@ -279,7 +324,7 @@ impl PlanningContext {
             })?;
             ensure_directory_metadata(".", &metadata)?;
             let identity = metadata_identity(&metadata);
-            if identity != (self.root.device, self.root.inode) {
+            if identity != self.root.identity {
                 return Err(CodegenError::ProjectRootChanged {
                     path: self.root.canonical_root.clone(),
                     reason: "held project-root capability no longer has the opened identity"
@@ -337,7 +382,7 @@ impl PlanningContext {
             source,
         })?;
         ensure_directory_metadata(".", &held)?;
-        if metadata_identity(&held) != (self.root.device, self.root.inode) {
+        if metadata_identity(&held) != self.root.identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: self.root.canonical_root.clone(),
                 reason: "held project-root capability no longer has the opened identity".to_owned(),
@@ -355,7 +400,7 @@ impl PlanningContext {
                 source,
             })?;
         ensure_directory_metadata(".", &metadata)?;
-        if metadata_identity(&metadata) != (self.root.device, self.root.inode) {
+        if metadata_identity(&metadata) != self.root.identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: self.root.canonical_root.clone(),
                 reason: "project root path no longer resolves to the opened identity".to_owned(),
@@ -466,7 +511,7 @@ impl PlanningContext {
     pub(crate) fn reopen_exact_directory(
         &self,
         logical_path: &str,
-        expected_identity: (u64, u64),
+        expected_identity: ObjectIdentity,
         expected_mode: PreservedFileMode,
     ) -> Result<Dir, CodegenError> {
         self.revalidate_project_root_identity()?;
@@ -575,7 +620,7 @@ impl PlanningContext {
     pub(crate) fn revalidate_auxiliary_identity(
         &self,
         logical_path: &str,
-        identity: (u64, u64),
+        identity: ObjectIdentity,
     ) -> Result<(), CodegenError> {
         let (parent, file_name) = self.open_parent(logical_path)?;
         let current = parent
@@ -824,10 +869,9 @@ impl PlanningContext {
                     "directory changed while it was opened without following",
                 );
             }
-            let (device, inode) = metadata_identity(&opened);
             self.record_directory_identity(
                 relative.to_string_lossy().into_owned(),
-                DirectoryIdentity { device, inode },
+                metadata_identity(&opened),
             )?;
         }
 
@@ -902,7 +946,7 @@ impl PlanningContext {
                     reason: error.to_string(),
                 }
             })?;
-            if metadata_identity(&metadata) != (expected_identity.device, expected_identity.inode) {
+            if metadata_identity(&metadata) != *expected_identity {
                 return Err(CodegenError::PreimageConflict {
                     path: directory.clone(),
                     reason: "controlled parent identity changed after planning".to_owned(),
@@ -1038,19 +1082,15 @@ fn open_project_root(project_root: &Path) -> io::Result<ProjectRootIdentity> {
             "project root is not a directory",
         ));
     }
-    let (device, inode) = metadata_identity(&metadata);
     Ok(ProjectRootIdentity {
         requested_root,
         canonical_root,
-        device,
-        inode,
+        identity: metadata_identity(&metadata),
     })
 }
 
 fn same_root(actual: &ProjectRootIdentity, expected: &ProjectRootIdentity) -> bool {
-    actual.canonical_root == expected.canonical_root
-        && actual.device == expected.device
-        && actual.inode == expected.inode
+    actual.canonical_root == expected.canonical_root && actual.identity == expected.identity
 }
 
 fn is_path_prefix(prefix: &str, path: &str) -> bool {
@@ -1153,8 +1193,8 @@ fn ensure_not_indirection(path: &str, metadata: &Metadata) -> Result<(), Codegen
     Ok(())
 }
 
-fn metadata_identity(metadata: &Metadata) -> (u64, u64) {
-    (MetadataExt::dev(metadata), MetadataExt::ino(metadata))
+fn metadata_identity(metadata: &Metadata) -> ObjectIdentity {
+    ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata))
 }
 
 fn preserved_mode(metadata: &Metadata) -> PreservedFileMode {
@@ -1230,7 +1270,18 @@ fn is_allowed_stylesheet_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PlanningContext, metadata_identity, preserved_mode};
+    use super::{ObjectIdentity, PlanningContext, metadata_identity, preserved_mode};
+
+    #[test]
+    fn object_identity_preserves_both_full_width_components() {
+        let namespace = u128::MAX - 1;
+        let object = (1_u128 << 127) | 0x0123_4567_89ab_cdef;
+        let identity = ObjectIdentity::from_u128(namespace, object);
+
+        assert_eq!(identity.namespace_u128(), namespace);
+        assert_eq!(identity.object_u128(), object);
+        assert_eq!(identity.namespace(), namespace.to_le_bytes());
+    }
 
     #[test]
     fn reopen_exact_directory_returns_a_fresh_matching_capability() {

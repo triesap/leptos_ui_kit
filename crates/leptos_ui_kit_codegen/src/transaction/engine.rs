@@ -6,7 +6,7 @@ use std::{
 use cap_fs_ext::{DirExt, MetadataExt};
 use cap_std::fs::Dir;
 
-use crate::path_safety::PlanningContext;
+use crate::path_safety::{ObjectIdentity, PlanningContext};
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, DEFAULT_KIT_LOCK_PATH, PathPreimage, PlanSnapshot,
     PlannedFile, PlannedFileAction, PreservedFileMode, lock_to_json_at_path,
@@ -3002,7 +3002,10 @@ fn discard_owned_residual(
     let removal = match binding.object() {
         OwnedResidualObjectV2::File(expected) => {
             let expected_observation = ExactFileMetadataObservation {
-                identity: (expected.identity().device(), expected.identity().inode()),
+                identity: ObjectIdentity::from_u128(
+                    expected.identity().namespace(),
+                    expected.identity().object(),
+                ),
                 byte_len: expected.byte_len(),
                 mode: PreservedFileMode {
                     readonly: expected.readonly(),
@@ -4390,7 +4393,11 @@ fn directory_matches(
     observed: &ExactDirectoryObservation,
     expected: &ExactDirectoryStateV2,
 ) -> bool {
-    observed.identity == (expected.identity().device(), expected.identity().inode())
+    observed.identity
+        == ObjectIdentity::from_u128(
+            expected.identity().namespace(),
+            expected.identity().object(),
+        )
         && observed.mode.readonly == expected.mode().readonly()
         && observed.mode.posix_mode == expected.mode().posix_mode()
 }
@@ -4400,7 +4407,11 @@ fn file_matches(
     expected: &ExactFileStateV2,
     link_count: Option<u64>,
 ) -> bool {
-    observed.identity == (expected.identity().device(), expected.identity().inode())
+    observed.identity
+        == ObjectIdentity::from_u128(
+            expected.identity().namespace(),
+            expected.identity().object(),
+        )
         && observed.content_hash == expected.state().content_hash().as_str()
         && observed.byte_len == expected.state().byte_len()
         && observed.mode.readonly == expected.state().readonly()
@@ -4549,7 +4560,10 @@ fn observe_directory_path(
                 source,
             })?;
         return Ok(ExactDirectoryObservation {
-            identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+            identity: ObjectIdentity::from_u64(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ),
             mode: preserved_directory_mode(&metadata),
             link_count: Some(MetadataExt::nlink(&metadata)),
         });

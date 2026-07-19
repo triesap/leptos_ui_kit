@@ -6,7 +6,7 @@ use std::{
 use cap_fs_ext::MetadataExt;
 use cap_std::fs::{Dir, Metadata};
 
-use crate::path_safety::PlanningContext;
+use crate::path_safety::{ObjectIdentity, PlanningContext};
 use crate::{CodegenError, PreservedFileMode};
 
 use super::authority::TransactionAuthority;
@@ -42,7 +42,7 @@ pub(super) struct ImmutableJournalStore<'a> {
     runtime: TransactionRuntime,
     project_root_path: PathBuf,
     project_root: ExactDirectoryObservation,
-    held_write_lock_identity: (u64, u64),
+    held_write_lock_identity: ObjectIdentity,
     write_lock_path: PathBuf,
     kit_path: PathBuf,
     workspace_path: PathBuf,
@@ -1096,7 +1096,7 @@ fn sync_exact_parent(
 
 fn directory_observation(metadata: &Metadata) -> ExactDirectoryObservation {
     ExactDirectoryObservation {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
     }

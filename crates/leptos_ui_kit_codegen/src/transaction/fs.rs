@@ -17,6 +17,7 @@ use cap_std::io_lifetimes::AsFilelike;
 use sha2::{Digest, Sha256};
 
 use crate::PreservedFileMode;
+use crate::path_safety::ObjectIdentity;
 
 /// A live capability for a file whose capability-relative `create_new` open
 /// completed successfully.
@@ -52,7 +53,7 @@ impl CreatedFile {
         self.exact_metadata
     }
 
-    pub(crate) fn identity(&self) -> (u64, u64) {
+    pub(crate) fn identity(&self) -> ObjectIdentity {
         self.exact_metadata
             .expect("verified created-file capability must retain exact metadata")
             .identity
@@ -205,7 +206,7 @@ pub(crate) const fn exact_identity_support() -> ExactIdentitySupport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactFileObservation {
-    pub identity: (u64, u64),
+    pub identity: ObjectIdentity,
     pub byte_len: u64,
     pub content_hash: String,
     pub mode: PreservedFileMode,
@@ -214,7 +215,7 @@ pub(crate) struct ExactFileObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExactFileMetadataObservation {
-    pub identity: (u64, u64),
+    pub identity: ObjectIdentity,
     pub byte_len: u64,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
@@ -234,7 +235,7 @@ pub(crate) struct ExactFileBytesRead {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExactDirectoryObservation {
-    pub identity: (u64, u64),
+    pub identity: ObjectIdentity,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
 }
@@ -258,7 +259,7 @@ pub(crate) enum ExactDirectoryEntryKind {
 pub(crate) struct ExactDirectoryEntry {
     pub name: OsString,
     pub kind: ExactDirectoryEntryKind,
-    pub identity: (u64, u64),
+    pub identity: ObjectIdentity,
     pub byte_len: u64,
     pub mode: PreservedFileMode,
     pub link_count: Option<u64>,
@@ -1077,7 +1078,7 @@ impl FsOps for SystemFs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegularMetadataState {
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     byte_len: u64,
     mode: PreservedFileMode,
     link_count: Option<u64>,
@@ -1085,7 +1086,7 @@ struct RegularMetadataState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DirectoryMetadataState {
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     mode: PreservedFileMode,
     link_count: Option<u64>,
 }
@@ -1164,7 +1165,7 @@ fn ensure_directory_metadata(metadata: &Metadata, path: &Path) -> io::Result<()>
 fn regular_metadata_state(metadata: &Metadata, path: &Path) -> io::Result<RegularMetadataState> {
     ensure_regular_metadata(metadata, path)?;
     Ok(RegularMetadataState {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
         byte_len: metadata.len(),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
@@ -1177,7 +1178,7 @@ fn directory_metadata_state(
 ) -> io::Result<DirectoryMetadataState> {
     ensure_directory_metadata(metadata, path)?;
     Ok(DirectoryMetadataState {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
     })
@@ -1685,7 +1686,10 @@ fn inventory_directory_exact_bounded_impl(
         entries.push(ExactDirectoryEntry {
             name: name.clone(),
             kind: directory_entry_kind(&metadata),
-            identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+            identity: ObjectIdentity::from_u64(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ),
             byte_len: metadata.len(),
             mode: preserved_mode(&metadata),
             link_count: Some(MetadataExt::nlink(&metadata)),
@@ -1693,8 +1697,7 @@ fn inventory_directory_exact_bounded_impl(
         let current = endpoint.directory.symlink_metadata(name)?;
         let current_state = (
             directory_entry_kind(&current),
-            MetadataExt::dev(&current),
-            MetadataExt::ino(&current),
+            ObjectIdentity::from_u64(MetadataExt::dev(&current), MetadataExt::ino(&current)),
             current.len(),
             preserved_mode(&current),
             Some(MetadataExt::nlink(&current)),
@@ -1703,8 +1706,7 @@ fn inventory_directory_exact_bounded_impl(
         if current_state
             != (
                 recorded.kind,
-                recorded.identity.0,
-                recorded.identity.1,
+                recorded.identity,
                 recorded.byte_len,
                 recorded.mode,
                 recorded.link_count,
@@ -1885,7 +1887,7 @@ fn relocate_noreplace_impl(
         destination_path,
     )
     .map_err(NoReplaceRelocationError::Io)?;
-    if owner_parent_state.identity.0 != destination_parent_state.identity.0 {
+    if owner_parent_state.identity.namespace() != destination_parent_state.identity.namespace() {
         return Err(NoReplaceRelocationError::CrossDevice);
     }
 
@@ -2342,7 +2344,10 @@ where
     match parent.symlink_metadata(name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(metadata)
-            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+            if ObjectIdentity::from_u64(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
         {
             // Another actor recreated the name after the exact object was
             // unlinked. It is not transaction-owned and must be preserved.
@@ -2449,7 +2454,10 @@ where
     match parent.symlink_metadata(name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(metadata)
-            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+            if ObjectIdentity::from_u64(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
         {
             Err(ExactRemovalError::mutated(
                 ExactRemovalPostName::Substituted,
@@ -2530,7 +2538,10 @@ where
     match endpoint.parent.symlink_metadata(endpoint.name) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Ok(metadata)
-            if (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)) != expected.identity =>
+            if ObjectIdentity::from_u64(
+                MetadataExt::dev(&metadata),
+                MetadataExt::ino(&metadata),
+            ) != expected.identity =>
         {
             Err(ExactRemovalError::mutated(
                 ExactRemovalPostName::Substituted,
@@ -2616,14 +2627,20 @@ fn opened_regular_file_metadata(file: &File) -> io::Result<ExactFileMetadataObse
         ));
     }
     Ok(ExactFileMetadataObservation {
-        identity: (MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)),
+        identity: ObjectIdentity::from_u64(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ),
         byte_len: metadata.len(),
         mode: preserved_mode(&metadata),
         link_count: Some(MetadataExt::nlink(&metadata)),
     })
 }
 
-pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn current_regular_file_identity(
+    parent: &Dir,
+    name: &Path,
+) -> io::Result<ObjectIdentity> {
     let metadata = parent.symlink_metadata(name)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -2638,7 +2655,10 @@ pub(crate) fn current_regular_file_identity(parent: &Dir, name: &Path) -> io::Re
             "controlled path is a Windows reparse point",
         ));
     }
-    Ok((MetadataExt::dev(&metadata), MetadataExt::ino(&metadata)))
+    Ok(ObjectIdentity::from_u64(
+        MetadataExt::dev(&metadata),
+        MetadataExt::ino(&metadata),
+    ))
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use cap_std::{
 };
 
 use crate::CodegenError;
-use crate::path_safety::PlanningContext;
+use crate::path_safety::{ObjectIdentity, PlanningContext};
 
 use super::fs::{CreatedFile, ExclusiveCreateFailure, FsOps, HardLinkEndpoint, SystemFs};
 use super::journal::{
@@ -44,9 +44,9 @@ const KIT_DIRECTORY_COMPONENTS: [&str; 4] = ["src", "components", "ui", "_kit"];
 pub struct WriteLock {
     path: PathBuf,
     file: Option<std::fs::File>,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     project_root: PathBuf,
-    project_identity: (u64, u64),
+    project_identity: ObjectIdentity,
 }
 
 struct PinnedKitDirectories {
@@ -267,14 +267,14 @@ impl WriteLock {
             kit_directory,
             opened,
         )?;
-        let (project_root, project_device, project_inode) = context.project_identity();
+        let (project_root, project_identity) = context.project_identity();
 
         let lock = Self {
             path: opened.path,
             file: Some(opened.file.into_std()),
             identity: opened.identity,
             project_root: project_root.to_path_buf(),
-            project_identity: (project_device, project_inode),
+            project_identity,
         };
         let transaction_namespace =
             lock.open_or_create_transaction_namespace(context, fs.as_ref())?;
@@ -283,8 +283,8 @@ impl WriteLock {
     }
 
     pub(crate) fn validate_context(&self, context: &PlanningContext) -> Result<(), CodegenError> {
-        let (project_root, device, inode) = context.project_identity();
-        if project_root != self.project_root || (device, inode) != self.project_identity {
+        let (project_root, project_identity) = context.project_identity();
+        if project_root != self.project_root || project_identity != self.project_identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: project_root.to_path_buf(),
                 reason: "write lock belongs to a different project identity".to_owned(),
@@ -318,7 +318,7 @@ impl WriteLock {
         validate_single_link_lock(context, &held, held_identity, &self.path)
     }
 
-    pub(crate) fn identity(&self) -> (u64, u64) {
+    pub(crate) fn identity(&self) -> ObjectIdentity {
         self.identity
     }
 
@@ -337,7 +337,7 @@ impl WriteLock {
 
 struct OpenedLock {
     file: File,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     path: PathBuf,
     locked: bool,
 }
@@ -370,7 +370,7 @@ fn validate_completed_opened_lock(
 fn validate_single_link_lock(
     context: &PlanningContext,
     held: &File,
-    expected_identity: (u64, u64),
+    expected_identity: ObjectIdentity,
     path: &Path,
 ) -> Result<(), CodegenError> {
     context.revalidate_auxiliary_identity(DEFAULT_KIT_WRITE_LOCK_PATH, expected_identity)?;
@@ -487,7 +487,7 @@ fn finish_deferred_held_lock_alias_cleanup(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    transactions_identity: (u64, u64),
+    transactions_identity: ObjectIdentity,
 ) -> Result<(), CodegenError> {
     for _ in 0..CLEANUP_QUIESCENCE_ATTEMPTS {
         match try_cleanup_transactions_directory_by_identity(
@@ -798,7 +798,7 @@ fn publish_initialized_lock(
 fn converge_on_expected_published_lock(
     context: &PlanningContext,
     fs: &dyn FsOps,
-    expected_identity: (u64, u64),
+    expected_identity: ObjectIdentity,
 ) -> Result<OpenedLock, CodegenError> {
     let opened = converge_on_published_lock(context, fs)?;
     if opened.identity != expected_identity {
@@ -815,7 +815,7 @@ fn best_effort_cleanup_failed_lock_publication(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    expected_lock_identity: (u64, u64),
+    expected_lock_identity: ObjectIdentity,
 ) {
     let Ok(Some(mut opened)) = open_existing_lock(context, fs) else {
         return;
@@ -903,7 +903,7 @@ impl CandidateKind {
 
 struct TransactionsDirectory {
     directory: Dir,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     path: PathBuf,
 }
 
@@ -912,30 +912,30 @@ struct Candidate {
     path: PathBuf,
     file: File,
     source_guard: Option<File>,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 }
 
-type FinishedCandidateHandles = (File, Option<File>, (u64, u64));
+type FinishedCandidateHandles = (File, Option<File>, ObjectIdentity);
 
 struct CandidateAlias {
     name: String,
     path: PathBuf,
     file: File,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     kind: CandidateKind,
 }
 
 struct CandidateInventory {
     name: String,
     path: PathBuf,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     kind: CandidateKind,
     recover_owner_mode: bool,
 }
 
 struct ClaimedCandidate {
     aliases: Vec<CandidateAlias>,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 }
 
 enum CandidateAliasCleanupOutcome {
@@ -964,7 +964,7 @@ enum StaleCandidateCleanupOutcome {
     Complete,
     #[cfg(windows)]
     HeldLockAliasDeferred {
-        transactions_identity: (u64, u64),
+        transactions_identity: ObjectIdentity,
     },
 }
 
@@ -1092,7 +1092,7 @@ fn best_effort_cleanup_created_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) {
     let path = context
         .project_root()
@@ -1523,7 +1523,7 @@ fn cleanup_stale_lock_candidates(
     context: &PlanningContext,
     fs: &dyn FsOps,
     kit_directory: &Dir,
-    held_lock_identity: (u64, u64),
+    held_lock_identity: ObjectIdentity,
 ) -> Result<StaleCandidateCleanupOutcome, CodegenError> {
     'quiescence: for _ in 0..CLEANUP_QUIESCENCE_ATTEMPTS {
         let Some(transactions) = open_existing_transactions_directory(context, fs, kit_directory)?
@@ -1558,7 +1558,7 @@ fn cleanup_stale_lock_candidates(
         }
         names.sort();
 
-        let mut inventory_by_identity = BTreeMap::<(u64, u64), Vec<CandidateInventory>>::new();
+        let mut inventory_by_identity = BTreeMap::<ObjectIdentity, Vec<CandidateInventory>>::new();
         for name in names {
             let kind = candidate_kind(&name).ok_or_else(|| invalid_transactions_entry(&name))?;
             let name = name
@@ -2014,7 +2014,7 @@ fn validate_candidate_inventory_mode(
 fn validate_inventoried_candidate_metadata(
     candidate: &CandidateInventory,
     metadata: &Metadata,
-    held_lock_identity: (u64, u64),
+    held_lock_identity: ObjectIdentity,
 ) -> Result<(), CodegenError> {
     ensure_safe_regular_metadata(candidate.path.to_string_lossy().as_ref(), metadata)?;
     if metadata_identity(metadata) != candidate.identity {
@@ -2044,7 +2044,7 @@ fn cleanup_claimed_candidate_alias(
     kit_directory: &Dir,
     transactions: &TransactionsDirectory,
     alias: &CandidateAlias,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     aliases_held_lock: bool,
 ) -> Result<CandidateAliasCleanupOutcome, CodegenError> {
     let first_attempt = try_cleanup_claimed_candidate_alias(
@@ -2101,7 +2101,7 @@ fn try_cleanup_claimed_candidate_alias(
     kit_directory: &Dir,
     transactions: &TransactionsDirectory,
     alias: &CandidateAlias,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     aliases_held_lock: bool,
 ) -> Result<CandidateAliasCleanupAttempt, CodegenError> {
     require_current_transactions_directory(context, fs, kit_directory, transactions)?;
@@ -2223,7 +2223,7 @@ fn cleanup_transactions_directory_after_drop(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     directory: Dir,
 ) -> Result<(), CodegenError> {
     drop(directory);
@@ -2234,7 +2234,7 @@ fn cleanup_transactions_directory_after_drop_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) -> Result<(), CodegenError> {
     let first_attempt =
         try_cleanup_transactions_directory_by_identity(fs, kit_directory, context, identity);
@@ -2275,7 +2275,7 @@ fn best_effort_cleanup_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) {
     let _ = try_cleanup_transactions_directory_by_identity(fs, kit_directory, context, identity);
 }
@@ -2284,7 +2284,7 @@ fn try_cleanup_transactions_directory_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) -> Result<TransactionsDirectoryCleanupOutcome, CodegenError> {
     let path = context
         .project_root()
@@ -2541,7 +2541,7 @@ fn cleanup_candidate(
     transactions: &TransactionsDirectory,
     name: &str,
     path: &Path,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) -> Result<(), CodegenError> {
     let first_attempt = try_cleanup_candidate(
         context,
@@ -2596,7 +2596,7 @@ fn try_cleanup_candidate(
     transactions: &TransactionsDirectory,
     name: &str,
     path: &Path,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
 ) -> Result<CandidateCleanupOutcome, CodegenError> {
     require_current_transactions_directory(context, fs, kit_directory, transactions)?;
     inspect_metadata(fs, path)?;
@@ -2684,7 +2684,7 @@ fn cleanup_shared_transactions_directory_after_drop_by_identity(
     fs: &dyn FsOps,
     kit_directory: &Dir,
     context: &PlanningContext,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     directory: Dir,
 ) -> Result<(), CodegenError> {
     drop(directory);
@@ -2906,9 +2906,17 @@ fn validate_optional_mode(
     expected: u32,
     path: &Path,
 ) -> Result<(), CodegenError> {
-    match actual {
-        Some(actual) => validate_mode(actual, expected, path.to_string_lossy().as_ref()),
-        None => Ok(()),
+    #[cfg(unix)]
+    {
+        match actual {
+            Some(actual) => validate_mode(actual, expected, path.to_string_lossy().as_ref()),
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (actual, expected, path);
+        Ok(())
     }
 }
 
@@ -3031,7 +3039,7 @@ fn read_bounded_cap_file(file: &mut File, path: &Path) -> Result<Vec<u8>, Codege
     Ok(content)
 }
 
-fn file_identity(file: &File, path: &Path) -> Result<(u64, u64), CodegenError> {
+fn file_identity(file: &File, path: &Path) -> Result<ObjectIdentity, CodegenError> {
     let metadata = file.metadata().map_err(|source| CodegenError::Io {
         path: path.to_path_buf(),
         source,
@@ -3040,8 +3048,8 @@ fn file_identity(file: &File, path: &Path) -> Result<(u64, u64), CodegenError> {
     Ok(metadata_identity(&metadata))
 }
 
-fn metadata_identity(metadata: &Metadata) -> (u64, u64) {
-    (MetadataExt::dev(metadata), MetadataExt::ino(metadata))
+fn metadata_identity(metadata: &Metadata) -> ObjectIdentity {
+    ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata))
 }
 
 fn ensure_safe_directory_metadata(path: &str, metadata: &Metadata) -> Result<(), CodegenError> {

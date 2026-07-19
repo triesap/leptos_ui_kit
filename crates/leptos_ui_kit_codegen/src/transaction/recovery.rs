@@ -5,7 +5,7 @@ use std::{io, path::Path};
 use cap_fs_ext::MetadataExt;
 use cap_std::fs::Metadata;
 
-use crate::path_safety::PlanningContext;
+use crate::path_safety::{ObjectIdentity, PlanningContext};
 use crate::{CodegenError, PreservedFileMode};
 
 use super::engine::{
@@ -1074,7 +1074,7 @@ fn transaction_outcome(outcome: FinalizationOutcomeV2) -> TransactionOutcome {
 
 fn directory_observation(metadata: &Metadata) -> ExactDirectoryObservation {
     ExactDirectoryObservation {
-        identity: (MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
+        identity: ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata)),
         mode: preserved_mode(metadata),
         link_count: Some(MetadataExt::nlink(metadata)),
     }

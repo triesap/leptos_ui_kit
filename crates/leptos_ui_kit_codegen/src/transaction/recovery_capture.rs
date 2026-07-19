@@ -17,6 +17,8 @@ use std::{
 
 use cap_std::fs::Dir;
 
+#[cfg(test)]
+use crate::path_safety::ObjectIdentity;
 use crate::{CodegenError, path_safety::PlanningContext};
 
 use super::fs::{
@@ -324,7 +326,10 @@ fn file_metadata_object(
         )
     })?;
     ExactFileMetadataV2::new(
-        ObjectIdentityV2::new(observation.identity.0, observation.identity.1),
+        ObjectIdentityV2::from_u128(
+            observation.identity.namespace_u128(),
+            observation.identity.object_u128(),
+        ),
         observation.byte_len,
         observation.mode.readonly,
         observation.mode.posix_mode,
@@ -985,7 +990,7 @@ mod tests {
 
     fn file_observation(object: u64) -> ExactFileObservation {
         ExactFileObservation {
-            identity: (1, object),
+            identity: ObjectIdentity::from_u64(1, object),
             byte_len: object,
             content_hash: format!("sha256:{object:064x}"),
             mode: PreservedFileMode {
@@ -1056,7 +1061,7 @@ mod tests {
         .expect("matching inventory file");
 
         let mut substituted = observation;
-        substituted.identity = (1, 8);
+        substituted.identity = ObjectIdentity::from_u64(1, 8);
         assert!(
             require_file_entry_matches(
                 &entry,
@@ -1077,7 +1082,7 @@ mod tests {
         let entry = ExactDirectoryEntry {
             name: "directory".into(),
             kind: ExactDirectoryEntryKind::Directory,
-            identity: (1, 2),
+            identity: ObjectIdentity::from_u64(1, 2),
             byte_len: 0,
             mode,
             link_count: Some(2),

@@ -43,6 +43,7 @@ use super::runtime::{
     TransitionKey, TransitionWindow,
 };
 use crate::PreservedFileMode;
+use crate::path_safety::ObjectIdentity;
 
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -151,7 +152,7 @@ impl Error for JournalStoreError {
 pub(super) struct JournalStoreCapabilities<'a> {
     project_root_path: &'a Path,
     project_root: ExactDirectoryObservation,
-    held_write_lock_identity: (u64, u64),
+    held_write_lock_identity: ObjectIdentity,
     write_lock: HardLinkEndpoint<'a>,
     workspace_parent: DirectoryEndpoint<'a>,
     workspace: Option<DirectoryEndpoint<'a>>,
@@ -161,7 +162,7 @@ impl<'a> JournalStoreCapabilities<'a> {
     pub(super) fn active(
         project_root_path: &'a Path,
         project_root: ExactDirectoryObservation,
-        held_write_lock_identity: (u64, u64),
+        held_write_lock_identity: ObjectIdentity,
         write_lock: HardLinkEndpoint<'a>,
         workspace_parent: DirectoryEndpoint<'a>,
         workspace: DirectoryEndpoint<'a>,
@@ -179,7 +180,7 @@ impl<'a> JournalStoreCapabilities<'a> {
     pub(super) fn finalization_only(
         project_root_path: &'a Path,
         project_root: ExactDirectoryObservation,
-        held_write_lock_identity: (u64, u64),
+        held_write_lock_identity: ObjectIdentity,
         write_lock: HardLinkEndpoint<'a>,
         workspace_parent: DirectoryEndpoint<'a>,
     ) -> Self {
@@ -202,7 +203,7 @@ impl<'a> JournalStoreCapabilities<'a> {
 pub(super) struct JournalDiscoveryCapabilities<'a> {
     project_root_path: &'a Path,
     project_root: ExactDirectoryObservation,
-    held_write_lock_identity: (u64, u64),
+    held_write_lock_identity: ObjectIdentity,
     write_lock: HardLinkEndpoint<'a>,
     workspace_parent: DirectoryEndpoint<'a>,
 }
@@ -211,7 +212,7 @@ impl<'a> JournalDiscoveryCapabilities<'a> {
     pub(super) fn new(
         project_root_path: &'a Path,
         project_root: ExactDirectoryObservation,
-        held_write_lock_identity: (u64, u64),
+        held_write_lock_identity: ObjectIdentity,
         write_lock: HardLinkEndpoint<'a>,
         workspace_parent: DirectoryEndpoint<'a>,
     ) -> Self {
@@ -4926,7 +4927,11 @@ impl<'a> JournalRecoveryStore<'a> {
         let metadata_matches = match expected.state {
             ExpectedWorkspaceOwnerState::File(exact) => {
                 observed.artifact != OwnerArtifactKindV2::Directory
-                    && entry.identity == (exact.identity().device(), exact.identity().inode())
+                    && entry.identity
+                        == ObjectIdentity::from_u128(
+                            exact.identity().namespace(),
+                            exact.identity().object(),
+                        )
                     && entry.byte_len == exact.state().byte_len()
                     && entry.mode.readonly == exact.state().readonly()
                     && entry.mode.posix_mode == exact.state().posix_mode()
@@ -4934,7 +4939,11 @@ impl<'a> JournalRecoveryStore<'a> {
             }
             ExpectedWorkspaceOwnerState::Directory(exact) => {
                 observed.artifact == OwnerArtifactKindV2::Directory
-                    && entry.identity == (exact.identity().device(), exact.identity().inode())
+                    && entry.identity
+                        == ObjectIdentity::from_u128(
+                            exact.identity().namespace(),
+                            exact.identity().object(),
+                        )
                     && entry.mode.readonly == exact.mode().readonly()
                     && entry.mode.posix_mode == exact.mode().posix_mode()
             }
@@ -5034,7 +5043,10 @@ impl<'a> JournalRecoveryStore<'a> {
             ));
         }
         let entry = &observed.entry;
-        let identity = ObjectIdentityV2::new(entry.identity.0, entry.identity.1);
+        let identity = ObjectIdentityV2::from_u128(
+            entry.identity.namespace_u128(),
+            entry.identity.object_u128(),
+        );
         let link_count = entry.link_count.ok_or_else(|| {
             JournalStoreError::invalid(
                 &entry.path,
@@ -6199,7 +6211,7 @@ struct InventoryFile {
     sequence: u64,
     name: String,
     path: PathBuf,
-    identity: (u64, u64),
+    identity: ObjectIdentity,
     byte_len: u64,
     mode: PreservedFileMode,
     link_count: Option<u64>,
@@ -6676,7 +6688,10 @@ pub(super) fn exact_file(
     observation: &ExactFileObservation,
 ) -> Result<ExactFileStateV2, JournalModelError> {
     ExactFileStateV2::new(
-        ObjectIdentityV2::new(observation.identity.0, observation.identity.1),
+        ObjectIdentityV2::from_u128(
+            observation.identity.namespace_u128(),
+            observation.identity.object_u128(),
+        ),
         FileStateV2::new(
             Sha256Digest::parse(&observation.content_hash)?,
             observation.byte_len,
@@ -6693,7 +6708,10 @@ pub(super) fn exact_directory(
     observation: &ExactDirectoryObservation,
 ) -> Result<ExactDirectoryStateV2, JournalModelError> {
     ExactDirectoryStateV2::new(
-        ObjectIdentityV2::new(observation.identity.0, observation.identity.1),
+        ObjectIdentityV2::from_u128(
+            observation.identity.namespace_u128(),
+            observation.identity.object_u128(),
+        ),
         DirectoryModeV2::new(observation.mode.readonly, observation.mode.posix_mode)?,
         observation
             .link_count
@@ -6701,8 +6719,8 @@ pub(super) fn exact_directory(
     )
 }
 
-fn file_identity(exact: &ExactFileStateV2) -> (u64, u64) {
-    (exact.identity().device(), exact.identity().inode())
+fn file_identity(exact: &ExactFileStateV2) -> ObjectIdentity {
+    ObjectIdentity::from_u128(exact.identity().namespace(), exact.identity().object())
 }
 
 pub(super) fn exact_file_observation(exact: &ExactFileStateV2) -> ExactFileObservation {
@@ -7101,7 +7119,7 @@ mod tests {
         ));
     }
 
-    fn observation(identity: (u64, u64), links: u64) -> ExactFileObservation {
+    fn observation(identity: ObjectIdentity, links: u64) -> ExactFileObservation {
         ExactFileObservation {
             identity,
             byte_len: 17,
@@ -7117,7 +7135,7 @@ mod tests {
     fn inventory_child(
         name: impl Into<std::ffi::OsString>,
         kind: ExactDirectoryEntryKind,
-        identity: (u64, u64),
+        identity: ObjectIdentity,
         mode: u32,
     ) -> ExactDirectoryEntry {
         ExactDirectoryEntry {
@@ -7136,7 +7154,7 @@ mod tests {
     fn top_level_inventory(entries: Vec<ExactDirectoryEntry>) -> ExactDirectoryInventory {
         ExactDirectoryInventory {
             directory: ExactDirectoryObservation {
-                identity: (1, 2),
+                identity: ObjectIdentity::from_u64(1, 2),
                 mode: PreservedFileMode {
                     readonly: false,
                     posix_mode: platform_mode(PRIVATE_DIRECTORY_MODE),
@@ -7157,13 +7175,13 @@ mod tests {
             inventory_child(
                 workspace_name,
                 ExactDirectoryEntryKind::Directory,
-                (1, 12),
+                ObjectIdentity::from_u64(1, 12),
                 PRIVATE_DIRECTORY_MODE,
             ),
             inventory_child(
                 intent_name,
                 ExactDirectoryEntryKind::RegularFile,
-                (1, 13),
+                ObjectIdentity::from_u64(1, 13),
                 PRIVATE_FILE_MODE,
             ),
         ]);
@@ -7191,13 +7209,13 @@ mod tests {
             inventory_child(
                 transaction_directory_name(&first),
                 ExactDirectoryEntryKind::Directory,
-                (1, 20),
+                ObjectIdentity::from_u64(1, 20),
                 PRIVATE_DIRECTORY_MODE,
             ),
             inventory_child(
                 bootstrap_intent_name(&second),
                 ExactDirectoryEntryKind::RegularFile,
-                (1, 21),
+                ObjectIdentity::from_u64(1, 21),
                 PRIVATE_FILE_MODE,
             ),
         ]);
@@ -7211,7 +7229,7 @@ mod tests {
         let workspace = inventory_child(
             transaction_directory_name(&first),
             ExactDirectoryEntryKind::Directory,
-            (1, 22),
+            ObjectIdentity::from_u64(1, 22),
             PRIVATE_DIRECTORY_MODE,
         );
         let duplicate = top_level_inventory(vec![workspace.clone(), workspace]);
@@ -7230,7 +7248,7 @@ mod tests {
         let reserved_v1 = top_level_inventory(vec![inventory_child(
             "transaction-v1-4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
             ExactDirectoryEntryKind::Directory,
-            (1, 30),
+            ObjectIdentity::from_u64(1, 30),
             PRIVATE_DIRECTORY_MODE,
         )]);
         assert!(
@@ -7244,13 +7262,13 @@ mod tests {
             inventory_child(
                 ".transactions",
                 ExactDirectoryEntryKind::Directory,
-                (1, 31),
+                ObjectIdentity::from_u64(1, 31),
                 PRIVATE_DIRECTORY_MODE,
             ),
             inventory_child(
                 transaction_directory_name(&transaction_id),
                 ExactDirectoryEntryKind::Directory,
-                (1, 32),
+                ObjectIdentity::from_u64(1, 32),
                 PRIVATE_DIRECTORY_MODE,
             ),
         ]);
@@ -7270,7 +7288,7 @@ mod tests {
         let inventory = top_level_inventory(vec![inventory_child(
             std::ffi::OsString::from_vec(vec![0xff]),
             ExactDirectoryEntryKind::RegularFile,
-            (1, 40),
+            ObjectIdentity::from_u64(1, 40),
             PRIVATE_FILE_MODE,
         )]);
         assert!(
@@ -7283,7 +7301,7 @@ mod tests {
 
     #[test]
     fn publication_world_requires_exact_link_topology() {
-        let prepared = observation((7, 11), 1);
+        let prepared = observation(ObjectIdentity::from_u64(7, 11), 1);
         assert!(matches!(
             classify_candidate_world(Some(prepared.clone()), None),
             ObservedCandidateWorld::PreparedOnly { .. }
@@ -7293,17 +7311,17 @@ mod tests {
             ObservedCandidateWorld::PublishedOnly { .. }
         ));
 
-        let partial = observation((7, 11), 2);
+        let partial = observation(ObjectIdentity::from_u64(7, 11), 2);
         let published = partial.clone();
         assert!(matches!(
             authenticate_expected_world(Some(partial), Some(published), &prepared),
             ObservedCandidateWorld::LinkedAliases { .. }
         ));
 
-        let substituted = observation((7, 12), 2);
+        let substituted = observation(ObjectIdentity::from_u64(7, 12), 2);
         assert!(matches!(
             authenticate_expected_world(
-                Some(observation((7, 11), 2)),
+                Some(observation(ObjectIdentity::from_u64(7, 11), 2)),
                 Some(substituted),
                 &prepared,
             ),

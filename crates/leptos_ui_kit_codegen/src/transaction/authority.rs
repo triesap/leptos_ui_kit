@@ -2,7 +2,7 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
-use crate::path_safety::PlanningContext;
+use crate::path_safety::{ObjectIdentity, PlanningContext};
 use crate::{CodegenError, PreservedFileMode};
 
 use super::fs::FsOps;
@@ -51,7 +51,7 @@ impl<'a> TransactionAuthority<'a> {
         let mode = expected_parent.mode();
         let directory = self.context.reopen_exact_directory(
             logical_parent,
-            (identity.device(), identity.inode()),
+            ObjectIdentity::from_u128(identity.namespace(), identity.object()),
             PreservedFileMode {
                 readonly: mode.readonly(),
                 posix_mode: mode.posix_mode(),
