@@ -574,12 +574,12 @@ fn rust_string_literals(input: &str) -> Vec<String> {
             continue;
         }
 
-        if bytes[index] == b'r' {
-            if let Some((literal, next)) = parse_raw_rust_string(bytes, index) {
-                literals.push(literal);
-                index = next;
-                continue;
-            }
+        if bytes[index] == b'r'
+            && let Some((literal, next)) = parse_raw_rust_string(bytes, index)
+        {
+            literals.push(literal);
+            index = next;
+            continue;
         }
 
         if bytes[index] == b'"' {

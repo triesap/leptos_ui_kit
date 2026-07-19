@@ -11,8 +11,9 @@ use std::{
 use leptos_ui_kit_registry::{
     ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, SCHEMA_VERSION, TOOL_GIT_URL,
     ToolSourceConfig, canonical_kit_json, canonical_tool_config, desired_builtin_button_item,
-    kit_config_to_json, kit_config_with_desired_item, parse_kit_json_str,
-    read_built_in_registry_source, resolve_built_in_registry_items,
+    desired_builtin_dialog_item, desired_builtin_spinner_item, kit_config_to_json,
+    kit_config_with_desired_item, parse_kit_json_str, read_built_in_registry_source,
+    resolve_built_in_registry_items,
 };
 use serde::Serialize;
 
@@ -583,6 +584,123 @@ fn sync_plan_installs_declared_button_without_writes() {
             "builtin:button".to_owned()
         ]
     );
+}
+
+#[test]
+fn desired_projection_is_exact_for_empty_retained_and_retired_closures() {
+    let empty_config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+    let empty_lock = InstallLock::empty(hash_bytes(b"empty"));
+    let empty = project_desired_state(&empty_config, hash_bytes(b"empty"), &empty_lock)
+        .expect("project empty desired state");
+
+    assert!(empty.desired_items.is_empty());
+    assert!(empty.resolved_items.is_empty());
+    assert!(empty.retained_item_ids.is_empty());
+    assert!(empty.retired_item_ids.is_empty());
+    assert!(empty.lock.items.is_empty());
+    assert!(empty.lock.files_by_path.is_empty());
+    assert!(empty.lock.style_blocks_by_id.is_empty());
+    assert!(empty.item_ids.is_empty());
+    assert!(empty.cargo_plan.is_empty());
+    assert!(empty.css_operations.is_empty());
+    assert!(empty.css_dependencies.is_empty());
+
+    let mut installed_config = empty_config.clone();
+    installed_config.items = vec![desired_builtin_button_item(), desired_builtin_dialog_item()];
+    let installed = project_desired_state(&installed_config, hash_bytes(b"installed"), &empty.lock)
+        .expect("project installed state");
+    assert_eq!(
+        installed
+            .desired_items
+            .iter()
+            .map(|item| item.item_name())
+            .collect::<Vec<_>>(),
+        ["tokens", "dialog", "spinner", "button"]
+    );
+
+    let mut retained_config = empty_config;
+    retained_config.items = vec![desired_builtin_spinner_item()];
+    let retained =
+        project_desired_state(&retained_config, hash_bytes(b"retained"), &installed.lock)
+            .expect("project retained state");
+
+    assert_eq!(retained.item_ids, ["builtin:tokens", "builtin:spinner"]);
+    assert_eq!(
+        retained.retained_item_ids,
+        BTreeSet::from(["builtin:spinner".to_owned(), "builtin:tokens".to_owned()])
+    );
+    assert_eq!(
+        retained.retired_item_ids,
+        BTreeSet::from(["builtin:button".to_owned(), "builtin:dialog".to_owned()])
+    );
+    assert_eq!(
+        retained
+            .lock
+            .items
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["builtin:spinner", "builtin:tokens"]
+    );
+    assert_eq!(
+        retained
+            .lock
+            .files_by_path
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["src/components/ui/spinner.rs"]
+    );
+    assert_eq!(
+        retained
+            .lock
+            .style_blocks_by_id
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["spinner", "tokens"]
+    );
+    assert_eq!(
+        retained
+            .css_operations
+            .iter()
+            .map(|operation| operation.block_id.as_str())
+            .collect::<Vec<_>>(),
+        ["tokens", "spinner"]
+    );
+}
+
+#[test]
+fn desired_projection_checkpoint_does_not_enable_public_retirement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let original_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read original stylesheet");
+
+    let mut config = parse_kit_json_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+    )
+    .expect("parse config");
+    config.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize retained config"),
+    );
+
+    let plan = plan_sync(root).expect("plan non-destructive sync");
+
+    assert!(plan.lock.items.contains_key("builtin:button"));
+    assert!(
+        !plan
+            .files
+            .iter()
+            .any(|file| file.path == "styles/kit.css" && file.content != original_css)
+    );
+    assert!(root.join("src/components/ui/button.rs").is_file());
 }
 
 #[test]

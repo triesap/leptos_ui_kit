@@ -179,11 +179,37 @@ impl BuiltInRegistrySnapshot {
         &self,
         names: &[String],
     ) -> Result<Vec<&BuiltInRegistryItemSnapshot>, SnapshotError> {
-        let mut seen = BTreeSet::new();
-        let mut resolved = Vec::new();
+        let mut closure = BTreeSet::new();
         for name in names {
-            self.collect_item_closure(name, &mut seen, &mut resolved)?;
+            self.collect_item_closure(name, &mut closure)?;
         }
+
+        let mut resolved_names = BTreeSet::new();
+        let mut resolved = Vec::with_capacity(closure.len());
+        while resolved.len() < closure.len() {
+            let next = closure.iter().find(|name| {
+                !resolved_names.contains(*name)
+                    && self.items[*name]
+                        .item
+                        .registry_dependencies
+                        .iter()
+                        .all(|dependency| resolved_names.contains(dependency))
+            });
+            let Some(next) = next else {
+                let unresolved = closure
+                    .iter()
+                    .find(|name| !resolved_names.contains(*name))
+                    .expect("an incomplete closure has an unresolved item");
+                return Err(SnapshotError::InvalidRegistryCatalog {
+                    logical_path: REGISTRY_ROOT_PATH.to_owned(),
+                    source: RegistryError::DependencyCycle(unresolved.clone()),
+                });
+            };
+            let next = next.clone();
+            resolved_names.insert(next.clone());
+            resolved.push(&self.items[&next]);
+        }
+
         Ok(resolved)
     }
 
@@ -205,11 +231,10 @@ impl BuiltInRegistrySnapshot {
         self.schemas.get(logical_path)
     }
 
-    fn collect_item_closure<'a>(
-        &'a self,
+    fn collect_item_closure(
+        &self,
         name: &str,
         seen: &mut BTreeSet<String>,
-        resolved: &mut Vec<&'a BuiltInRegistryItemSnapshot>,
     ) -> Result<(), SnapshotError> {
         if !seen.insert(name.to_owned()) {
             return Ok(());
@@ -219,9 +244,8 @@ impl BuiltInRegistrySnapshot {
             .get(name)
             .ok_or_else(|| SnapshotError::ItemNotFound(name.to_owned()))?;
         for dependency in &item.item.registry_dependencies {
-            self.collect_item_closure(dependency, seen, resolved)?;
+            self.collect_item_closure(dependency, seen)?;
         }
-        resolved.push(item);
         Ok(())
     }
 

@@ -60,7 +60,7 @@ use path_safety::{PlanningContext, capture_plan_snapshot};
 #[cfg(test)]
 use planning::{
     built_in_item_id, desired_builtin_item, plan_add_with_config_writer, plan_built_in_item,
-    plan_init_with_config_provider, plan_sync_with_config_writer,
+    plan_init_with_config_provider, plan_sync_with_config_writer, project_desired_state,
 };
 #[cfg(test)]
 use transaction::{

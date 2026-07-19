@@ -4,8 +4,9 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH, KitConfig, kit_config_for_write, kit_config_to_json,
-    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
+    CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH, DesiredItemConfig, KitConfig, ResolvedRegistryItem,
+    kit_config_for_write, kit_config_to_json, parse_kit_json_str, read_built_in_registry_source,
+    resolve_built_in_registry_items,
 };
 
 use super::{
@@ -22,6 +23,131 @@ use crate::{
     PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, patch_components_mod,
     patch_ui_mod, reconcile_managed_css_blocks_at_path, validate_planned_write_paths,
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct DesiredStateProjection {
+    pub(crate) desired_items: Vec<DesiredItemConfig>,
+    pub(crate) resolved_items: Vec<ResolvedRegistryItem>,
+    pub(crate) retained_item_ids: BTreeSet<String>,
+    pub(crate) retired_item_ids: BTreeSet<String>,
+    pub(crate) lock: InstallLock,
+    pub(crate) item_ids: Vec<String>,
+    pub(crate) cargo_plan: Vec<CargoPlanEntry>,
+    pub(crate) css_operations: Vec<ManagedCssOperation>,
+    pub(crate) css_dependencies: Vec<ManagedCssDependency>,
+}
+
+pub(crate) fn project_desired_state(
+    config: &KitConfig,
+    config_hash: String,
+    prior_lock: &InstallLock,
+) -> Result<DesiredStateProjection, CodegenError> {
+    let requested_names = config
+        .items
+        .iter()
+        .map(|item| item.item_name().to_owned())
+        .collect::<Vec<_>>();
+    let resolved_items = resolve_built_in_registry_items(&requested_names)?;
+    project_desired_state_from_resolved(config, config_hash, prior_lock, resolved_items)
+}
+
+fn project_desired_state_from_resolved(
+    config: &KitConfig,
+    config_hash: String,
+    prior_lock: &InstallLock,
+    resolved_items: Vec<ResolvedRegistryItem>,
+) -> Result<DesiredStateProjection, CodegenError> {
+    let desired_items = resolved_items
+        .iter()
+        .map(|item| desired_builtin_item(&item.item.name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let item_ids = resolved_items
+        .iter()
+        .map(|item| built_in_item_id(&item.item.name))
+        .collect::<Vec<_>>();
+    let desired_item_ids = item_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let prior_item_ids = prior_lock.items.keys().cloned().collect::<BTreeSet<_>>();
+    let retained_item_ids = desired_item_ids
+        .intersection(&prior_item_ids)
+        .cloned()
+        .collect();
+    let retired_item_ids = prior_item_ids
+        .difference(&desired_item_ids)
+        .cloned()
+        .collect();
+    let mut lock = InstallLock::empty(config_hash);
+    let mut cargo_plan = Vec::new();
+    let mut css_operations = Vec::new();
+
+    for item in &resolved_items {
+        let item_id = built_in_item_id(&item.item.name);
+        let mut installed_files = Vec::new();
+        let mut installed_style_blocks = Vec::new();
+
+        for ui_file in &item.targets.ui_files {
+            let generated = read_built_in_registry_source(&ui_file.source)?;
+            let logical_path = format!("{}/{}", config.install.ui_dir, ui_file.path);
+            let generated_hash = hash_bytes(generated.as_bytes());
+            installed_files.push(InstalledFile {
+                path: logical_path.clone(),
+                kind: "rust".to_owned(),
+                generated_hash: generated_hash.clone(),
+                local_hash_at_install: generated_hash,
+            });
+            lock.files_by_path.insert(logical_path, item_id.clone());
+        }
+
+        for style in &item.targets.style_blocks {
+            let generated = read_built_in_registry_source(&style.source)?;
+            let generated_hash = hash_bytes(generated.as_bytes());
+            css_operations.push(ManagedCssOperation {
+                item_id: item_id.clone(),
+                block_id: style.id.clone(),
+                role: match item.item.kind {
+                    leptos_ui_kit_registry::RegistryItemKind::Foundation => {
+                        ManagedCssBlockRole::Foundation
+                    }
+                    leptos_ui_kit_registry::RegistryItemKind::Ui => ManagedCssBlockRole::Component,
+                },
+                generated,
+            });
+            installed_style_blocks.push(InstalledStyleBlock {
+                css_path: config.styles.css.clone(),
+                block_id: style.id.clone(),
+                generated_hash,
+            });
+            lock.style_blocks_by_id
+                .insert(style.id.clone(), item_id.clone());
+        }
+
+        lock.items.insert(
+            item_id.clone(),
+            InstalledItem {
+                id: item_id,
+                name: item.item.name.clone(),
+                source: "builtin".to_owned(),
+                version: item.item.version.clone(),
+                content_hash: item.content_hash.clone(),
+                files: installed_files,
+                style_blocks: installed_style_blocks,
+            },
+        );
+        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
+    }
+
+    let css_dependencies = managed_css_dependencies(&resolved_items);
+    Ok(DesiredStateProjection {
+        desired_items,
+        resolved_items,
+        retained_item_ids,
+        retired_item_ids,
+        lock,
+        item_ids,
+        cargo_plan,
+        css_operations,
+        css_dependencies,
+    })
+}
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
     plan_sync_with_config_writer(project_root, kit_config_for_write)
@@ -81,20 +207,14 @@ pub(crate) fn plan_sync_from_config(
     config_writer: KitConfigWriter,
 ) -> Result<SyncPlan, CodegenError> {
     let diagnostics = Vec::new();
-    let mut requested_names = config
-        .items
-        .iter()
-        .map(|item| item.item_name().to_owned())
-        .collect::<Vec<_>>();
-    requested_names.sort();
-    let resolved_items = resolve_built_in_registry_items(&requested_names)?;
-    let resolved_desired_items = resolved_items
-        .iter()
-        .map(|item| desired_builtin_item(&item.item.name))
-        .collect::<Result<Vec<_>, _>>()?;
+    let original_config_hash = hash_bytes(config_content.as_bytes());
+    let lock_path = install_lock_path(&config);
+    let mut lock = load_or_empty_lock(context, &lock_path, original_config_hash.clone())?;
+    let prior_lock = lock.clone();
+    let mut desired_projection = project_desired_state(&config, original_config_hash, &prior_lock)?;
 
-    if config.items != resolved_desired_items {
-        config.items = resolved_desired_items;
+    if config.items != desired_projection.desired_items {
+        config.items = desired_projection.desired_items.clone();
         (config, config_content) = prepare_kit_config_write(config, config_writer)?;
         upsert_planned_file(
             context,
@@ -108,16 +228,20 @@ pub(crate) fn plan_sync_from_config(
     }
 
     let config_hash = hash_bytes(config_content.as_bytes());
-    let lock_path = install_lock_path(&config);
-    let mut lock = load_or_empty_lock(context, &lock_path, config_hash.clone())?;
-    let prior_lock = lock.clone();
+    desired_projection.lock.project.config_hash = config_hash.clone();
+    debug_assert_eq!(desired_projection.desired_items, config.items);
+    debug_assert_eq!(
+        desired_projection.retained_item_ids.len() + desired_projection.retired_item_ids.len(),
+        prior_lock.items.len()
+    );
+    debug_assert_eq!(desired_projection.lock.project.config_hash, config_hash);
     lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();
-    let mut cargo_plan = Vec::new();
+    let cargo_plan = desired_projection.cargo_plan.clone();
     let mut css_operations = Vec::new();
-    let css_dependencies = managed_css_dependencies(&resolved_items);
+    let css_dependencies = desired_projection.css_dependencies.clone();
 
-    for item in &resolved_items {
+    for item in &desired_projection.resolved_items {
         let item_id = plan_built_in_item(
             context,
             &mut files,
@@ -128,8 +252,9 @@ pub(crate) fn plan_sync_from_config(
             &mut css_operations,
         )?;
         item_ids.push(item_id);
-        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
     }
+    debug_assert_eq!(item_ids, desired_projection.item_ids);
+    debug_assert_eq!(css_operations, desired_projection.css_operations);
 
     plan_managed_stylesheet_batch(
         context,

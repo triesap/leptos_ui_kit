@@ -3096,6 +3096,23 @@ mod tests {
     }
 
     #[test]
+    fn resolution_uses_stable_lexically_ready_topological_order() {
+        let first = resolve_built_in_registry_items(&["button".to_owned(), "dialog".to_owned()])
+            .expect("resolve independent families");
+        let second = resolve_built_in_registry_items(&["dialog".to_owned(), "button".to_owned()])
+            .expect("resolve reversed independent families");
+        let names = |items: &[ResolvedRegistryItem]| {
+            items
+                .iter()
+                .map(|item| item.item.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(names(&first), ["tokens", "dialog", "spinner", "button"]);
+        assert_eq!(names(&second), names(&first));
+    }
+
+    #[test]
     fn graph_rejects_unknown_registry_dependencies() {
         let item = item_with_name_and_target("button", "button.rs", "button", &["missing"]);
 
