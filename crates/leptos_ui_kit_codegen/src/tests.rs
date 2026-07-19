@@ -2300,8 +2300,17 @@ fn managed_css_operation(
     role: ManagedCssBlockRole,
     declaration: &str,
 ) -> ManagedCssOperation {
+    managed_css_operation_for_item(&format!("builtin:{block_id}"), block_id, role, declaration)
+}
+
+fn managed_css_operation_for_item(
+    item_id: &str,
+    block_id: &str,
+    role: ManagedCssBlockRole,
+    declaration: &str,
+) -> ManagedCssOperation {
     ManagedCssOperation {
-        item_id: format!("builtin:{block_id}"),
+        item_id: item_id.to_owned(),
         block_id: block_id.to_owned(),
         role,
         generated: managed_css_block(block_id, declaration),
@@ -2329,22 +2338,23 @@ fn managed_css_retirement(
 fn tracked_css_lock(css_path: &str, blocks: &[(&ManagedCssOperation, &str)]) -> InstallLock {
     let mut lock = InstallLock::empty(hash_bytes(b"config"));
     for (operation, baseline) in blocks {
-        lock.items.insert(
-            operation.item_id.clone(),
-            InstalledItem {
+        let item = lock
+            .items
+            .entry(operation.item_id.clone())
+            .or_insert_with(|| InstalledItem {
                 id: operation.item_id.clone(),
                 name: operation.block_id.clone(),
                 source: "builtin".to_owned(),
                 version: SCHEMA_VERSION.to_owned(),
                 content_hash: hash_bytes(operation.item_id.as_bytes()),
                 files: Vec::new(),
-                style_blocks: vec![InstalledStyleBlock {
-                    css_path: css_path.to_owned(),
-                    block_id: operation.block_id.clone(),
-                    generated_hash: hash_bytes(baseline.as_bytes()),
-                }],
-            },
-        );
+                style_blocks: Vec::new(),
+            });
+        item.style_blocks.push(InstalledStyleBlock {
+            css_path: css_path.to_owned(),
+            block_id: operation.block_id.clone(),
+            generated_hash: hash_bytes(baseline.as_bytes()),
+        });
         lock.style_blocks_by_id
             .insert(operation.block_id.clone(), operation.item_id.clone());
     }
@@ -2492,6 +2502,125 @@ fn css_batch_relocates_safe_late_foundation_and_is_idempotent() {
         first.find("leptos-ui-kit:start tokens").expect("tokens")
             < first.find("--kit-button-gap: 0.75rem").expect("override")
     );
+}
+
+#[test]
+fn css_batch_relocates_multiple_foundation_cohorts_in_canonical_manifest_order() {
+    let palette = managed_css_operation_for_item(
+        "builtin:palette",
+        "palette",
+        ManagedCssBlockRole::Foundation,
+        "--palette: light;",
+    );
+    let palette_dark = managed_css_operation_for_item(
+        "builtin:palette",
+        "palette-dark",
+        ManagedCssBlockRole::Foundation,
+        "--palette-dark: dark;",
+    );
+    let tokens = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens",
+        ManagedCssBlockRole::Foundation,
+        "--token: one;",
+    );
+    let tokens_motion = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens-motion",
+        ManagedCssBlockRole::Foundation,
+        "--motion: two;",
+    );
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let existing = format!(
+        "{}/* app-owned one */\n{}{}/* app-owned two */\n{}{}",
+        tokens_motion.generated,
+        button.generated,
+        palette_dark.generated,
+        tokens.generated,
+        palette.generated,
+    );
+    let lock = tracked_css_lock(
+        "styles/kit.css",
+        &[
+            (&palette, &palette.generated),
+            (&palette_dark, &palette_dark.generated),
+            (&tokens, &tokens.generated),
+            (&tokens_motion, &tokens_motion.generated),
+            (&button, &button.generated),
+        ],
+    );
+    let operations = [palette, palette_dark, tokens, tokens_motion, button];
+    let dependencies = [
+        managed_css_dependency("palette", "button"),
+        managed_css_dependency("palette-dark", "button"),
+        managed_css_dependency("tokens", "button"),
+        managed_css_dependency("tokens-motion", "button"),
+    ];
+
+    let first = reconcile_managed_css_blocks_at_path(
+        &existing,
+        "styles/kit.css",
+        &lock,
+        &operations,
+        &dependencies,
+    )
+    .expect("relocate foundation cohorts");
+    let second = reconcile_managed_css_blocks_at_path(
+        &first,
+        "styles/kit.css",
+        &lock,
+        &operations,
+        &dependencies,
+    )
+    .expect("repeat foundation cohort reconciliation");
+    let ranges =
+        inspect_managed_css_blocks_at_path(&first, "styles/kit.css").expect("inspect blocks");
+
+    assert_eq!(ranges["palette"].end, ranges["palette-dark"].start);
+    assert_eq!(ranges["palette-dark"].end, ranges["tokens"].start);
+    assert_eq!(ranges["tokens"].end, ranges["tokens-motion"].start);
+    assert!(ranges["tokens-motion"].end <= ranges["button"].start);
+    assert_eq!(first, second);
+    assert_eq!(
+        unmanaged_css(&first, "styles/kit.css"),
+        unmanaged_css(&existing, "styles/kit.css")
+    );
+}
+
+#[test]
+fn css_batch_rejects_a_noncontiguous_multi_style_item_cohort() {
+    let first = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens",
+        ManagedCssBlockRole::Foundation,
+        "--token: one;",
+    );
+    let interloper = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let second = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens-motion",
+        ManagedCssBlockRole::Foundation,
+        "--motion: two;",
+    );
+
+    let error = reconcile_managed_css_blocks_at_path(
+        "",
+        "styles/kit.css",
+        &InstallLock::empty(hash_bytes(b"config")),
+        &[first, interloper, second],
+        &[],
+    )
+    .expect_err("split item cohort must fail");
+
+    assert_unsafe_patch_path(error, "styles/kit.css");
 }
 
 #[test]

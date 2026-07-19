@@ -26,7 +26,7 @@
     },
     "name": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*$"
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
     },
     "kind": {
       "enum": [
@@ -83,7 +83,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "pattern": "^[a-z][a-z0-9-]*$"
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
               },
               "required": {
                 "type": "boolean"
@@ -171,7 +171,7 @@
               },
               "id": {
                 "type": "string",
-                "pattern": "^[a-z][a-z0-9-]*$"
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
               }
             }
           }
@@ -183,7 +183,7 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*$"
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
       }
     },
     "cargoPlan": {
@@ -284,6 +284,13 @@
           },
           "styles": {
             "minItems": 1
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "styles": {
+            "maxItems": 1
           }
         }
       }

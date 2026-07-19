@@ -452,7 +452,7 @@ impl RegistryItem {
         }
 
         for style in &self.styles {
-            style.validate(&self.name)?;
+            style.validate()?;
             if !targets.insert(format!("css-block:{}", style.target.id)) {
                 return Err(RegistryError::DuplicateTarget(style.target.id.clone()));
             }
@@ -475,7 +475,19 @@ impl RegistryItem {
         }
 
         match self.kind {
-            RegistryItemKind::Ui => Ok(()),
+            RegistryItemKind::Ui => {
+                if self.styles.len() > 1 {
+                    return Err(RegistryError::InvalidValue {
+                        field: "styles",
+                        expected: "zero or one managed CSS style for a UI item".to_owned(),
+                        actual: format!("{} style targets", self.styles.len()),
+                    });
+                }
+                if let Some(style) = self.styles.first() {
+                    expect_string("styles[0].target.id", &self.name, &style.target.id)?;
+                }
+                Ok(())
+            }
             RegistryItemKind::Foundation => {
                 if !self.files.is_empty() {
                     return Err(RegistryError::InvalidValue {
@@ -490,6 +502,21 @@ impl RegistryItem {
                         expected: "at least one managed CSS style for a foundation item".to_owned(),
                         actual: "empty array".to_owned(),
                     });
+                }
+                expect_string("styles[0].target.id", &self.name, &self.styles[0].target.id)?;
+                let prefix = format!("{}-", self.name);
+                for style in self.styles.iter().skip(1) {
+                    let Some(suffix) = style.target.id.strip_prefix(&prefix) else {
+                        return Err(RegistryError::InvalidValue {
+                            field: "styles[].target.id",
+                            expected: format!(
+                                "{} followed by a nonempty kebab-case suffix",
+                                prefix
+                            ),
+                            actual: style.target.id.clone(),
+                        });
+                    };
+                    validate_kebab_name("styles[].target.id suffix", suffix)?;
                 }
                 Ok(())
             }
@@ -618,9 +645,9 @@ pub struct RegistryItemStyle {
 }
 
 impl RegistryItemStyle {
-    fn validate(&self, item_name: &str) -> Result<(), RegistryError> {
+    fn validate(&self) -> Result<(), RegistryError> {
         validate_registry_source_path_with_extension("styles[].source", &self.source, "css")?;
-        self.target.validate(item_name)
+        self.target.validate()
     }
 }
 
@@ -632,8 +659,8 @@ pub struct RegistryStyleTarget {
 }
 
 impl RegistryStyleTarget {
-    fn validate(&self, item_name: &str) -> Result<(), RegistryError> {
-        expect_string("styles[].target.id", item_name, &self.id)
+    fn validate(&self) -> Result<(), RegistryError> {
+        validate_kebab_name("styles[].target.id", &self.id)
     }
 }
 
@@ -1110,6 +1137,8 @@ fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryErro
 pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, RegistryError> {
     let mut by_name = BTreeMap::new();
     let mut targets = BTreeSet::new();
+    let mut sources = BTreeSet::new();
+    let mut exports = BTreeSet::new();
 
     for item in items {
         item.validate()?;
@@ -1121,68 +1150,82 @@ pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, Re
         }
 
         for file in &item.files {
+            if !sources.insert(file.source.clone()) {
+                return Err(RegistryError::DuplicateTarget(format!(
+                    "source:{}",
+                    file.source
+                )));
+            }
             if !targets.insert(format!("ui:{}", file.target.path)) {
                 return Err(RegistryError::DuplicateTarget(file.target.path.clone()));
+            }
+            for export in &file.target.exports {
+                if !exports.insert(export.clone()) {
+                    return Err(RegistryError::DuplicateTarget(format!("export:{export}")));
+                }
             }
         }
 
         for style in &item.styles {
+            if !sources.insert(style.source.clone()) {
+                return Err(RegistryError::DuplicateTarget(format!(
+                    "source:{}",
+                    style.source
+                )));
+            }
             if !targets.insert(format!("css-block:{}", style.target.id)) {
                 return Err(RegistryError::DuplicateTarget(style.target.id.clone()));
             }
         }
     }
 
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut order = Vec::new();
+    let mut dependent_names = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut remaining_dependencies = BTreeMap::<String, usize>::new();
+    for (name, item) in &by_name {
+        remaining_dependencies.insert(name.clone(), item.registry_dependencies.len());
+        for dependency in &item.registry_dependencies {
+            if !by_name.contains_key(dependency) {
+                return Err(RegistryError::UnknownDependency {
+                    item: item.name.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+            dependent_names
+                .entry(dependency.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+    }
 
-    for item in items {
-        visit_item(
-            item.name.as_str(),
-            &by_name,
-            &mut visiting,
-            &mut visited,
-            &mut order,
-        )?;
+    let mut ready = remaining_dependencies
+        .iter()
+        .filter_map(|(name, count)| (*count == 0).then_some(name.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(items.len());
+    while let Some(name) = ready.pop_first() {
+        order.push(name.clone());
+        if let Some(dependents) = dependent_names.get(&name) {
+            for dependent in dependents {
+                let remaining = remaining_dependencies
+                    .get_mut(dependent)
+                    .expect("every dependent has an indegree");
+                *remaining -= 1;
+                if *remaining == 0 {
+                    ready.insert(dependent.clone());
+                }
+            }
+        }
+    }
+
+    if order.len() != items.len() {
+        let unresolved = remaining_dependencies
+            .iter()
+            .find_map(|(name, count)| (*count != 0).then_some(name.clone()))
+            .expect("an incomplete graph has an unresolved item");
+        return Err(RegistryError::DependencyCycle(unresolved));
     }
 
     Ok(order)
-}
-
-fn visit_item(
-    name: &str,
-    by_name: &BTreeMap<String, &RegistryItem>,
-    visiting: &mut BTreeSet<String>,
-    visited: &mut BTreeSet<String>,
-    order: &mut Vec<String>,
-) -> Result<(), RegistryError> {
-    if visited.contains(name) {
-        return Ok(());
-    }
-
-    if !visiting.insert(name.to_owned()) {
-        return Err(RegistryError::DependencyCycle(name.to_owned()));
-    }
-
-    let Some(item) = by_name.get(name) else {
-        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
-    };
-
-    for dependency in &item.registry_dependencies {
-        if !by_name.contains_key(dependency) {
-            return Err(RegistryError::UnknownDependency {
-                item: item.name.clone(),
-                dependency: dependency.clone(),
-            });
-        }
-        visit_item(dependency, by_name, visiting, visited, order)?;
-    }
-
-    visiting.remove(name);
-    visited.insert(name.to_owned());
-    order.push(name.to_owned());
-    Ok(())
 }
 
 pub fn resolve_registry_targets(
@@ -1301,13 +1344,23 @@ fn expect_string(field: &'static str, expected: &str, actual: &str) -> Result<()
 }
 
 fn validate_item_name(value: &str) -> Result<(), RegistryError> {
-    validate_kebab_name("name", value)
+    validate_kebab_name("name", value)?;
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field: "name",
+            expected: "item name that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_kebab_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    let mut bytes = value.bytes();
-    let valid = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    let valid = value.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    });
 
     if valid {
         Ok(())
@@ -1450,6 +1503,13 @@ fn validate_rust_identifier(field: &'static str, value: &str) -> Result<(), Regi
             actual: value.to_owned(),
         });
     }
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII Rust identifier that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
 
     Ok(())
 }
@@ -1467,8 +1527,77 @@ fn validate_rust_module_segment(field: &'static str, value: &str) -> Result<(), 
             actual: value.to_owned(),
         });
     }
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII lowercase module segment that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
 
     Ok(())
+}
+
+fn is_rust_2024_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "Self"
+            | "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "box"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "macro_rules"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "raw"
+            | "ref"
+            | "return"
+            | "safe"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "union"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
 }
 
 fn validate_non_empty_string(field: &'static str, value: &str) -> Result<(), RegistryError> {
@@ -3110,6 +3239,129 @@ mod tests {
 
         assert_eq!(names(&first), ["tokens", "dialog", "spinner", "button"]);
         assert_eq!(names(&second), names(&first));
+    }
+
+    #[test]
+    fn graph_order_uses_canonical_ready_tie_break_independent_of_input_order() {
+        let alpha = item_with_name_and_target("alpha", "alpha.rs", "alpha", &[]);
+        let beta = item_with_name_and_target("beta", "beta.rs", "beta", &[]);
+        let dependent =
+            item_with_name_and_target("dependent", "dependent.rs", "dependent", &["alpha"]);
+
+        let first = validate_registry_graph(&[dependent.clone(), beta.clone(), alpha.clone()])
+            .expect("first graph");
+        let second = validate_registry_graph(&[beta, alpha, dependent]).expect("permuted graph");
+
+        assert_eq!(first, vec!["alpha", "beta", "dependent"]);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn style_cardinality_and_foundation_suffixes_follow_the_item_contract() {
+        let mut foundation = foundation_item();
+        foundation.styles.push(RegistryItemStyle {
+            source: "styles/foundation-motion.css".to_owned(),
+            target: RegistryStyleTarget {
+                kind: RegistryStyleTargetKind::ManagedCssBlock,
+                id: "foundation-motion".to_owned(),
+            },
+        });
+        foundation
+            .validate()
+            .expect("ordered multi-style foundation");
+
+        for invalid_id in [
+            "motion",
+            "foundation-",
+            "foundation--motion",
+            "foundation-motion-",
+            "foundation-Motion",
+        ] {
+            let mut invalid = foundation.clone();
+            invalid.styles[1].target.id = invalid_id.to_owned();
+            assert!(
+                matches!(
+                    invalid.validate(),
+                    Err(RegistryError::InvalidValue {
+                        field: "styles[].target.id" | "styles[].target.id suffix",
+                        ..
+                    })
+                ),
+                "{invalid_id}"
+            );
+        }
+
+        let mut ui = item_with_name_and_target("button", "button.rs", "button", &[]);
+        ui.styles.push(RegistryItemStyle {
+            source: "styles/button-motion.css".to_owned(),
+            target: RegistryStyleTarget {
+                kind: RegistryStyleTargetKind::ManagedCssBlock,
+                id: "button-motion".to_owned(),
+            },
+        });
+        assert!(matches!(
+            ui.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "styles",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rust_2024_keywords_are_rejected_for_emitted_identifiers() {
+        for keyword in ["type", "async", "gen", "macro_rules", "safe", "union"] {
+            let item = item_with_name_and_target(keyword, "widget.rs", keyword, &[]);
+            assert!(
+                matches!(
+                    item.validate(),
+                    Err(RegistryError::InvalidValue { field: "name", .. })
+                ),
+                "{keyword}"
+            );
+        }
+
+        let module = item_with_name_and_target("widget", "type.rs", "widget", &[]);
+        assert!(matches!(
+            module.validate(),
+            Err(RegistryError::UnsafePath {
+                field: "files[].target.path",
+                ..
+            })
+        ));
+
+        let mut export = item_with_name_and_target("widget", "widget.rs", "widget", &[]);
+        export.files[0].target.exports = vec!["Self".to_owned()];
+        assert!(matches!(
+            export.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "files[].target.exports",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn graph_rejects_global_source_and_export_collisions() {
+        let first = item_with_name_and_target("first", "first.rs", "first", &[]);
+        let mut duplicate_source = item_with_name_and_target("second", "second.rs", "second", &[]);
+        duplicate_source.files[0].source = first.files[0].source.clone();
+        let error = validate_registry_graph(&[first.clone(), duplicate_source])
+            .expect_err("source collision must fail");
+        assert!(
+            matches!(error, RegistryError::DuplicateTarget(target) if target.starts_with("source:"))
+        );
+
+        let mut first_export = first;
+        first_export.files[0].target.exports = vec!["SharedExport".to_owned()];
+        let mut second_export = item_with_name_and_target("second", "second.rs", "second", &[]);
+        second_export.files[0].target.exports = vec!["SharedExport".to_owned()];
+        let error = validate_registry_graph(&[first_export, second_export])
+            .expect_err("export collision must fail");
+        assert_eq!(
+            error.to_string(),
+            "duplicate registry target: export:SharedExport"
+        );
     }
 
     #[test]

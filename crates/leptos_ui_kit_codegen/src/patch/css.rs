@@ -214,7 +214,8 @@ pub(crate) fn reconcile_managed_css_blocks_with_retirements_at_path(
     retirements: &[ManagedCssRetirement],
 ) -> Result<String, CodegenError> {
     let mut prepared = BTreeMap::new();
-    let mut foundation_id = None;
+    let mut foundation_ids = Vec::new();
+    let mut item_cohorts = BTreeMap::<String, (ManagedCssBlockRole, usize, usize)>::new();
     for (order, operation) in operations.iter().enumerate() {
         validate_css_block_id_at_path(&operation.block_id, logical_path)?;
         if operation.item_id.trim().is_empty() {
@@ -253,13 +254,32 @@ pub(crate) fn reconcile_managed_css_blocks_with_retirements_at_path(
                 format!("duplicate managed CSS operation for {}", operation.block_id),
             );
         }
-        if operation.role == ManagedCssBlockRole::Foundation
-            && foundation_id.replace(operation.block_id.clone()).is_some()
-        {
-            return unsafe_patch(
-                logical_path,
-                "multiple foundation CSS operations are unsupported",
-            );
+        match item_cohorts.get_mut(&operation.item_id) {
+            Some((role, _, _)) if *role != operation.role => {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS item {} mixes foundation and component roles",
+                        operation.item_id
+                    ),
+                );
+            }
+            Some((_, _, last)) if *last + 1 != order => {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "managed CSS item {} does not form one contiguous operation cohort",
+                        operation.item_id
+                    ),
+                );
+            }
+            Some((_, _, last)) => *last = order,
+            None => {
+                item_cohorts.insert(operation.item_id.clone(), (operation.role, order, order));
+            }
+        }
+        if operation.role == ManagedCssBlockRole::Foundation {
+            foundation_ids.push(operation.block_id.clone());
         }
     }
 
@@ -442,53 +462,24 @@ pub(crate) fn reconcile_managed_css_blocks_with_retirements_at_path(
         .map(|range| CssEdit::replacement(range.start, range.end, String::new()))
         .collect::<Vec<_>>();
     let mut missing_components = Vec::new();
-    let mut foundation_insertion = None;
-    let mut relocating_foundation = None;
-
-    if let Some(block_id) = foundation_id.as_deref() {
-        let (_, _, replacement) = &prepared[block_id];
-        let earliest_dependent = unique_dependencies
-            .iter()
-            .filter(|dependency| dependency.dependency_block_id == block_id)
-            .filter_map(|dependency| ranges.get(&dependency.dependent_block_id))
-            .map(|range| range.start)
-            .min();
-
-        match ranges.get(block_id) {
-            Some(range) => {
-                let canonical_anchor = match earliest_dependent {
-                    Some(anchor) if range.start > anchor => Some(anchor),
-                    Some(_) => None,
-                    None => Some(legal_css_preamble_end_without_range(
-                        existing,
-                        range,
-                        logical_path,
-                    )?),
-                };
-                if canonical_anchor.is_some_and(|anchor| anchor != range.start) {
-                    foundation_insertion = Some((
-                        canonical_anchor.expect("checked anchor"),
-                        replacement.clone(),
-                    ));
-                    relocating_foundation = Some(block_id);
-                }
-            }
-            None => {
-                let anchor = match earliest_dependent {
-                    Some(anchor) => anchor,
-                    None => legal_css_preamble_end(existing, logical_path)?,
-                };
-                foundation_insertion = Some((anchor, replacement.clone()));
+    if !foundation_ids.is_empty() {
+        let anchor = legal_css_preamble_end(existing, logical_path)?;
+        let mut cohort = String::new();
+        for block_id in &foundation_ids {
+            cohort.push_str(&prepared[block_id].2);
+            if let Some(range) = ranges.get(block_id) {
+                edits.push(CssEdit::replacement(range.start, range.end, String::new()));
             }
         }
+        edits.push(CssEdit::insertion(anchor, cohort));
     }
 
     for operation in operations {
         let (_, _, replacement) = &prepared[&operation.block_id];
+        if operation.role == ManagedCssBlockRole::Foundation {
+            continue;
+        }
         match ranges.get(&operation.block_id) {
-            Some(range) if relocating_foundation == Some(operation.block_id.as_str()) => {
-                edits.push(CssEdit::replacement(range.start, range.end, String::new()));
-            }
             Some(range) => edits.push(CssEdit::replacement(
                 range.start,
                 range.end,
@@ -499,9 +490,6 @@ pub(crate) fn reconcile_managed_css_blocks_with_retirements_at_path(
             }
             None => {}
         }
-    }
-    if let Some((at, replacement)) = foundation_insertion {
-        edits.push(CssEdit::insertion(at, replacement));
     }
 
     let mut output = apply_css_edits(existing, logical_path, edits)?;
@@ -740,23 +728,6 @@ fn legal_css_preamble_end(existing: &str, logical_path: &str) -> Result<usize, C
         cursor =
             scan_css_preamble_statement(existing, cursor + keyword.len(), keyword, logical_path)?;
     }
-}
-
-fn legal_css_preamble_end_without_range(
-    existing: &str,
-    range: &ManagedCssBlockRange,
-    logical_path: &str,
-) -> Result<usize, CodegenError> {
-    let mut without_foundation = String::with_capacity(existing.len() - (range.end - range.start));
-    without_foundation.push_str(&existing[..range.start]);
-    without_foundation.push_str(&existing[range.end..]);
-    let anchor = legal_css_preamble_end(&without_foundation, logical_path)?;
-
-    Ok(if anchor <= range.start {
-        anchor
-    } else {
-        anchor + (range.end - range.start)
-    })
 }
 
 fn consume_css_preamble_trivia(
