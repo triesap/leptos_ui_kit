@@ -10,19 +10,19 @@ use std::{
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
-    HtmlStylesheetState, InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock,
-    SyncPlan, apply_add, apply_init, apply_sync, check_pending_recovery, hash_content_bytes,
-    inspect_html_stylesheet, inspect_managed_css_blocks_at_path, install_lock_path,
-    parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
+    AddPlan, CodegenError, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic,
+    DiagnosticLevel, HtmlStylesheetState, InitPlan, InstallLock, InstalledFile, InstalledItem,
+    InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync, check_pending_recovery,
+    hash_content_bytes, inspect_html_stylesheet, inspect_managed_css_blocks_at_path,
+    install_lock_path, parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
-    DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
-    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig,
-    build_info_output, canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json,
-    load_registry_item, read_built_in_registry_source, resolve_built_in_registry_items,
-    validate_built_in_registry_health,
+    DependencyRequirement, DependencyStatus, DetectionError, InfoOutput, KitConfig, RegistryError,
+    ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
+    ToolSourceConfig, build_info_output, canonical_tool_config, detect_cargo_plan_requirements,
+    kit_config_to_json, load_registry_item, read_built_in_registry_source,
+    resolve_built_in_registry_items, validate_built_in_registry_health,
 };
 use serde::Serialize;
 
@@ -201,59 +201,492 @@ impl DoctorLockState {
     }
 }
 
-pub fn main_entry() {
-    let args = normalize_args(env::args_os().skip(1).collect());
-    if let Err(error) = run_from_environment(args, env::current_dir) {
-        eprintln!("{error}");
-        process::exit(error.exit_code());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitClass {
+    Operational = 1,
+    Usage = 2,
+    DoctorFailed = 3,
+    Conflict = 10,
+    UnsafePath = 11,
+    RegistryPackage = 12,
+}
+
+impl ExitClass {
+    const fn code(self) -> i32 {
+        self as i32
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    Operational,
+    Usage,
+    Doctor,
+    Conflict,
+    UnsafePath,
+    RegistryPackage,
 }
 
 #[derive(Debug)]
-enum EntryError {
-    CurrentDir(io::Error),
-    Command(String),
+struct CliError {
+    command: String,
+    status: CommandStatus,
+    category: ErrorCategory,
+    code: &'static str,
+    message: String,
+    logical_path: Option<String>,
+    suggestion: Option<&'static str>,
+    source: Option<Box<dyn std::error::Error>>,
+    exit_class: ExitClass,
+    json: bool,
+    output_emitted: bool,
 }
 
-impl EntryError {
-    fn exit_code(&self) -> i32 {
-        match self {
-            Self::CurrentDir(_) => 1,
-            Self::Command(error) => exit_code_for_error(error),
+impl CliError {
+    fn usage(
+        command: impl Into<String>,
+        json: bool,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            status: CommandStatus::Unsupported,
+            category: ErrorCategory::Usage,
+            code,
+            message: message.into(),
+            logical_path: None,
+            suggestion: Some("Run the command with --help to inspect supported arguments."),
+            source: None,
+            exit_class: ExitClass::Usage,
+            json,
+            output_emitted: false,
         }
     }
-}
 
-impl fmt::Display for EntryError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CurrentDir(error) => {
-                write!(formatter, "failed to acquire current directory: {error}")
+    fn operational(
+        command: impl Into<String>,
+        json: bool,
+        code: &'static str,
+        message: impl Into<String>,
+        logical_path: Option<String>,
+        source: Option<Box<dyn std::error::Error>>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::Operational,
+            code,
+            message: message.into(),
+            logical_path,
+            suggestion: Some("Resolve the reported project or filesystem error and retry."),
+            source,
+            exit_class: ExitClass::Operational,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn doctor_failed(json: bool) -> Self {
+        Self {
+            command: "doctor".to_owned(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::Doctor,
+            code: "doctor.checks_failed",
+            message: "doctor checks failed".to_owned(),
+            logical_path: None,
+            suggestion: Some("Resolve the failing doctor checks and retry."),
+            source: None,
+            exit_class: ExitClass::DoctorFailed,
+            json,
+            output_emitted: true,
+        }
+    }
+
+    fn from_codegen(
+        command: &'static str,
+        json: bool,
+        project_root: &Path,
+        action: &str,
+        error: CodegenError,
+    ) -> Self {
+        let (category, status, code, exit_class, logical_path, suggestion) = match &error {
+            CodegenError::Registry(_) => (
+                ErrorCategory::RegistryPackage,
+                CommandStatus::Error,
+                "registry.package",
+                ExitClass::RegistryPackage,
+                None,
+                "Verify the built-in registry package and requested item, then retry.",
+            ),
+            CodegenError::UnsafePath { path, .. } => (
+                ErrorCategory::UnsafePath,
+                CommandStatus::Error,
+                "path.unsafe",
+                ExitClass::UnsafePath,
+                Some(path.clone()),
+                "Use a normalized project-relative path without traversal or symlink escapes.",
+            ),
+            CodegenError::Config(
+                ConfigError::PathMustBeRelative { value, .. }
+                | ConfigError::PathTraversal { value, .. }
+                | ConfigError::UnsafePathSegment { value, .. }
+                | ConfigError::PathOverlap { value, .. },
+            ) => (
+                ErrorCategory::UnsafePath,
+                CommandStatus::Error,
+                "config.unsafe_path",
+                ExitClass::UnsafePath,
+                Some(value.clone()),
+                "Use a normalized project-relative configuration path without overlap.",
+            ),
+            CodegenError::UnsafePatch { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.patch_conflict",
+                ExitClass::Conflict,
+                logical_path(project_root, path),
+                "Resolve the conflicting app-owned content and retry.",
+            ),
+            CodegenError::PreimageConflict { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.preimage_conflict",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Re-plan after resolving the concurrent project change.",
+            ),
+            CodegenError::ProjectRootChanged { .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.root_changed",
+                ExitClass::Conflict,
+                None,
+                "Retry from the unchanged project root.",
+            ),
+            CodegenError::WriteLockContended { path } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.lock_contended",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Wait for the active writer to finish and retry.",
+            ),
+            CodegenError::LegacyWriteLock { path } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.legacy_lock",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Verify no older writer is running, remove the legacy lock, and retry.",
+            ),
+            CodegenError::InvalidCoordinationState { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.invalid_coordination_state",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Verify no writer is running, repair the coordination state, and retry.",
+            ),
+            CodegenError::RecoveryRequired { journal_path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.recovery_required",
+                ExitClass::Conflict,
+                logical_path(project_root, journal_path),
+                "Run the command again after making the project available for recovery.",
+            ),
+            CodegenError::LockExists(path) => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.lock_exists",
+                ExitClass::Conflict,
+                logical_path(project_root, path),
+                "Wait for the active writer to finish and retry.",
+            ),
+            CodegenError::FilesystemOperation {
+                logical_path: path, ..
+            } => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "filesystem.operation",
+                ExitClass::Operational,
+                Some(path.clone()),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            CodegenError::Io { path, .. }
+            | CodegenError::LockParse { path, .. }
+            | CodegenError::InvalidLock { path, .. } => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "project.io",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            CodegenError::DuplicatePath(path) => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "plan.duplicate_path",
+                ExitClass::Operational,
+                Some(path.clone()),
+                "Report the duplicate generated path and retry with a corrected package.",
+            ),
+            CodegenError::Config(_) | CodegenError::LockSerialize(_) => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "project.operation",
+                ExitClass::Operational,
+                None,
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+        };
+
+        Self {
+            command: command.to_owned(),
+            status,
+            category,
+            code,
+            message: format!("{action}: {error}"),
+            logical_path,
+            suggestion: Some(suggestion),
+            source: Some(Box::new(error)),
+            exit_class,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn from_detection(
+        command: &'static str,
+        json: bool,
+        project_root: &Path,
+        error: DetectionError,
+    ) -> Self {
+        let (category, code, exit_class, logical_path, suggestion) = match &error {
+            DetectionError::Registry(_) => (
+                ErrorCategory::RegistryPackage,
+                "registry.package",
+                ExitClass::RegistryPackage,
+                None,
+                "Verify the built-in registry package and retry.",
+            ),
+            DetectionError::Config(
+                ConfigError::PathMustBeRelative { value, .. }
+                | ConfigError::PathTraversal { value, .. }
+                | ConfigError::UnsafePathSegment { value, .. }
+                | ConfigError::PathOverlap { value, .. },
+            ) => (
+                ErrorCategory::UnsafePath,
+                "config.unsafe_path",
+                ExitClass::UnsafePath,
+                Some(value.clone()),
+                "Use a normalized project-relative configuration path without overlap.",
+            ),
+            DetectionError::MissingCargoManifest(path) => (
+                ErrorCategory::Operational,
+                "project.missing_manifest",
+                ExitClass::Operational,
+                logical_path(project_root, path).or_else(|| Some("Cargo.toml".to_owned())),
+                "Run the command from a supported project root.",
+            ),
+            DetectionError::MissingIndexHtml(path) => (
+                ErrorCategory::Operational,
+                "project.missing_index",
+                ExitClass::Operational,
+                logical_path(project_root, path).or_else(|| Some("index.html".to_owned())),
+                "Add the required Trunk index.html and retry.",
+            ),
+            DetectionError::MissingSourceRoot(path) => (
+                ErrorCategory::Operational,
+                "project.missing_source_root",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Add the configured source root and retry.",
+            ),
+            DetectionError::Io { path, .. } => (
+                ErrorCategory::Operational,
+                "project.io",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            DetectionError::CargoTomlParse(_) => (
+                ErrorCategory::Operational,
+                "project.invalid_manifest",
+                ExitClass::Operational,
+                Some("Cargo.toml".to_owned()),
+                "Correct Cargo.toml and retry.",
+            ),
+            DetectionError::UnsupportedProject(_) => (
+                ErrorCategory::Operational,
+                "project.unsupported",
+                ExitClass::Operational,
+                Some("Cargo.toml".to_owned()),
+                "Run the command from a supported single-package Trunk CSR project.",
+            ),
+            DetectionError::Config(_) => (
+                ErrorCategory::Operational,
+                "config.invalid",
+                ExitClass::Operational,
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
+                "Correct the project configuration and retry.",
+            ),
+        };
+
+        Self {
+            command: command.to_owned(),
+            status: CommandStatus::Error,
+            category,
+            code,
+            message: format!("failed to inspect project: {error}"),
+            logical_path,
+            suggestion: Some(suggestion),
+            source: Some(Box::new(error)),
+            exit_class,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn from_registry(
+        command: &'static str,
+        json: bool,
+        selector: &str,
+        error: RegistryError,
+    ) -> Self {
+        let logical_path = match &error {
+            RegistryError::UnsafePath { path, .. } | RegistryError::DuplicateTarget(path) => {
+                Some(path.clone())
             }
-            Self::Command(error) => formatter.write_str(error),
+            RegistryError::MissingSource(path)
+            | RegistryError::Io { path, .. }
+            | RegistryError::Parse { path, .. } => path
+                .to_str()
+                .filter(|path| !Path::new(path).is_absolute())
+                .map(str::to_owned),
+            RegistryError::BuiltInNotFound(_)
+            | RegistryError::LocalRegistryUnsupported(_)
+            | RegistryError::InvalidValue { .. }
+            | RegistryError::UnknownDependency { .. }
+            | RegistryError::DependencyCycle(_)
+            | RegistryError::Serialize(_)
+            | RegistryError::BuiltInAsset(_) => None,
+        };
+
+        Self {
+            command: command.to_owned(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::RegistryPackage,
+            code: "registry.load_failed",
+            message: format!("failed to load registry item {selector}: {error}"),
+            logical_path,
+            suggestion: Some(
+                "Verify the built-in registry package and requested item, then retry.",
+            ),
+            source: Some(Box::new(error)),
+            exit_class: ExitClass::RegistryPackage,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn serialization(command: &'static str, json: bool, message: String) -> Self {
+        Self::operational(command, json, "output.serialize", message, None, None)
+    }
+
+    fn exit_code(&self) -> i32 {
+        self.exit_class.code()
+    }
+
+    fn diagnostic(&self) -> Diagnostic {
+        let level = match self.category {
+            ErrorCategory::Operational
+            | ErrorCategory::Usage
+            | ErrorCategory::Doctor
+            | ErrorCategory::Conflict
+            | ErrorCategory::UnsafePath
+            | ErrorCategory::RegistryPackage => DiagnosticLevel::Error,
+        };
+        let mut diagnostic = Diagnostic::new(level, self.code, self.message.clone());
+        if let Some(path) = &self.logical_path {
+            diagnostic = diagnostic.with_path(path);
+        }
+        if let Some(suggestion) = self.suggestion {
+            diagnostic = diagnostic.with_suggestion(suggestion);
+        }
+        diagnostic
+    }
+
+    fn render_json(&self) -> String {
+        serde_json::to_string_pretty(
+            &CommandEnvelope::new(&self.command, self.status, Option::<()>::None)
+                .with_diagnostics(vec![self.diagnostic()]),
+        )
+        .expect("serializing the fixed CLI error envelope cannot fail")
+    }
+
+    fn report(&self) {
+        if self.output_emitted {
+            return;
+        }
+        if self.json {
+            println!("{}", self.render_json());
+        } else {
+            eprintln!("{self}");
         }
     }
 }
 
-impl std::error::Error for EntryError {
+impl fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::CurrentDir(error) => Some(error),
-            Self::Command(_) => None,
-        }
+        self.source.as_deref()
+    }
+}
+
+fn logical_path(project_root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(project_root)
+        .ok()
+        .and_then(Path::to_str)
+        .map(|path| path.replace('\\', "/"))
+        .filter(|path| !path.is_empty())
+}
+
+pub fn main_entry() {
+    let args = normalize_args(env::args_os().skip(1).collect());
+    if let Err(error) = run_from_environment(args, env::current_dir) {
+        error.report();
+        process::exit(error.exit_code());
     }
 }
 
 fn run_from_environment(
     args: Vec<OsString>,
     current_dir: impl FnOnce() -> io::Result<PathBuf>,
-) -> Result<(), EntryError> {
+) -> Result<(), CliError> {
+    let command = command_hint(&args);
+    let json = json_requested(&args);
     let cwd = if is_directory_independent_invocation(&args) {
         PathBuf::new()
     } else {
-        current_dir().map_err(EntryError::CurrentDir)?
+        current_dir().map_err(|error| {
+            CliError::operational(
+                command,
+                json,
+                "cwd.unavailable",
+                format!("failed to acquire current directory: {error}"),
+                None,
+                Some(Box::new(error)),
+            )
+        })?
     };
-    run(args, &cwd).map_err(EntryError::Command)
+    run(args, &cwd)
 }
 
 fn is_directory_independent_invocation(args: &[OsString]) -> bool {
@@ -285,44 +718,34 @@ fn normalize_args(mut args: Vec<OsString>) -> Vec<OsString> {
     args
 }
 
-fn exit_code_for_error(error: &str) -> i32 {
-    if error == "doctor checks failed" {
-        return 3;
-    }
-    if error.starts_with("usage:")
-        || error.contains("unsupported flag")
-        || error.contains("does not accept")
-        || error.contains("requires")
-        || error.contains("accepts exactly")
-        || error.contains("accepts at most")
-        || error.contains("non-utf8")
-    {
-        return 2;
-    }
-    if error.contains("local edits")
-        || error.contains("not tracked")
-        || error.contains("already tracked")
-        || error.contains("already exists")
-    {
-        return 10;
-    }
-    if error.contains("unsafe write path") || error.contains("path escapes") {
-        return 11;
-    }
-    if error.contains("built-in registry")
-        || error.contains("registry")
-        || error.contains("package")
-        || error.contains("not found")
-    {
-        return 12;
-    }
-    1
+fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .any(|arg| arg.to_str().is_some_and(|arg| arg == "--json"))
 }
 
-fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
-    let (args, cwd, _quiet, _verbose) = parse_common_args(args, cwd)?;
+fn command_hint(args: &[OsString]) -> String {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--cwd") => {
+                iter.next();
+            }
+            Some("--quiet" | "--verbose" | "--json") => {}
+            Some("--version" | "-V") => return "version".to_owned(),
+            Some("--help" | "-h") => return "help".to_owned(),
+            Some(command) if !command.starts_with('-') => return command.to_owned(),
+            Some(_) | None => {}
+        }
+    }
+    "cli".to_owned()
+}
+
+fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), CliError> {
+    let command_hint = command_hint(&args);
+    let json = json_requested(&args);
+    let (args, cwd, _quiet, _verbose) = parse_common_args(args, cwd, &command_hint, json)?;
     let Some(command) = args.first().and_then(|value| value.to_str()) else {
-        return Err(usage());
+        return Err(CliError::usage(command_hint, json, "cli.usage", usage()));
     };
 
     if command == "--help" || command == "-h" {
@@ -333,7 +756,9 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         return run_version(&args[1..]);
     }
     if args[1..].iter().any(is_help_arg) {
-        println!("{}", command_help(command)?);
+        let help = command_help(command)
+            .map_err(|message| CliError::usage(command, json, "cli.unknown_command", message))?;
+        println!("{help}");
         return Ok(());
     }
 
@@ -344,7 +769,12 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "init" => run_init(&args[1..], &cwd),
         "sync" => run_sync(&args[1..], &cwd),
         "view" => run_view(&args[1..], &cwd),
-        _ => Err(usage()),
+        _ => Err(CliError::usage(
+            command,
+            json,
+            "cli.unknown_command",
+            usage(),
+        )),
     }
 }
 
@@ -356,18 +786,26 @@ fn is_help_arg(arg: &OsString) -> bool {
 fn parse_common_args(
     args: Vec<OsString>,
     cwd: &Path,
-) -> Result<(Vec<OsString>, PathBuf, bool, bool), String> {
+    command: &str,
+    json: bool,
+) -> Result<(Vec<OsString>, PathBuf, bool, bool), CliError> {
     let mut filtered = Vec::new();
     let mut target_cwd = cwd.to_path_buf();
     let mut quiet = false;
     let mut verbose = false;
+    let mut json_flag = false;
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
         match arg.to_str() {
             Some("--cwd") => {
                 let Some(path) = iter.next() else {
-                    return Err("--cwd requires a path".to_owned());
+                    return Err(CliError::usage(
+                        command,
+                        json,
+                        "cli.missing_argument",
+                        "--cwd requires a path",
+                    ));
                 };
                 let path = PathBuf::from(path);
                 target_cwd = if path.is_absolute() {
@@ -378,53 +816,93 @@ fn parse_common_args(
             }
             Some("--quiet") => quiet = true,
             Some("--verbose") => verbose = true,
+            Some("--json") => json_flag = true,
             _ => filtered.push(arg),
         }
+    }
+    if json_flag && !filtered.is_empty() {
+        filtered.push(OsString::from("--json"));
     }
 
     Ok((filtered, target_cwd, quiet, verbose))
 }
 
-fn run_version(args: &[OsString]) -> Result<(), String> {
-    let mut json = false;
+fn run_version(args: &[OsString]) -> Result<(), CliError> {
+    let json = json_requested(args);
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "version",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for version: {value}"));
+                return Err(CliError::usage(
+                    "version",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for version: {value}"),
+                ));
             }
-            _ => return Err("version does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "version",
+                    json,
+                    "cli.unexpected_argument",
+                    "version does not accept positional arguments",
+                ));
+            }
         }
     }
 
-    println!("{}", render_version_output(json)?);
+    println!(
+        "{}",
+        render_version_output(json)
+            .map_err(|message| CliError::serialization("version", json, message))?
+    );
     Ok(())
 }
 
-fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_add(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
     let mut item: Option<String> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "add",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for add: {value}"));
+                return Err(CliError::usage(
+                    "add",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for add: {value}"),
+                ));
             }
             value => {
                 if item.is_some() {
-                    return Err("add accepts exactly one item name".to_owned());
+                    return Err(CliError::usage(
+                        "add",
+                        json,
+                        "cli.unexpected_argument",
+                        "add accepts exactly one item name",
+                    ));
                 }
 
                 item = Some(value.to_owned());
@@ -432,13 +910,28 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let item = item.ok_or_else(|| "add requires an item name".to_owned())?;
+    let item = item.ok_or_else(|| {
+        CliError::usage(
+            "add",
+            json,
+            "cli.missing_argument",
+            "add requires an item name",
+        )
+    })?;
     let plan = if dry_run {
-        plan_add(cwd, &item)
-            .map_err(|error| format!("failed to plan add {item} for {}: {error}", cwd.display()))?
+        plan_add(cwd, &item).map_err(|error| {
+            CliError::from_codegen(
+                "add",
+                json,
+                cwd,
+                &format!("failed to plan add {item}"),
+                error,
+            )
+        })?
     } else {
-        apply_add(cwd, &item)
-            .map_err(|error| format!("failed to add {item} to {}: {error}", cwd.display()))?
+        apply_add(cwd, &item).map_err(|error| {
+            CliError::from_codegen("add", json, cwd, &format!("failed to add {item}"), error)
+        })?
     };
     let status = if dry_run {
         CommandStatus::Planned
@@ -448,61 +941,101 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_add_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_add_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("add", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut strict = false;
     let mut check = false;
     let mut trunk_build = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "doctor",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--strict" => strict = true,
             "--check" => check = true,
             "--trunk-build" => trunk_build = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for doctor: {value}"));
+                return Err(CliError::usage(
+                    "doctor",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for doctor: {value}"),
+                ));
             }
-            _ => return Err("doctor does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "doctor",
+                    json,
+                    "cli.unexpected_argument",
+                    "doctor does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let output = build_doctor_output(cwd, strict, check, trunk_build);
     let status = doctor_status(&output);
-    println!("{}", render_doctor_output(&output, json, status)?);
+    println!(
+        "{}",
+        render_doctor_output(&output, json, status)
+            .map_err(|message| CliError::serialization("doctor", json, message))?
+    );
     if output.has_failures() {
-        return Err("doctor checks failed".to_owned());
+        return Err(CliError::doctor_failed(json));
     }
 
     Ok(())
 }
 
-fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_info(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut path: Option<PathBuf> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "info",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for info: {value}"));
+                return Err(CliError::usage(
+                    "info",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for info: {value}"),
+                ));
             }
             value => {
                 if path.is_some() {
-                    return Err("info accepts at most one path argument".to_owned());
+                    return Err(CliError::usage(
+                        "info",
+                        json,
+                        "cli.unexpected_argument",
+                        "info accepts at most one path argument",
+                    ));
                 }
 
                 path = Some(PathBuf::from(value));
@@ -516,38 +1049,61 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
         None => cwd.to_path_buf(),
     };
     let output = build_info_output(&target)
-        .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
+        .map_err(|error| CliError::from_detection("info", json, &target, error))?;
 
-    println!("{}", render_info_output(&output, json)?);
+    println!(
+        "{}",
+        render_info_output(&output, json)
+            .map_err(|message| CliError::serialization("info", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_init(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "init",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for init: {value}"));
+                return Err(CliError::usage(
+                    "init",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for init: {value}"),
+                ));
             }
-            _ => return Err("init does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "init",
+                    json,
+                    "cli.unexpected_argument",
+                    "init does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let plan = if dry_run {
-        plan_init(cwd)
-            .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?
+        plan_init(cwd).map_err(|error| {
+            CliError::from_codegen("init", json, cwd, "failed to plan init", error)
+        })?
     } else {
-        apply_init(cwd)
-            .map_err(|error| format!("failed to initialize {}: {error}", cwd.display()))?
+        apply_init(cwd).map_err(|error| {
+            CliError::from_codegen("init", json, cwd, "failed to initialize project", error)
+        })?
     };
 
     let status = if dry_run {
@@ -558,30 +1114,49 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_init_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_init_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("init", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_view(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut include_source = false;
     let mut registry_source: Option<String> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "view",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--source" => include_source = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for view: {value}"));
+                return Err(CliError::usage(
+                    "view",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for view: {value}"),
+                ));
             }
             value => {
                 if registry_source.is_some() {
-                    return Err("view accepts exactly one registry source".to_owned());
+                    return Err(CliError::usage(
+                        "view",
+                        json,
+                        "cli.unexpected_argument",
+                        "view accepts exactly one registry source",
+                    ));
                 }
 
                 registry_source = Some(value.to_owned());
@@ -589,39 +1164,70 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let source = registry_source.ok_or_else(|| "view requires a registry source".to_owned())?;
+    let source = registry_source.ok_or_else(|| {
+        CliError::usage(
+            "view",
+            json,
+            "cli.missing_argument",
+            "view requires a registry source",
+        )
+    })?;
     let item = load_registry_item(&source, cwd)
-        .map_err(|error| format!("failed to load registry item {source}: {error}"))?;
+        .map_err(|error| CliError::from_registry("view", json, &source, error))?;
 
-    println!("{}", render_registry_item(&item, json, include_source)?);
+    println!(
+        "{}",
+        render_registry_item(&item, json, include_source)
+            .map_err(|message| CliError::serialization("view", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "sync",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for sync: {value}"));
+                return Err(CliError::usage(
+                    "sync",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for sync: {value}"),
+                ));
             }
-            _ => return Err("sync does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "sync",
+                    json,
+                    "cli.unexpected_argument",
+                    "sync does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let plan = if dry_run {
-        plan_sync(cwd)
-            .map_err(|error| format!("failed to plan sync for {}: {error}", cwd.display()))?
+        plan_sync(cwd).map_err(|error| {
+            CliError::from_codegen("sync", json, cwd, "failed to plan sync", error)
+        })?
     } else {
-        apply_sync(cwd).map_err(|error| format!("failed to sync {}: {error}", cwd.display()))?
+        apply_sync(cwd).map_err(|error| {
+            CliError::from_codegen("sync", json, cwd, "failed to sync project", error)
+        })?
     };
     let status = if dry_run {
         CommandStatus::Planned
@@ -631,7 +1237,11 @@ fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_sync_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_sync_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("sync", json, message))?
+    );
 
     Ok(())
 }
@@ -3728,7 +4338,11 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("tailwind flag should be unsupported");
 
-        assert!(error.contains("unsupported flag for view"));
+        assert_eq!(error.command, "view");
+        assert_eq!(error.category, ErrorCategory::Usage);
+        assert_eq!(error.code, "cli.unsupported_flag");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.message.contains("unsupported flag for view"));
     }
 
     #[test]
@@ -3777,8 +4391,11 @@ leptos_router = "0.9.0-alpha"
         })
         .expect_err("info should require cwd");
 
-        assert!(matches!(error, EntryError::CurrentDir(_)));
+        assert_eq!(error.command, "info");
+        assert_eq!(error.category, ErrorCategory::Operational);
+        assert_eq!(error.code, "cwd.unavailable");
         assert_eq!(error.exit_code(), 1);
+        assert!(error.source.is_some());
         assert!(
             error
                 .to_string()
@@ -3797,7 +4414,9 @@ leptos_router = "0.9.0-alpha"
             &effective_cwd,
         )
         .expect_err("missing relative project should fail");
-        assert!(relative.contains(&effective_cwd.join("nested").display().to_string()));
+        assert_eq!(relative.command, "info");
+        assert_eq!(relative.code, "project.missing_manifest");
+        assert_eq!(relative.logical_path.as_deref(), Some("Cargo.toml"));
 
         let absolute_target = dir.path().join("absolute");
         let absolute = run(
@@ -3808,7 +4427,9 @@ leptos_router = "0.9.0-alpha"
             &effective_cwd,
         )
         .expect_err("missing absolute project should fail");
-        assert!(absolute.contains(&absolute_target.display().to_string()));
+        assert_eq!(absolute.command, "info");
+        assert_eq!(absolute.code, "project.missing_manifest");
+        assert_eq!(absolute.logical_path.as_deref(), Some("Cargo.toml"));
     }
 
     #[test]
@@ -3880,7 +4501,9 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("version flag should be unsupported");
 
-        assert!(error.contains("unsupported flag for version"));
+        assert_eq!(error.category, ErrorCategory::Usage);
+        assert_eq!(error.code, "cli.unsupported_flag");
+        assert!(error.message.contains("unsupported flag for version"));
     }
 
     fn test_tool_config(rev: &str) -> ToolConfig {
@@ -3950,26 +4573,64 @@ leptos_router = "0.9.0-alpha"
 
     #[test]
     fn exit_code_mapping_matches_contract() {
-        assert_eq!(
-            exit_code_for_error("unsupported flag for view: --tailwind"),
-            2
+        let usage = CliError::usage(
+            "view",
+            false,
+            "cli.unsupported_flag",
+            "wording is irrelevant",
         );
-        assert_eq!(exit_code_for_error("doctor checks failed"), 3);
-        assert_eq!(
-            exit_code_for_error(
-                "cannot safely patch src/components/ui/button.rs: target exists but is not tracked in lock"
-            ),
-            10
+        let doctor = CliError::doctor_failed(true);
+        let root = Path::new("/project");
+        let conflict = CliError::from_codegen(
+            "add",
+            false,
+            root,
+            "different wording",
+            CodegenError::UnsafePatch {
+                path: root.join("src/components/ui/button.rs"),
+                reason: "different detail".to_owned(),
+            },
         );
-        assert_eq!(
-            exit_code_for_error("unsafe write path ../evil.rs: parent traversal"),
-            11
+        let unsafe_path = CliError::from_codegen(
+            "init",
+            true,
+            root,
+            "different wording",
+            CodegenError::UnsafePath {
+                path: "../evil.rs".to_owned(),
+                reason: "different detail".to_owned(),
+            },
         );
-        assert_eq!(
-            exit_code_for_error("built-in registry item not found: nope"),
-            12
+        let registry = CliError::from_registry(
+            "view",
+            true,
+            "nope",
+            RegistryError::BuiltInNotFound("nope".to_owned()),
         );
-        assert_eq!(exit_code_for_error("failed to inspect project"), 1);
+        let operational = CliError::operational(
+            "info",
+            false,
+            "project.inspect",
+            "different wording",
+            None,
+            None,
+        );
+
+        assert_eq!(usage.exit_code(), 2);
+        assert_eq!(doctor.exit_code(), 3);
+        assert_eq!(conflict.exit_code(), 10);
+        assert_eq!(unsafe_path.exit_code(), 11);
+        assert_eq!(registry.exit_code(), 12);
+        assert_eq!(operational.exit_code(), 1);
+        assert_eq!(conflict.category, ErrorCategory::Conflict);
+        assert_eq!(
+            conflict.logical_path.as_deref(),
+            Some("src/components/ui/button.rs")
+        );
+        assert!(conflict.suggestion.is_some());
+        assert!(conflict.source.is_some());
+        assert_eq!(unsafe_path.category, ErrorCategory::UnsafePath);
+        assert_eq!(registry.category, ErrorCategory::RegistryPackage);
     }
 
     #[test]
@@ -3998,8 +4659,12 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("doctor should fail");
 
-        assert_eq!(error, "doctor checks failed");
-        assert_eq!(exit_code_for_error(&error), 3);
+        assert_eq!(error.command, "doctor");
+        assert_eq!(error.category, ErrorCategory::Doctor);
+        assert_eq!(error.code, "doctor.checks_failed");
+        assert_eq!(error.message, "doctor checks failed");
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.output_emitted);
     }
 
     #[test]
