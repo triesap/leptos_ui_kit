@@ -22,6 +22,12 @@ runtime. Clean Cargo package installations also retain the complete package
 Git revision reported by `--version --json`; dirty or wrong-crate package VCS
 metadata is rejected rather than reported as trusted provenance.
 
+The catalog is parsed and validated as one immutable snapshot on first use.
+Validation covers every manifest and referenced source, all packaged schemas,
+and exact parity between the theme contract and the sole built-in `:root`
+token declarations. `doctor` reports any embedded-registry health failure in
+both ordinary and strict modes using logical package paths.
+
 ## Commands
 
 ```bash

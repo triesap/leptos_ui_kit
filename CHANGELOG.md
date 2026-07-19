@@ -43,6 +43,8 @@ Semantic Versioning.
 - Extend runtime package health checks across the registry root, manifests,
   referenced sources, theme contract, public schema, and their shared identity
   metadata.
+- Enforce exact theme-contract, tokens-manifest, and built-in `:root` CSS
+  declaration/default parity in the cached runtime registry health snapshot.
 - Document theme stylesheet ordering, nested scopes, dependency requirements,
   and migration guidance.
 

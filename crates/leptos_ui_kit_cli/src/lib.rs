@@ -830,6 +830,18 @@ fn registry_item_source_output(
 }
 
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
+    build_doctor_output_with_registry_health(cwd, strict, check, trunk_build, || {
+        validate_built_in_registry_health().map_err(|error| error.to_string())
+    })
+}
+
+fn build_doctor_output_with_registry_health(
+    cwd: &Path,
+    strict: bool,
+    check: bool,
+    trunk_build: bool,
+    registry_health: impl FnOnce() -> Result<(), String>,
+) -> DoctorOutput {
     let mut checks = Vec::new();
 
     match check_pending_recovery(cwd) {
@@ -948,7 +960,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
         }
     }
 
-    match validate_built_in_registry_health() {
+    match registry_health() {
         Ok(()) => checks.push(DoctorCheck::pass(
             "registry",
             "built-in registry runtime health is valid",
@@ -2401,6 +2413,38 @@ leptos_router = "0.9.0-alpha"
         assert!(
             output.contains("install lock item membership equals the resolved registry closure")
         );
+    }
+
+    #[test]
+    fn ordinary_and_strict_doctor_fail_on_injected_registry_corruption() {
+        let project = tempdir().expect("tempdir");
+        for strict in [false, true] {
+            let doctor = build_doctor_output_with_registry_health(
+                project.path(),
+                strict,
+                false,
+                false,
+                || {
+                    Err(
+                        "invalid built-in theme CSS registry/styles/tokens.css: injected drift"
+                            .to_owned(),
+                    )
+                },
+            );
+            assert_doctor_check(
+                &doctor,
+                "registry",
+                DoctorCheckStatus::Fail,
+                "registry/styles/tokens.css",
+            );
+            let registry = doctor
+                .checks
+                .iter()
+                .find(|check| check.name == "registry")
+                .expect("registry check");
+            assert!(registry.message.contains("registry/styles/tokens.css"));
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        }
     }
 
     #[test]

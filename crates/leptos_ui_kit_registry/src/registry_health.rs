@@ -678,6 +678,16 @@ fn snapshot_health_error(error: SnapshotError) -> RegistryHealthError {
             first_owner,
             second_owner,
         }),
+        SnapshotError::InvalidThemeCss {
+            logical_path,
+            reason,
+        } => RegistryHealthError::BuiltInAsset {
+            kind: RegistryHealthFileKind::RegistrySource,
+            source: BuiltInAssetError::InvalidContent {
+                logical_path: logical_path.into(),
+                reason,
+            },
+        },
         SnapshotError::ParseJson {
             logical_path,
             source,
@@ -823,7 +833,7 @@ mod tests {
     use crate::{
         BuiltInAssetError, BuiltInAssetKind,
         builtin_registry::BuiltInRegistrySnapshot,
-        embedded_assets::{EmbeddedAssetKind, InMemoryAssetProvider},
+        embedded_assets::{AssetProvider, EmbeddedAssetKind, InMemoryAssetProvider},
         load_built_in_registry_item,
     };
 
@@ -994,6 +1004,34 @@ mod tests {
                 && manifest_version == "2"
                 && contract_version == "1"
                 && expected == "1"
+        ));
+    }
+
+    #[test]
+    fn health_adapter_reports_theme_css_drift_by_logical_locator() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let path = "registry/styles/tokens.css";
+        let css = provider
+            .utf8_asset(path, EmbeddedAssetKind::Css)
+            .expect("read tokens CSS");
+        let changed = css.replacen("#f8fafc", "#000000", 1);
+        provider
+            .set_bytes(path, changed.into_bytes())
+            .expect("replace tokens CSS");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("theme CSS drift must reject the snapshot");
+
+        assert!(matches!(
+            snapshot_health_error(injected),
+            RegistryHealthError::BuiltInAsset {
+                kind: RegistryHealthFileKind::RegistrySource,
+                source: BuiltInAssetError::InvalidContent {
+                    logical_path,
+                    reason,
+                },
+            } if logical_path == Path::new(path)
+                && reason.contains("--kit-color-canvas")
+                && !reason.contains(env!("CARGO_MANIFEST_DIR"))
         ));
     }
 
