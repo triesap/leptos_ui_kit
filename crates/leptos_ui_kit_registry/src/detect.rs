@@ -11,8 +11,8 @@ use toml::{Table as TomlTable, Value as TomlValue};
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan, normalize_single_crate_project,
-    parse_kit_json_str,
+    RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan,
+    normalize_project_with_workspace_mode, parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -165,12 +165,25 @@ pub struct InfoOutput {
 }
 
 pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
+    detect_project_snapshot_with(project_root, |path| fs::read_to_string(path))
+        .map(|snapshot| snapshot.detected)
+}
+
+struct ProjectSnapshot {
+    detected: DetectedProject,
+    kit_config: Option<KitConfig>,
+}
+
+fn detect_project_snapshot_with(
+    project_root: &Path,
+    mut read: impl FnMut(&Path) -> Result<String, std::io::Error>,
+) -> Result<ProjectSnapshot, DetectionError> {
     let cargo_manifest_path = project_root.join("Cargo.toml");
     if !cargo_manifest_path.is_file() {
         return Err(DetectionError::MissingCargoManifest(cargo_manifest_path));
     }
 
-    let cargo_toml = read_to_string(&cargo_manifest_path)?;
+    let cargo_toml = read_path_with(&cargo_manifest_path, &mut read)?;
     let manifest: TomlValue =
         toml::from_str(&cargo_toml).map_err(DetectionError::CargoTomlParse)?;
 
@@ -200,7 +213,7 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
     let kit_config_path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
     let kit_config_path = kit_config_path.is_file().then_some(kit_config_path);
     let kit_config = match kit_config_path.as_ref() {
-        Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
+        Some(path) => Some(parse_kit_json_str(&read_path_with(path, &mut read)?)?),
         None => None,
     };
     let css_file_path = project_root.join(
@@ -213,16 +226,19 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
     let dependency_plan = DependencyPlan::from_manifest(&manifest);
     let render_mode = detect_render_mode(&dependency_plan);
 
-    Ok(DetectedProject {
-        project_root: project_root.to_path_buf(),
-        cargo_manifest_path,
-        workspace_mode,
-        source_root,
-        index_html_path,
-        css_file_path,
-        render_mode,
-        dependency_plan,
-        kit_config_path,
+    Ok(ProjectSnapshot {
+        detected: DetectedProject {
+            project_root: project_root.to_path_buf(),
+            cargo_manifest_path,
+            workspace_mode,
+            source_root,
+            index_html_path,
+            css_file_path,
+            render_mode,
+            dependency_plan,
+            kit_config_path,
+        },
+        kit_config,
     })
 }
 
@@ -250,26 +266,28 @@ fn detect_workspace_mode(manifest: &TomlValue) -> Result<WorkspaceMode, Detectio
 }
 
 pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionError> {
-    let detected = detect_single_crate_project(project_root)?;
+    build_info_output_with(project_root, |path| fs::read_to_string(path))
+}
 
-    let kit_config = match detected.kit_config_path.as_ref() {
-        Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
-        None => None,
-    };
-
-    let normalized_config = match kit_config.as_ref() {
-        Some(config) => Some(normalize_single_crate_project(
+fn build_info_output_with(
+    project_root: &Path,
+    read: impl FnMut(&Path) -> Result<String, std::io::Error>,
+) -> Result<InfoOutput, DetectionError> {
+    let snapshot = detect_project_snapshot_with(project_root, read)?;
+    let normalized_config = match snapshot.kit_config.as_ref() {
+        Some(config) => Some(normalize_project_with_workspace_mode(
             config,
             &NormalizeOptions {
-                project_root: detected.project_root.clone(),
+                project_root: snapshot.detected.project_root.clone(),
             },
+            snapshot.detected.workspace_mode,
         )?),
         None => None,
     };
 
     Ok(InfoOutput {
-        detected,
-        kit_config,
+        detected: snapshot.detected,
+        kit_config: snapshot.kit_config,
         normalized_config,
     })
 }
@@ -689,6 +707,16 @@ fn sorted_features(features: Vec<String>) -> Vec<String> {
 
 fn read_to_string(path: &Path) -> Result<String, DetectionError> {
     fs::read_to_string(path).map_err(|source| DetectionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_path_with(
+    path: &Path,
+    read: &mut impl FnMut(&Path) -> Result<String, std::io::Error>,
+) -> Result<String, DetectionError> {
+    read(path).map_err(|source| DetectionError::Io {
         path: path.to_path_buf(),
         source,
     })
@@ -1203,6 +1231,49 @@ leptos_router = "0.9.0-alpha"
                 .install_roots
                 .css_file,
             root.join("styles/custom.css")
+        );
+    }
+
+    #[test]
+    fn info_uses_one_config_snapshot_and_preserves_detected_workspace_mode() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        write_homepage_fixture(root, "\"csr\"");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("write manifest");
+        write_kit_config(root, canonical_kit_json().expect("canonical config"));
+        let kit_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut kit_reads = 0;
+
+        let info = build_info_output_with(root, |path| {
+            if path == kit_path {
+                kit_reads += 1;
+            }
+            fs::read_to_string(path)
+        })
+        .expect("build info");
+
+        assert_eq!(kit_reads, 1);
+        assert_eq!(
+            info.detected.workspace_mode,
+            WorkspaceMode::SinglePackageWorkspaceRoot
+        );
+        assert_eq!(
+            info.normalized_config.unwrap().workspace_mode,
+            WorkspaceMode::SinglePackageWorkspaceRoot
         );
     }
 }

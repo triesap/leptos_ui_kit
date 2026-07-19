@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
     process::{self, Command},
 };
@@ -203,10 +203,74 @@ impl DoctorLockState {
 
 pub fn main_entry() {
     let args = normalize_args(env::args_os().skip(1).collect());
-    if let Err(error) = run(args, &current_dir()) {
+    if let Err(error) = run_from_environment(args, env::current_dir) {
         eprintln!("{error}");
-        process::exit(exit_code_for_error(&error));
+        process::exit(error.exit_code());
     }
+}
+
+#[derive(Debug)]
+enum EntryError {
+    CurrentDir(io::Error),
+    Command(String),
+}
+
+impl EntryError {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::CurrentDir(_) => 1,
+            Self::Command(error) => exit_code_for_error(error),
+        }
+    }
+}
+
+impl fmt::Display for EntryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDir(error) => {
+                write!(formatter, "failed to acquire current directory: {error}")
+            }
+            Self::Command(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for EntryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentDir(error) => Some(error),
+            Self::Command(_) => None,
+        }
+    }
+}
+
+fn run_from_environment(
+    args: Vec<OsString>,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<(), EntryError> {
+    let cwd = if is_directory_independent_invocation(&args) {
+        PathBuf::new()
+    } else {
+        current_dir().map_err(EntryError::CurrentDir)?
+    };
+    run(args, &cwd).map_err(EntryError::Command)
+}
+
+fn is_directory_independent_invocation(args: &[OsString]) -> bool {
+    if args.iter().any(is_help_arg) {
+        return true;
+    }
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--cwd") => index += 2,
+            Some("--quiet" | "--verbose") => index += 1,
+            Some("--version" | "-V") => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn normalize_args(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -446,7 +510,11 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let target = path.unwrap_or_else(|| cwd.to_path_buf());
+    let target = match path {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => cwd.join(path),
+        None => cwd.to_path_buf(),
+    };
     let output = build_info_output(&target)
         .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
 
@@ -2080,10 +2148,6 @@ fn command_help(command: &str) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
-fn current_dir() -> PathBuf {
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3592,6 +3656,70 @@ leptos_router = "0.9.0-alpha"
             Path::new("."),
         )
         .expect("command help");
+    }
+
+    #[test]
+    fn help_and_version_do_not_require_a_process_directory() {
+        let unavailable = || {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "process directory was removed",
+            ))
+        };
+
+        run_from_environment(vec![OsString::from("--help")], unavailable)
+            .expect("help without cwd");
+        run_from_environment(vec![OsString::from("--version")], unavailable)
+            .expect("version without cwd");
+        run_from_environment(
+            vec![OsString::from("doctor"), OsString::from("--help")],
+            unavailable,
+        )
+        .expect("command help without cwd");
+    }
+
+    #[test]
+    fn project_commands_report_typed_current_directory_failures() {
+        let error = run_from_environment(vec![OsString::from("info")], || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cwd unavailable",
+            ))
+        })
+        .expect_err("info should require cwd");
+
+        assert!(matches!(error, EntryError::CurrentDir(_)));
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to acquire current directory")
+        );
+    }
+
+    #[test]
+    fn info_resolves_relative_paths_against_effective_global_cwd() {
+        let dir = tempdir().expect("tempdir");
+        let effective_cwd = dir.path().join("effective");
+        fs::create_dir(&effective_cwd).expect("create effective cwd");
+
+        let relative = run(
+            vec![OsString::from("info"), OsString::from("nested")],
+            &effective_cwd,
+        )
+        .expect_err("missing relative project should fail");
+        assert!(relative.contains(&effective_cwd.join("nested").display().to_string()));
+
+        let absolute_target = dir.path().join("absolute");
+        let absolute = run(
+            vec![
+                OsString::from("info"),
+                absolute_target.as_os_str().to_owned(),
+            ],
+            &effective_cwd,
+        )
+        .expect_err("missing absolute project should fail");
+        assert!(absolute.contains(&absolute_target.display().to_string()));
     }
 
     #[test]

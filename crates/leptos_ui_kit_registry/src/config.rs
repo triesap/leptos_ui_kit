@@ -639,6 +639,14 @@ pub fn normalize_single_crate_project(
     config: &KitConfig,
     options: &NormalizeOptions,
 ) -> Result<NormalizedProjectConfig, ConfigError> {
+    normalize_project_with_workspace_mode(config, options, WorkspaceMode::SingleCrate)
+}
+
+pub fn normalize_project_with_workspace_mode(
+    config: &KitConfig,
+    options: &NormalizeOptions,
+    workspace_mode: WorkspaceMode,
+) -> Result<NormalizedProjectConfig, ConfigError> {
     config.validate()?;
 
     let project_root = options.project_root.clone();
@@ -658,7 +666,7 @@ pub fn normalize_single_crate_project(
         schema_version: config.schema_version.clone(),
         render_mode: config.leptos.render_mode,
         desired_items: config.items.clone(),
-        workspace_mode: WorkspaceMode::SingleCrate,
+        workspace_mode,
         project_root: project_root.clone(),
         crate_root,
         source_root,
