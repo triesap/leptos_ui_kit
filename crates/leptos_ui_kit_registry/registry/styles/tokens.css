@@ -32,8 +32,8 @@
   --kit-color-danger: #dc2626;
   --kit-color-danger-hover: #b91c1c;
   --kit-color-danger-foreground: #ffffff;
-  --kit-color-link: currentColor;
-  --kit-color-link-hover: currentColor;
+  --kit-color-link: #111827;
+  --kit-color-link-hover: #111827;
   --kit-focus-ring: #2563eb;
   --kit-radius-sm: 0.25rem;
   --kit-radius-md: 0.375rem;
@@ -45,7 +45,7 @@
   --kit-shadow-lg: 0 20px 40px rgb(15 23 42 / 18%);
   --kit-duration-fast: 120ms;
   --kit-duration-normal: 140ms;
-  --kit-easing-standard: ease;
+  --kit-easing-standard: cubic-bezier(0.2, 0, 0, 1);
   --kit-disabled-opacity: 0.55;
 }
 }

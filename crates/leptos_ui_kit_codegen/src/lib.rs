@@ -23,9 +23,10 @@ pub use error::CodegenError;
 #[doc(inline)]
 pub use install_lock::{
     DEFAULT_KIT_LOCK_PATH, InstallLock, InstallLockProject, InstalledFile, InstalledItem,
-    InstalledStyleBlock, ManagedCssBlockRange, ManagedCssBlockRole, ManagedCssDependency,
-    ManagedCssOperation, install_lock_path, lock_to_json, lock_to_json_at_path,
-    parse_install_lock_str, parse_install_lock_str_at_path,
+    InstalledStyleBlock, InstalledThemeIntegration, ManagedCssBlockRange, ManagedCssBlockRole,
+    ManagedCssDependency, ManagedCssOperation, THEME_CAPABILITY_PATH, TOKEN_CONTRACT_PATH,
+    install_lock_path, lock_to_json, lock_to_json_at_path, parse_install_lock_str,
+    parse_install_lock_str_at_path,
 };
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

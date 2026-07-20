@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError, RegistryItem,
     RegistryRoot, ResolvedRegistryTargets, SCHEMA_VERSION, THEME_CONTRACT_SCHEMA_URL,
-    ThemeContract, ThemeContractError,
+    THEME_INTEGRATION_SCHEMA_URL, TOKEN_CONTRACT_SCHEMA_URL, ThemeContract, ThemeContractError,
     embedded_assets::{
         AssetProvider, AssetProviderError, EmbeddedAssetKind, embedded_asset_inventory,
         embedded_asset_provider,
@@ -30,11 +30,13 @@ const TOKENS_MANIFEST_PATH: &str = "registry/foundation/tokens.json";
 const TOKENS_CSS_PATH: &str = "registry/styles/tokens.css";
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
 const THEME_CONTRACT_SCHEMA_PATH: &str = "schema/0.9.0-alpha/theme-contract.schema.json";
-const SCHEMA_PATHS: [&str; 4] = [
+const SCHEMA_PATHS: [&str; 6] = [
     "schema/0.9.0-alpha/kit.schema.json",
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
     THEME_CONTRACT_SCHEMA_PATH,
+    "schema/0.2.0/theme-integration.schema.json",
+    "schema/0.2.0/token-contract.schema.json",
 ];
 const KIT_SCHEMA_REQUIRED: &[&str] = &[
     "$schema",
@@ -69,6 +71,29 @@ const THEME_CONTRACT_SCHEMA_REQUIRED: &[&str] = &[
     "name",
     "tokens",
 ];
+const THEME_INTEGRATION_SCHEMA_REQUIRED: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "producer",
+    "primitives",
+    "contract",
+    "stylesheet",
+    "layerAbi",
+    "portalAbi",
+];
+const TOKEN_ABI_SCHEMA_REQUIRED: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "contractId",
+    "abiVersion",
+    "revision",
+    "dtcgVersion",
+    "dtcgProfile",
+    "canonicalDigest",
+    "tokens",
+    "contrastChecks",
+    "extensions",
+];
 
 struct SchemaContract {
     logical_path: &'static str,
@@ -76,7 +101,7 @@ struct SchemaContract {
     required: &'static [&'static str],
 }
 
-const SCHEMA_CONTRACTS: [SchemaContract; 4] = [
+const SCHEMA_CONTRACTS: [SchemaContract; 6] = [
     SchemaContract {
         logical_path: SCHEMA_PATHS[0],
         schema_id: KIT_SCHEMA_URL,
@@ -96,6 +121,16 @@ const SCHEMA_CONTRACTS: [SchemaContract; 4] = [
         logical_path: THEME_CONTRACT_SCHEMA_PATH,
         schema_id: THEME_CONTRACT_SCHEMA_URL,
         required: THEME_CONTRACT_SCHEMA_REQUIRED,
+    },
+    SchemaContract {
+        logical_path: "schema/0.2.0/theme-integration.schema.json",
+        schema_id: THEME_INTEGRATION_SCHEMA_URL,
+        required: THEME_INTEGRATION_SCHEMA_REQUIRED,
+    },
+    SchemaContract {
+        logical_path: "schema/0.2.0/token-contract.schema.json",
+        schema_id: TOKEN_CONTRACT_SCHEMA_URL,
+        required: TOKEN_ABI_SCHEMA_REQUIRED,
     },
 ];
 
@@ -1029,7 +1064,7 @@ fn validate_theme_css_contract(
             return Err(invalid_theme_css(
                 logical_path,
                 format!(
-                    "expected {expected_roots} exact top-level :root rules, found {exact_root_rules}"
+                    "expected {expected_roots} exact kit-layer :root rules, found {exact_root_rules}"
                 ),
             ));
         }
@@ -1189,37 +1224,29 @@ fn mask_css_comments_and_strings(
 
 fn root_rule_bodies(masked: &[u8]) -> Vec<(usize, usize)> {
     let mut bodies = Vec::new();
-    let mut depth = 0_usize;
-    let mut prelude_start = 0_usize;
     for (index, byte) in masked.iter().copied().enumerate() {
-        match byte {
-            b'{' if depth == 0 => {
-                if trim_ascii(&masked[prelude_start..index]) == b":root" {
-                    let mut body_depth = 1_usize;
-                    let mut end = index + 1;
-                    while end < masked.len() && body_depth != 0 {
-                        match masked[end] {
-                            b'{' => body_depth += 1,
-                            b'}' => body_depth -= 1,
-                            _ => {}
-                        }
-                        end += 1;
-                    }
-                    if body_depth == 0 {
-                        bodies.push((index + 1, end - 1));
-                    }
-                }
-                depth = 1;
+        if byte != b'{' {
+            continue;
+        }
+        let prelude_start = masked[..index]
+            .iter()
+            .rposition(|byte| matches!(byte, b'{' | b'}' | b';'))
+            .map_or(0, |delimiter| delimiter + 1);
+        if trim_ascii(&masked[prelude_start..index]) != b":root" {
+            continue;
+        }
+        let mut body_depth = 1_usize;
+        let mut end = index + 1;
+        while end < masked.len() && body_depth != 0 {
+            match masked[end] {
+                b'{' => body_depth += 1,
+                b'}' => body_depth -= 1,
+                _ => {}
             }
-            b'{' => depth += 1,
-            b'}' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    prelude_start = index + 1;
-                }
-            }
-            b';' if depth == 0 => prelude_start = index + 1,
-            _ => {}
+            end += 1;
+        }
+        if body_depth == 0 {
+            bodies.push((index + 1, end - 1));
         }
     }
     bodies

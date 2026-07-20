@@ -21,7 +21,10 @@ use crate::transaction::DEFAULT_KIT_COORDINATION_IGNORE_PATH;
 use crate::transaction::{
     ExactObjectIdentity, opened_directory_identity, opened_regular_file_identity,
 };
-use crate::{CodegenError, DEFAULT_KIT_LOCK_PATH, DEFAULT_KIT_WRITE_LOCK_PATH, hash_content_bytes};
+use crate::{
+    CodegenError, DEFAULT_KIT_LOCK_PATH, DEFAULT_KIT_WRITE_LOCK_PATH, THEME_CAPABILITY_PATH,
+    TOKEN_CONTRACT_PATH, hash_content_bytes,
+};
 
 /// The permission state retained in an exact regular-file preimage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1224,7 +1227,11 @@ fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        DEFAULT_KIT_CONFIG_PATH | DEFAULT_KIT_LOCK_PATH | "index.html"
+        DEFAULT_KIT_CONFIG_PATH
+            | DEFAULT_KIT_LOCK_PATH
+            | TOKEN_CONTRACT_PATH
+            | THEME_CAPABILITY_PATH
+            | "index.html"
     ) || is_allowed_stylesheet_path(path)
         || is_allowed_component_rust_path(path)
 }

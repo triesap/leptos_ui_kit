@@ -14,6 +14,8 @@ use serde::{
 use crate::{CodegenError, validate_logical_write_path};
 
 pub const DEFAULT_KIT_LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+pub const TOKEN_CONTRACT_PATH: &str = "src/components/ui/_kit/token-contract.json";
+pub const THEME_CAPABILITY_PATH: &str = "src/components/ui/_kit/theme-integration.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InstallLock {
@@ -26,6 +28,8 @@ pub struct InstallLock {
     pub files_by_path: BTreeMap<String, String>,
     #[serde(deserialize_with = "deserialize_string_map_without_duplicates")]
     pub style_blocks_by_id: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_integration: Option<InstalledThemeIntegration>,
 }
 
 impl InstallLock {
@@ -45,6 +49,7 @@ impl InstallLock {
             items: BTreeMap::new(),
             files_by_path: BTreeMap::new(),
             style_blocks_by_id: BTreeMap::new(),
+            theme_integration: None,
         }
     }
 
@@ -199,7 +204,103 @@ impl InstallLock {
             &expected_style_blocks_by_id,
             &self.style_blocks_by_id,
         )?;
+        if let Some(integration) = &self.theme_integration {
+            integration.validate(path)?;
+        }
 
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledThemeIntegration {
+    pub producer_package: String,
+    pub producer_version: String,
+    pub producer_checksum: Option<String>,
+    pub primitives_package: String,
+    pub primitives_requirement: String,
+    pub primitives_version: String,
+    pub primitives_checksum: String,
+    pub presence_abi_version: u32,
+    pub contract_path: String,
+    pub contract_id: String,
+    pub contract_abi_version: u32,
+    pub contract_revision: u32,
+    pub contract_canonical_digest: String,
+    pub contract_bytes_digest: String,
+    pub capability_path: String,
+    pub capability_bytes_digest: String,
+    pub stylesheet_path: String,
+    pub stylesheet_bytes_digest: String,
+    pub layer_abi_version: u32,
+    pub layer_order: Vec<String>,
+    pub portal_abi_version: u32,
+    pub portal_mount_type: String,
+    pub portal_body_host: bool,
+}
+
+impl InstalledThemeIntegration {
+    fn validate(&self, path: &Path) -> Result<(), CodegenError> {
+        let valid_constants = self.producer_package == "leptos_ui_kit_cli"
+            && !self.producer_version.is_empty()
+            && self.producer_checksum.is_none()
+            && self.primitives_package == "web_ui_primitives"
+            && self.primitives_requirement == ">=0.2.0,<0.3.0"
+            && self.primitives_version == "0.2.0"
+            && !self.primitives_checksum.is_empty()
+            && self.presence_abi_version == 2
+            && self.contract_id == "leptos-ui-kit"
+            && self.contract_abi_version == 1
+            && self.contract_revision == 2
+            && self.layer_abi_version == 1
+            && self.layer_order
+                == [
+                    "leptos-ui-kit.tokens",
+                    "leptos-ui-kit.themes",
+                    "leptos-ui-kit.components",
+                ]
+            && self.portal_abi_version == 1
+            && self.portal_mount_type == "web_ui_primitives::leptos::PortalMount"
+            && self.portal_body_host;
+        if !valid_constants {
+            return invalid_lock(path, "themeIntegration constants are invalid");
+        }
+        for (field, value) in [
+            (
+                "themeIntegration.contractCanonicalDigest",
+                &self.contract_canonical_digest,
+            ),
+            (
+                "themeIntegration.contractBytesDigest",
+                &self.contract_bytes_digest,
+            ),
+            (
+                "themeIntegration.capabilityBytesDigest",
+                &self.capability_bytes_digest,
+            ),
+            (
+                "themeIntegration.stylesheetBytesDigest",
+                &self.stylesheet_bytes_digest,
+            ),
+        ] {
+            validate_lock_hash(path, field, value)?;
+        }
+        for (field, value, extension) in [
+            ("themeIntegration.contractPath", &self.contract_path, "json"),
+            (
+                "themeIntegration.capabilityPath",
+                &self.capability_path,
+                "json",
+            ),
+            (
+                "themeIntegration.stylesheetPath",
+                &self.stylesheet_path,
+                "css",
+            ),
+        ] {
+            validate_lock_target_path(path, field, value, extension)?;
+        }
         Ok(())
     }
 }

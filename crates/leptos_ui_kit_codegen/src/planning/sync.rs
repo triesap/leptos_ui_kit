@@ -4,9 +4,12 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH, DesiredItemConfig, KitConfig, RegistryError,
-    ResolvedRegistryItem, kit_config_for_write, kit_config_to_json, load_built_in_registry_item,
-    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
+    CONTRACT_ABI_VERSION, CONTRACT_ID, CONTRACT_REVISION, CargoPlanEntry, DEFAULT_KIT_CONFIG_PATH,
+    DesiredItemConfig, KitConfig, LAYER_ORDER, PORTAL_ABI_VERSION, PORTAL_MOUNT_TYPE,
+    PRESENCE_ABI_VERSION, RegistryError, ResolvedRegistryItem, WEB_UI_PRIMITIVES_GIT_REV,
+    WEB_UI_PRIMITIVES_REQUIREMENT, WEB_UI_PRIMITIVES_VERSION, kit_config_for_write,
+    kit_config_to_json, load_built_in_registry_item, parse_kit_json_str,
+    read_built_in_registry_source, resolve_built_in_registry_items, token_contract_json,
 };
 
 use super::{
@@ -23,8 +26,9 @@ use crate::patch::{
 use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, InstallLock, InstalledFile, InstalledItem,
-    InstalledStyleBlock, ManagedCssBlockRole, ManagedCssDependency, ManagedCssOperation,
-    PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, validate_planned_write_paths,
+    InstalledStyleBlock, InstalledThemeIntegration, ManagedCssBlockRole, ManagedCssDependency,
+    ManagedCssOperation, PlannedFile, SyncPlan, THEME_CAPABILITY_PATH, TOKEN_CONTRACT_PATH,
+    install_lock_path, lock_to_json_at_path, validate_planned_write_paths,
 };
 
 #[derive(Debug, Clone)]
@@ -318,6 +322,8 @@ pub(crate) fn plan_sync_from_config(
         },
     )?;
 
+    install_theme_integration(context, &mut files, &mut changes, &mut lock, &config)?;
+
     lock.validate_at_path(Path::new(&lock_path))?;
     let lock_json = lock_to_json_at_path(&lock, Path::new(&lock_path))?;
     let force_lock_publication = !files.is_empty();
@@ -345,6 +351,127 @@ pub(crate) fn plan_sync_from_config(
         lock,
         snapshot: context.finish_snapshot(),
     })
+}
+
+fn install_theme_integration(
+    context: &PlanningContext,
+    files: &mut Vec<PlannedFile>,
+    changes: &mut Vec<ChangeRecord>,
+    lock: &mut InstallLock,
+    config: &KitConfig,
+) -> Result<(), CodegenError> {
+    let contract = token_contract_json().map_err(|reason| CodegenError::InvalidLock {
+        path: TOKEN_CONTRACT_PATH.into(),
+        reason,
+    })?;
+    let contract_value: serde_json::Value =
+        serde_json::from_str(&contract).map_err(|source| CodegenError::LockParse {
+            path: TOKEN_CONTRACT_PATH.into(),
+            source,
+        })?;
+    let contract_canonical_digest = contract_value["canonicalDigest"]
+        .as_str()
+        .ok_or_else(|| CodegenError::InvalidLock {
+            path: TOKEN_CONTRACT_PATH.into(),
+            reason: "token contract omits canonicalDigest".to_owned(),
+        })?
+        .to_owned();
+    let contract_bytes_digest = hash_bytes(contract.as_bytes());
+    let stylesheet =
+        planned_or_existing_content(files, context, &config.styles.css)?.ok_or_else(|| {
+            CodegenError::InvalidLock {
+                path: config.styles.css.clone().into(),
+                reason: "theme integration requires the installed kit stylesheet".to_owned(),
+            }
+        })?;
+    let stylesheet_bytes_digest = hash_bytes(stylesheet.as_bytes());
+    let capability = serde_json::json!({
+        "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.2.0/theme-integration.schema.json",
+        "schemaVersion": "1.0.0",
+        "producer": {
+            "package": "leptos_ui_kit_cli",
+            "version": env!("CARGO_PKG_VERSION"),
+            "repository": "https://github.com/triesap/leptos_ui_kit",
+            "checksum": null
+        },
+        "primitives": {
+            "package": "web_ui_primitives",
+            "requirement": WEB_UI_PRIMITIVES_REQUIREMENT,
+            "version": WEB_UI_PRIMITIVES_VERSION,
+            "checksum": format!("git:{WEB_UI_PRIMITIVES_GIT_REV}"),
+            "presenceAbi": PRESENCE_ABI_VERSION
+        },
+        "contract": {
+            "path": "token-contract.json",
+            "contractId": CONTRACT_ID,
+            "abiVersion": CONTRACT_ABI_VERSION,
+            "revision": CONTRACT_REVISION,
+            "canonicalDigest": contract_canonical_digest,
+            "installedBytesDigest": contract_bytes_digest
+        },
+        "stylesheet": {
+            "path": config.styles.css,
+            "installedBytesDigest": stylesheet_bytes_digest
+        },
+        "layerAbi": {
+            "version": 1,
+            "order": LAYER_ORDER
+        },
+        "portalAbi": {
+            "version": PORTAL_ABI_VERSION,
+            "mountType": PORTAL_MOUNT_TYPE,
+            "bodyHost": true
+        }
+    });
+    let capability =
+        serde_json::to_string_pretty(&capability).map_err(CodegenError::LockSerialize)?;
+    let capability = format!("{capability}\n");
+    let capability_bytes_digest = hash_bytes(capability.as_bytes());
+
+    upsert_planned_file(
+        context,
+        files,
+        changes,
+        TOKEN_CONTRACT_PATH,
+        contract,
+        ChangeKind::CreateFile,
+        None,
+    )?;
+    upsert_planned_file(
+        context,
+        files,
+        changes,
+        THEME_CAPABILITY_PATH,
+        capability,
+        ChangeKind::CreateFile,
+        None,
+    )?;
+    lock.theme_integration = Some(InstalledThemeIntegration {
+        producer_package: "leptos_ui_kit_cli".to_owned(),
+        producer_version: env!("CARGO_PKG_VERSION").to_owned(),
+        producer_checksum: None,
+        primitives_package: "web_ui_primitives".to_owned(),
+        primitives_requirement: WEB_UI_PRIMITIVES_REQUIREMENT.to_owned(),
+        primitives_version: WEB_UI_PRIMITIVES_VERSION.to_owned(),
+        primitives_checksum: format!("git:{WEB_UI_PRIMITIVES_GIT_REV}"),
+        presence_abi_version: PRESENCE_ABI_VERSION,
+        contract_path: TOKEN_CONTRACT_PATH.to_owned(),
+        contract_id: CONTRACT_ID.to_owned(),
+        contract_abi_version: CONTRACT_ABI_VERSION,
+        contract_revision: CONTRACT_REVISION,
+        contract_canonical_digest,
+        contract_bytes_digest,
+        capability_path: THEME_CAPABILITY_PATH.to_owned(),
+        capability_bytes_digest,
+        stylesheet_path: config.styles.css.clone(),
+        stylesheet_bytes_digest,
+        layer_abi_version: 1,
+        layer_order: LAYER_ORDER.map(str::to_owned).to_vec(),
+        portal_abi_version: PORTAL_ABI_VERSION,
+        portal_mount_type: PORTAL_MOUNT_TYPE.to_owned(),
+        portal_body_host: true,
+    });
+    Ok(())
 }
 
 pub(crate) fn prepare_kit_config_write(

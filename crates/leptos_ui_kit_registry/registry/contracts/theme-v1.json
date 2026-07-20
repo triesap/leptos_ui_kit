@@ -204,14 +204,14 @@
       "name": "--kit-color-link",
       "category": "color",
       "required": true,
-      "default": "currentColor",
+      "default": "#111827",
       "description": "Default inline-link foreground."
     },
     {
       "name": "--kit-color-link-hover",
       "category": "color",
       "required": true,
-      "default": "currentColor",
+      "default": "#111827",
       "description": "Inline-link hover foreground."
     },
     {
@@ -295,7 +295,7 @@
       "name": "--kit-easing-standard",
       "category": "motion",
       "required": true,
-      "default": "ease",
+      "default": "cubic-bezier(0.2, 0, 0, 1)",
       "description": "Default UI transition timing function."
     },
     {

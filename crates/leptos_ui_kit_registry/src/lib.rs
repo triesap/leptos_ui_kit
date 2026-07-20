@@ -9,6 +9,7 @@ mod embedded_assets;
 mod item;
 mod registry_health;
 mod theme_contract;
+mod token_abi;
 
 pub use config::{
     ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_KIT_DIR, DEFAULT_UI_DIR,
@@ -58,4 +59,8 @@ pub use theme_contract::{
     THEME_CONTRACT_NAME, THEME_CONTRACT_SCHEMA_URL, THEME_CONTRACT_VERSION, ThemeContract,
     ThemeContractError, ThemeToken, ThemeTokenCategory, load_built_in_theme_contract,
     parse_theme_contract_str,
+};
+pub use token_abi::{
+    CONTRACT_ABI_VERSION, CONTRACT_ID, CONTRACT_REVISION, THEME_INTEGRATION_SCHEMA_URL,
+    TOKEN_CONTRACT_SCHEMA_URL, token_contract_json,
 };
