@@ -11,6 +11,10 @@ Semantic Versioning.
   mutation while preserving source-contained component and stylesheet output.
 - Upgrade primitive-backed generated components and dependency plans to
   `web_ui_primitives` `0.2.0`.
+- Freeze Presence ABI 2, cascade-layer ABI 1, and portal ABI 1 in the typed
+  registry compatibility contract.
+- Bind `transitioncancel` and `animationcancel` for generated menu and dialog
+  presence, and place generated CSS in explicit kit token/component layers.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,

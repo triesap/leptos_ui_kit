@@ -171,6 +171,10 @@ fn parse_qualified_rules(stylesheet: &str, input: &str) -> Result<Vec<MappingRow
         let body = &input[open + 1..close];
         cursor = close + 1;
 
+        if prelude.starts_with("@layer") {
+            rows.extend(parse_qualified_rules(stylesheet, body)?);
+            continue;
+        }
         if prelude.starts_with('@') {
             continue;
         }

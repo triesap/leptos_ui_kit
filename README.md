@@ -95,6 +95,12 @@ CSS-only `tokens` foundation item.
 Generated source is app-owned. Managed CSS is delimited with
 `leptos-ui-kit:start` and `leptos-ui-kit:end` markers.
 
+The registry root publishes a fail-closed compatibility contract for Leptos
+`0.9.0-alpha`, `web_ui_primitives` `0.2.0`, Presence ABI 2, cascade-layer ABI
+1, and portal ABI 1. Menu and dialog surfaces bind both completion and
+cancellation events, so interrupted transitions and animations cannot strand
+presence state.
+
 ## Theming
 
 The `tokens` foundation owns the canonical semantic `--kit-*` token contract.
@@ -103,6 +109,12 @@ the tokens managed block before the component styles. The machine-readable
 contract is packaged at `registry/contracts/theme-v1.json` and its public JSON
 schema is published at
 `schema/0.9.0-alpha/theme-contract.schema.json`.
+
+Generated CSS declares the stable cascade order
+`leptos-ui-kit.tokens`, `leptos-ui-kit.themes`, then
+`leptos-ui-kit.components`. Token defaults live in the token layer and
+component rules live in the component layer; the theme compiler owns the
+middle theme layer.
 
 Load application theme CSS after the generated kit stylesheet, then keep
 application rules last:

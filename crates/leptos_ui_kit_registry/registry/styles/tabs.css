@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start tabs */
+@layer leptos-ui-kit.components {
 .kit-tabs {
   display: grid;
   gap: var(--kit-tabs-gap, 1rem);
@@ -65,5 +66,6 @@
   outline: var(--kit-tabs-panel-focus-outline-width, 2px) solid
     var(--kit-tabs-panel-focus-ring, var(--kit-focus-ring));
   outline-offset: var(--kit-tabs-panel-focus-outline-offset, 2px);
+}
 }
 /* leptos-ui-kit:end tabs */

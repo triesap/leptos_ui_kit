@@ -67,7 +67,9 @@ pub fn DialogContent(
     let data_layer = layer.clone();
     let data_state = Signal::derive(move || data_layer.data_state());
     let transition_end = layer.transition_end_handler();
+    let transition_cancel = layer.transition_cancel_handler();
     let animation_end = layer.animation_end_handler();
+    let animation_cancel = layer.animation_cancel_handler();
 
     view! {
         {move || {
@@ -90,7 +92,9 @@ pub fn DialogContent(
                                 described_by,
                                 data_state,
                                 transition_end.clone(),
+                                transition_cancel.clone(),
                                 animation_end.clone(),
+                                animation_cancel.clone(),
                                 children,
                             )
                         }}
@@ -112,7 +116,9 @@ pub fn DialogContent(
                                 described_by,
                                 data_state,
                                 transition_end.clone(),
+                                transition_cancel.clone(),
                                 animation_end.clone(),
+                                animation_cancel.clone(),
                                 children,
                             )
                         }}
@@ -135,7 +141,9 @@ fn dialog_surface(
     described_by: Signal<Option<String>>,
     data_state: Signal<&'static str>,
     transition_end: Callback<leptos::ev::TransitionEvent>,
+    transition_cancel: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
+    animation_cancel: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
 ) -> impl IntoView {
     view! {
@@ -151,7 +159,9 @@ fn dialog_surface(
             aria-labelledby=move || labelled_by.get()
             aria-describedby=move || described_by.get()
             on:transitionend=move |event| transition_end.run(event)
+            on:transitioncancel=move |event| transition_cancel.run(event)
             on:animationend=move |event| animation_end.run(event)
+            on:animationcancel=move |event| animation_cancel.run(event)
         >
             {children.with_value(|children| children())}
         </div>

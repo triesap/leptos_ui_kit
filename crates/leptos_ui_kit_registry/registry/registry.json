@@ -2,6 +2,30 @@
   "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json",
   "schemaVersion": "0.9.0-alpha",
   "name": "leptos-ui-kit",
+  "compatibility": {
+    "leptos": {
+      "version": "0.9.0-alpha"
+    },
+    "primitives": {
+      "package": "web_ui_primitives",
+      "requirement": ">=0.2.0,<0.3.0",
+      "version": "0.2.0",
+      "presenceAbi": 2
+    },
+    "layerAbi": {
+      "version": 1,
+      "order": [
+        "leptos-ui-kit.tokens",
+        "leptos-ui-kit.themes",
+        "leptos-ui-kit.components"
+      ]
+    },
+    "portalAbi": {
+      "version": 1,
+      "mountType": "web_ui_primitives::leptos::PortalMount",
+      "bodyHost": true
+    }
+  },
   "items": [
     {
       "name": "anchor",
