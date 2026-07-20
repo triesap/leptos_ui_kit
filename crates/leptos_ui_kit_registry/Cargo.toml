@@ -89,6 +89,7 @@ include = [
     "src/item.rs",
     "src/lib.rs",
     "src/registry_health.rs",
+    "src/runtime_abi.rs",
     "src/theme_contract.rs",
     "tests/asset_catalog.rs",
     "tests/fixtures/theme_refactor_compatibility.json",

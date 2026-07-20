@@ -20,7 +20,8 @@ use crate::{
     ChangeKind, ChangeRecord, CodegenError, InstallLock, InstalledFile, InstalledItem,
     InstalledStyleBlock, ManagedCssBlockRole, ManagedCssDependency, ManagedCssOperation,
     PlannedFile, SyncPlan, install_lock_path, lock_to_json_at_path, patch_components_mod,
-    patch_ui_mod, reconcile_managed_css_blocks_at_path, validate_planned_write_paths,
+    patch_ui_mod, reconcile_kit_layer_order_at_path, reconcile_managed_css_blocks_at_path,
+    validate_planned_write_paths,
 };
 
 pub fn plan_sync(project_root: &Path) -> Result<SyncPlan, CodegenError> {
@@ -353,8 +354,9 @@ fn plan_managed_stylesheet_batch(
 
     let css_path = config.styles.css.as_str();
     let existing = planned_or_existing_content(files, context, css_path)?.unwrap_or_default();
+    let layered = reconcile_kit_layer_order_at_path(&existing, css_path)?;
     let reconciled = reconcile_managed_css_blocks_at_path(
-        &existing,
+        &layered,
         css_path,
         prior_lock,
         operations,

@@ -105,7 +105,9 @@ pub fn MenuContent(
         .viewport_padding(viewport_padding),
     );
     let transition_end = layer.transition_end_handler();
+    let transition_cancel = layer.transition_cancel_handler();
     let animation_end = layer.animation_end_handler();
+    let animation_cancel = layer.animation_cancel_handler();
 
     view! {
         {move || {
@@ -121,7 +123,9 @@ pub fn MenuContent(
                 data_state,
                 placement.clone(),
                 transition_end.clone(),
+                transition_cancel.clone(),
                 animation_end.clone(),
+                animation_cancel.clone(),
                 children,
             )
             .into_any()
@@ -162,7 +166,9 @@ fn menu_surface(
     data_state: Signal<&'static str>,
     placement: MenuPlacementBinding,
     transition_end: Callback<leptos::ev::TransitionEvent>,
+    transition_cancel: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
+    animation_cancel: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
 ) -> impl IntoView {
     let style_placement = placement.clone();
@@ -182,7 +188,9 @@ fn menu_surface(
             data-align=move || align_placement.data_align()
             aria-labelledby=move || trigger_id.get()
             on:transitionend=move |event| transition_end.run(event)
+            on:transitioncancel=move |event| transition_cancel.run(event)
             on:animationend=move |event| animation_end.run(event)
+            on:animationcancel=move |event| animation_cancel.run(event)
         >
             {children.with_value(|children| children())}
         </div>

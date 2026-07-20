@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use leptos_ui_kit_registry::{
-    ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, canonical_kit_json, parse_kit_json_str,
+    ConfigError, DEFAULT_KIT_CONFIG_PATH, KIT_LAYER_ORDER_DECLARATION, KitConfig,
+    canonical_kit_json, parse_kit_json_str,
 };
 
 use super::{empty_lock_json, planned_or_existing_kit_config_content, push_file_plan};
@@ -96,7 +97,7 @@ fn plan_stylesheet(
         changes,
         css_path,
         PlannedFileAction::Create,
-        String::new(),
+        KIT_LAYER_ORDER_DECLARATION.to_owned(),
         ChangeKind::CreateFile,
     );
     Ok(())

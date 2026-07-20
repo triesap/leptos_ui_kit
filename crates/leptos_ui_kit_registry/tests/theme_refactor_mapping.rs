@@ -171,6 +171,13 @@ fn parse_qualified_rules(stylesheet: &str, input: &str) -> Result<Vec<MappingRow
         let body = &input[open + 1..close];
         cursor = close + 1;
 
+        if prelude == "@layer leptos-ui-kit.components" {
+            rows.extend(parse_qualified_rules(stylesheet, body)?);
+            continue;
+        }
+        if prelude.starts_with("@layer") {
+            return Err(format!("unexpected component cascade layer: {prelude}"));
+        }
         if prelude.starts_with('@') {
             continue;
         }

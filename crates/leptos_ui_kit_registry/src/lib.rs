@@ -8,6 +8,7 @@ mod detect;
 mod embedded_assets;
 mod item;
 mod registry_health;
+mod runtime_abi;
 mod theme_contract;
 
 pub use config::{
@@ -50,8 +51,18 @@ pub use item::{
 pub use registry_health::{
     RegistryHealthError, RegistryHealthFileKind, validate_built_in_registry_health,
 };
+pub use runtime_abi::{
+    ConsumerClosureError, KIT_LAYER_ORDER, KIT_LAYER_ORDER_DECLARATION, LAYER_ABI_VERSION,
+    PORTAL_ABI_VERSION, PORTAL_BODY_HOST, PORTAL_MOUNT_TYPE, PRESENCE_ABI_VERSION,
+    PRESENCE_COMPLETION_EVENTS, RADROOTS_EE_WEB_COMPONENT_CLOSURE, RUNTIME_ABI_VERSION, RuntimeAbi,
+    WEB_UI_PRIMITIVES_REQUIREMENT, runtime_abi, validate_radroots_ee_web_component_closure,
+};
 pub use theme_contract::{
     THEME_CONTRACT_NAME, THEME_CONTRACT_SCHEMA_URL, THEME_CONTRACT_VERSION, ThemeContract,
     ThemeContractError, ThemeToken, ThemeTokenCategory, load_built_in_theme_contract,
     parse_theme_contract_str,
 };
+
+pub const fn web_ui_primitives_version() -> &'static str {
+    WEB_UI_PRIMITIVES_VERSION
+}

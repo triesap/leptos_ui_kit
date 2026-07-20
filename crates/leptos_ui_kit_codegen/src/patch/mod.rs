@@ -5,7 +5,7 @@ mod module;
 pub use css::{
     extract_managed_css_block, extract_managed_css_block_at_path,
     inspect_managed_css_blocks_at_path, patch_css_block, patch_css_block_at_path,
-    reconcile_managed_css_blocks_at_path,
+    reconcile_kit_layer_order_at_path, reconcile_managed_css_blocks_at_path,
 };
 pub(crate) use html::plan_index_html;
 pub use module::{patch_components_mod, patch_ui_mod};

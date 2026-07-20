@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start menu */
+@layer leptos-ui-kit.components {
 .kit-menu {
   position: relative;
   display: inline-flex;
@@ -128,5 +129,6 @@
 
 .kit-menu-item-indicator[hidden] {
   display: none;
+}
 }
 /* leptos-ui-kit:end menu */

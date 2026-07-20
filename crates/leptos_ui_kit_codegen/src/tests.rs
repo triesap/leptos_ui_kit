@@ -78,6 +78,51 @@ fn init_plan_creates_missing_project_files_without_writes() {
             .any(|file| file.path == DEFAULT_KIT_LOCK_PATH)
     );
     assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
+    let stylesheet = plan
+        .files
+        .iter()
+        .find(|file| file.path == "styles/kit.css")
+        .expect("stylesheet plan");
+    assert_eq!(
+        stylesheet.content,
+        leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION
+    );
+}
+
+#[test]
+fn kit_layer_order_reconciliation_is_preamble_safe_and_idempotent() {
+    let existing = "@charset \"UTF-8\";\n@import url(\"base.css\");\n\n.app {}\n";
+    let first =
+        reconcile_kit_layer_order_at_path(existing, "styles/kit.css").expect("insert layer order");
+    assert_eq!(
+        first
+            .matches(leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION)
+            .count(),
+        1
+    );
+    assert!(
+        first.find("@import").expect("import")
+            < first
+                .find(leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION)
+                .expect("layer order")
+    );
+    assert!(
+        first
+            .find(leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION)
+            .expect("layer order")
+            < first.find(".app").expect("app rule")
+    );
+    assert_eq!(
+        reconcile_kit_layer_order_at_path(&first, "styles/kit.css")
+            .expect("idempotent layer order"),
+        first
+    );
+
+    let conflicting = "@layer application;\n.app {}\n";
+    assert!(matches!(
+        reconcile_kit_layer_order_at_path(conflicting, "styles/kit.css"),
+        Err(CodegenError::UnsafePatch { .. })
+    ));
 }
 
 #[test]

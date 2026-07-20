@@ -110,6 +110,17 @@ CSS-only `tokens` foundation item.
 Generated source is app-owned. Managed CSS is delimited with
 `leptos-ui-kit:start` and `leptos-ui-kit:end` markers.
 
+The runtime compatibility surface is versioned independently from the
+registry format. Runtime ABI v1 requires Presence ABI 2, cascade-layer ABI 1,
+and portal ABI 1 from `web_ui_primitives` 0.2. Menu and dialog surfaces forward
+`transitionend`, `transitioncancel`, `animationend`, and `animationcancel`, so
+interrupted exit effects cannot leave presence mounted indefinitely.
+
+The Radroots EE shared-library profile uses exactly `tokens`, `anchor`,
+`spinner`, `button`, `field`, `menu`, `router-link`, and `status`. Consumers
+can validate this profile with
+`validate_radroots_ee_web_component_closure` before generation.
+
 ## Theming
 
 The `tokens` foundation owns the canonical semantic `--kit-*` token contract.
@@ -127,6 +138,11 @@ application rules last:
 <link data-trunk rel="css" href="styles/themes.css" />
 <link data-trunk rel="css" href="styles/app.css" />
 ```
+
+The generated stylesheet declares the stable layer order
+`leptos-ui-kit.tokens`, `leptos-ui-kit.themes`, then
+`leptos-ui-kit.components`. Kit token rules are emitted into the first layer
+and component rules into the last; the theme compiler owns the middle layer.
 
 Themes own semantic values and their `color-scheme` declaration. Component
 styles resolve those values at the property that uses them, so a nested theme

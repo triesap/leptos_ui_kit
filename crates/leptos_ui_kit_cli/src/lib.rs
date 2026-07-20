@@ -18,11 +18,11 @@ use leptos_ui_kit_codegen::{
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
-    DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
-    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig,
-    build_info_output, canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json,
-    load_registry_item, read_built_in_registry_source, resolve_built_in_registry_items,
-    validate_built_in_registry_health,
+    DependencyRequirement, DependencyStatus, InfoOutput, KIT_LAYER_ORDER_DECLARATION, KitConfig,
+    ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
+    ToolSourceConfig, build_info_output, canonical_tool_config, detect_cargo_plan_requirements,
+    kit_config_to_json, load_registry_item, read_built_in_registry_source,
+    resolve_built_in_registry_items, validate_built_in_registry_health,
 };
 use serde::Serialize;
 
@@ -1533,6 +1533,29 @@ fn managed_css_snapshot_checks(
         }
     };
     let mut checks = Vec::new();
+    let layer_order_count = css.matches(KIT_LAYER_ORDER_DECLARATION).count();
+    let layer_order_before_blocks = css.find(KIT_LAYER_ORDER_DECLARATION).is_some_and(|order| {
+        css.find("/* leptos-ui-kit:start ")
+            .is_none_or(|block| order < block)
+    });
+    if layer_order_count == 1 && layer_order_before_blocks {
+        checks.push(
+            DoctorCheck::pass(
+                "managed_css_layer_abi",
+                "managed stylesheet declares cascade-layer ABI 1 before generated blocks",
+            )
+            .with_path(path.display().to_string()),
+        );
+    } else {
+        checks.push(
+            strict_check(
+                strict,
+                "managed_css_layer_abi",
+                "managed stylesheet must contain exactly one cascade-layer ABI 1 declaration before generated blocks",
+            )
+            .with_path(path.display().to_string()),
+        );
+    }
     let expected_ids = snapshot
         .style_blocks_by_id
         .keys()
@@ -2773,6 +2796,44 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
         assert!(output.contains("\"code\": \"doctor.managed_css\""));
         assert!(output.contains("managed CSS block button markers are ambiguous"));
+    }
+
+    #[test]
+    fn doctor_rejects_missing_cascade_layer_abi_declaration() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        run(vec![OsString::from("init")], root).expect("run init");
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run add");
+
+        let css_path = root.join("styles/kit.css");
+        let css = fs::read_to_string(&css_path).expect("read css");
+        fs::write(&css_path, css.replacen(KIT_LAYER_ORDER_DECLARATION, "", 1))
+            .expect("remove layer order");
+
+        let doctor = build_doctor_output(root, true, false, false);
+        let output =
+            render_doctor_output(&doctor, true, doctor_status(&doctor)).expect("render doctor");
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        assert!(output.contains("\"code\": \"doctor.managed_css_layer_abi\""));
     }
 
     #[test]

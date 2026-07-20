@@ -2343,6 +2343,11 @@ mod tests {
         assert!(content_source.contains("pub enum MenuContentSide"));
         assert!(content_source.contains("pub enum MenuContentAlign"));
         assert!(content_source.contains("side: MenuContentSide"));
+        assert!(content_source.contains("transition_cancel_handler"));
+        assert!(content_source.contains("animation_cancel_handler"));
+        assert!(content_source.contains("on:transitioncancel"));
+        assert!(content_source.contains("on:animationcancel"));
+        assert!(css.contains("@layer leptos-ui-kit.components {"));
         assert!(content_source.contains("align: MenuContentAlign"));
         assert!(content_source.contains("spacing: f64"));
         assert!(content_source.contains("viewport_padding: f64"));
@@ -2631,8 +2636,13 @@ mod tests {
         assert!(content.contains("if let Some(portal_mount) = portal_mount.clone()"));
         assert!(content.contains("<Portal mount=portal_mount>"));
         assert!(content.contains("<Portal>"));
+        assert!(content.contains("transition_cancel_handler"));
+        assert!(content.contains("animation_cancel_handler"));
+        assert!(content.contains("on:transitioncancel"));
+        assert!(content.contains("on:animationcancel"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
+        assert!(css.contains("@layer leptos-ui-kit.components {"));
         assert!(css.contains("var(--kit-dialog-background, var(--kit-color-surface-raised))"));
         assert!(css.contains("var(--kit-dialog-color, var(--kit-color-text))"));
         assert!(css.contains("var(--kit-dialog-description-color, var(--kit-color-text-muted))"));

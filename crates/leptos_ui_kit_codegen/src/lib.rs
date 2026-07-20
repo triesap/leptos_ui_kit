@@ -33,7 +33,8 @@ pub use orchestration::{apply_add, apply_init, apply_sync};
 pub use patch::{
     extract_managed_css_block, extract_managed_css_block_at_path,
     inspect_managed_css_blocks_at_path, patch_components_mod, patch_css_block,
-    patch_css_block_at_path, patch_ui_mod, reconcile_managed_css_blocks_at_path,
+    patch_css_block_at_path, patch_ui_mod, reconcile_kit_layer_order_at_path,
+    reconcile_managed_css_blocks_at_path,
 };
 #[doc(inline)]
 pub use path_safety::{

@@ -90,8 +90,15 @@ Generated components should:
 - avoid hidden runtime dependencies
 - avoid Tailwind classes and framework-specific CSS tooling
 - preserve accessibility semantics
+- preserve runtime ABI v1: Presence ABI 2, cascade-layer ABI 1, and portal ABI
+  1
+- forward transition and animation end and cancel events for presence-owned
+  surfaces
 - keep CSS in managed blocks delimited by `leptos-ui-kit:start` and
   `leptos-ui-kit:end`
+- keep the canonical layer-order declaration before generated blocks, token
+  rules in `leptos-ui-kit.tokens`, and component rules in
+  `leptos-ui-kit.components`
 
 ## File And Docs Policy
 

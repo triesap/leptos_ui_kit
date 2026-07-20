@@ -1,9 +1,11 @@
 /* leptos-ui-kit:start status */
+@layer leptos-ui-kit.components {
 .kit-status {
   margin: 0;
   color: var(--kit-status-color, var(--kit-color-text));
   font-size: var(--kit-status-font-size, 1rem);
   font-weight: var(--kit-status-font-weight, 400);
   line-height: var(--kit-status-line-height, 1.4);
+}
 }
 /* leptos-ui-kit:end status */

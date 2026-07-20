@@ -6,6 +6,50 @@ use crate::{
     CodegenError, InstallLock, ManagedCssBlockRange, ManagedCssBlockRole, ManagedCssDependency,
     ManagedCssOperation,
 };
+use leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION;
+
+pub fn reconcile_kit_layer_order_at_path(
+    existing: &str,
+    logical_path: &str,
+) -> Result<String, CodegenError> {
+    let count = existing.matches(KIT_LAYER_ORDER_DECLARATION).count();
+    if count > 1 {
+        return unsafe_patch(
+            logical_path,
+            "kit cascade-layer order declaration is duplicated",
+        );
+    }
+
+    let anchor = kit_layer_order_anchor(existing, logical_path)?;
+    if let Some(statement_start) = existing.find(KIT_LAYER_ORDER_DECLARATION) {
+        if statement_start != anchor {
+            return unsafe_patch(
+                logical_path,
+                "kit cascade-layer order declaration is outside the legal stylesheet preamble",
+            );
+        }
+        return Ok(existing.to_owned());
+    }
+
+    let first_managed_block = existing.find("/* leptos-ui-kit:start ");
+    let preamble_end = first_managed_block.unwrap_or(existing.len());
+    if existing[..preamble_end].contains("@layer") {
+        return unsafe_patch(
+            logical_path,
+            "stylesheet has an unmanaged cascade-layer statement before the kit layer order",
+        );
+    }
+
+    let mut reconciled =
+        String::with_capacity(existing.len() + KIT_LAYER_ORDER_DECLARATION.len() + 1);
+    reconciled.push_str(&existing[..anchor]);
+    if anchor > 0 && !reconciled.ends_with('\n') {
+        reconciled.push('\n');
+    }
+    reconciled.push_str(KIT_LAYER_ORDER_DECLARATION);
+    reconciled.push_str(&existing[anchor..]);
+    Ok(reconciled)
+}
 
 pub fn patch_css_block(
     existing: &str,
@@ -631,6 +675,19 @@ fn append_managed_css_block(mut existing: String, replacement: &str) -> String {
 }
 
 fn legal_css_preamble_end(existing: &str, logical_path: &str) -> Result<usize, CodegenError> {
+    let cursor = kit_layer_order_anchor(existing, logical_path)?;
+    if existing[cursor..].starts_with(KIT_LAYER_ORDER_DECLARATION) {
+        consume_css_preamble_trivia(
+            existing,
+            cursor + KIT_LAYER_ORDER_DECLARATION.len(),
+            logical_path,
+        )
+    } else {
+        Ok(cursor)
+    }
+}
+
+fn kit_layer_order_anchor(existing: &str, logical_path: &str) -> Result<usize, CodegenError> {
     let mut cursor = usize::from(existing.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
 
     loop {

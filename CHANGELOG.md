@@ -12,6 +12,11 @@ Semantic Versioning.
   validation.
 - Advance the generated composite-component dependency plan to
   `web_ui_primitives` `0.2.0`.
+- Freeze runtime ABI v1 around Presence ABI 2, cascade-layer ABI 1, and portal
+  ABI 1; forward canceled transition and animation events from generated menu
+  and dialog surfaces.
+- Emit the canonical kit cascade-layer order and place token and component
+  rules in their owned layers.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,
