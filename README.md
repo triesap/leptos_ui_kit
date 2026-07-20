@@ -11,9 +11,18 @@ app-owned Rust and CSS into Trunk CSR apps.
 cargo install leptos_ui_kit_cli --locked
 ```
 
+The package name is the positional `cargo install` argument. No
+`--state-dir`, migration subcommand, or separate `components.json` file is
+used.
+
 Apps do not depend on `leptos_ui_kit` at runtime. The CLI installs source files
 under `src/components/ui` and managed CSS blocks in `styles/kit.css` by
-default. `kit.json` may select another safe stylesheet under `styles/`.
+default. The committed desired-state file is
+`src/components/ui/_kit/kit.json`; `init`, `add`, and `sync` maintain the
+corresponding `src/components/ui/_kit/kit.lock.json`. `kit.json` may select
+another safe stylesheet under `styles/`. Commit both files and the generated
+app-owned source and stylesheet so `sync` and `doctor --strict` can detect
+drift deterministically.
 
 The installed binaries embed the built-in registry manifests, Rust and CSS
 sources, theme contract, and public schemas in a deterministic catalog. They
@@ -117,7 +126,9 @@ application rules last:
 
 Themes own semantic values and their `color-scheme` declaration. Component
 styles resolve those values at the property that uses them, so a nested theme
-scope works without component-level root aliases:
+scope works without component-level root aliases. The following fragment is
+intentionally abbreviated; omitted contract tokens inherit the foundation
+defaults:
 
 ```css
 :root {
@@ -134,29 +145,59 @@ scope works without component-level root aliases:
 }
 ```
 
+The normative v1 foundation selector is `:root`. Source order resolves rules
+only when their specificity is equal: an `html` rule has lower specificity and
+cannot override `:root` merely by appearing later. Root-level application
+themes should therefore use `:root`, a class, or an attribute selector with
+equal or greater specificity. Changing the foundation to `:where(:root)` would
+be a versioned theme-contract decision.
+
 Existing component variables remain optional escape hatches. For example,
 `--kit-button-gap`, `--kit-dialog-background`, and `--kit-spinner-track-color`
 can still be set by an app, but their defaults now fall back to semantic tokens
 or component-local structural values.
 
 `DialogContent` normally portals to the document body. For a dialog opened
-inside a nested theme scope, mount it below that scope instead:
+inside a nested theme scope, place a stable mount element below that scope and
+look it up without assuming that a browser DOM exists:
 
 ```rust
 use web_ui_primitives::leptos::PortalMount;
 
-let portal_mount: PortalMount = /* an element below the themed scope */;
+#[cfg(target_arch = "wasm32")]
+fn themed_dialog_mount() -> Option<PortalMount> {
+    leptos::web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("dark-theme-dialog-mount"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn themed_dialog_mount() -> Option<PortalMount> {
+    Some(())
+}
 
 view! {
-  <DialogContent portal_mount=portal_mount>
-    <p>"Dialog content"</p>
-  </DialogContent>
+  <DialogRoot>
+    <DialogTrigger>"Open themed dialog"</DialogTrigger>
+    <DialogContent portal_mount=themed_dialog_mount()>
+      <DialogTitle>"Theme settings"</DialogTitle>
+      <DialogDescription>"Update the settings for this theme."</DialogDescription>
+      <DialogClose>"Close"</DialogClose>
+    </DialogContent>
+  </DialogRoot>
 }
 ```
 
-Omit `portal_mount` to keep the body default. Theme selection, named-theme
-state, and persistence belong to the consuming application rather than this
-kit.
+The wasm helper returns the real scoped element when it is present. Its `None`
+fallback preserves the component's document-body behavior, while the
+non-browser helper supplies the host `PortalMount` so the explicit call site
+also compiles during host checks. Omit `portal_mount` entirely at call sites
+that always use the body default.
+
+Keep a scoped portal mount outside transformed, filtered, perspective, clipping,
+and containment ancestors that would change fixed-position containing blocks
+or clip the dialog overlay. Theme selection, named-theme state, and persistence
+belong to the consuming application rather than this kit.
 
 ### Migrating existing generated CSS
 
@@ -181,4 +222,5 @@ See `CONTRIBUTING.md`.
 
 ## License
 
-MIT OR Apache-2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Licensed under either the MIT License or the Apache License, Version 2.0, at
+your option.

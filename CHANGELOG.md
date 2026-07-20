@@ -47,6 +47,9 @@ Semantic Versioning.
   declaration/default parity in the cached runtime registry health snapshot.
 - Document theme stylesheet ordering, nested scopes, dependency requirements,
   and migration guidance.
+- Document the complete committed `kit.json`/`kit.lock.json` workflow, exact
+  `:root` specificity contract, safe scoped portal mounting, and the
+  intentionally abbreviated public theme example.
 
 ## [0.1.0] - 2026-07-15
 

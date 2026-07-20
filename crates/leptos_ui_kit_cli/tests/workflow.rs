@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use leptos_ui_kit_registry::{ThemeTokenCategory, load_built_in_theme_contract};
 use tempfile::tempdir;
 
 #[test]
@@ -324,15 +325,52 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert!(kit_css < themes_css && themes_css < app_css);
     assert!(index.contains("dark-theme-portal-root"));
     assert!(index.contains("data-ui-theme=\"dark\""));
+    assert_complete_dark_theme(&project.join("styles/themes.css"));
+    let fixture_source =
+        fs::read_to_string(project.join("src/main.rs")).expect("read fixture source");
+    assert!(fixture_source.contains("portal_mount=explicit_dialog_portal_mount()"));
+    assert!(fixture_source.contains("fn explicit_dialog_portal_mount() -> Option<PortalMount>"));
     assert!(
-        fs::read_to_string(project.join("styles/themes.css"))
-            .expect("read fixture theme stylesheet")
-            .contains(".preview-pane[data-ui-theme=\"dark\"]")
+        fixture_source.contains("<DialogContent>"),
+        "fixture must retain a separate document-body portal call site"
+    );
+}
+
+fn assert_complete_dark_theme(path: &Path) {
+    let css = fs::read_to_string(path).expect("read fixture theme stylesheet");
+    let selector = ".preview-pane[data-ui-theme=\"dark\"]";
+    let selector_start = css.find(selector).expect("dark theme selector");
+    let block = &css[selector_start..];
+    let block_start = block.find('{').expect("dark theme block start") + 1;
+    let block_end = block[block_start..]
+        .find('}')
+        .map(|offset| block_start + offset)
+        .expect("dark theme block end");
+    let mut declarations = BTreeMap::<String, usize>::new();
+    for line in block[block_start..block_end].lines() {
+        let Some((name, _)) = line.trim().split_once(':') else {
+            continue;
+        };
+        if name.starts_with("--kit-") {
+            *declarations.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+
+    let expected = load_built_in_theme_contract()
+        .expect("load theme contract")
+        .tokens
+        .into_iter()
+        .filter(|token| token.category == ThemeTokenCategory::Color)
+        .map(|token| token.name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declarations.keys().cloned().collect::<BTreeSet<_>>(),
+        expected,
+        "dark selector must define the complete contract color set"
     );
     assert!(
-        fs::read_to_string(project.join("src/main.rs"))
-            .expect("read fixture source")
-            .contains("portal_mount=portal_mount")
+        declarations.values().all(|count| *count == 1),
+        "dark selector must define every contract color exactly once: {declarations:?}"
     );
 }
 

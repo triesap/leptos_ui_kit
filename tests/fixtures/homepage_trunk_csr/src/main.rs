@@ -1,5 +1,4 @@
 use leptos::prelude::*;
-#[cfg(target_arch = "wasm32")]
 use web_ui_primitives::leptos::PortalMount;
 
 mod components;
@@ -559,33 +558,13 @@ fn historical_enum_variants() {
     let _: [TabsDirection; 2] = [TabsDirection::Ltr, TabsDirection::Rtl];
 }
 
-#[cfg(target_arch = "wasm32")]
-#[component]
-fn DarkThemeDialog() -> impl IntoView {
-    let portal_mount = explicit_dialog_portal_mount().expect("dark portal root should exist");
-
-    view! {
-        <section class="preview-pane" data-ui-theme="dark">
-            <DialogRoot>
-                <DialogTrigger>"Open dark dialog"</DialogTrigger>
-                <DialogContent portal_mount=portal_mount>
-                    <DialogTitle>"Dark dialog title"</DialogTitle>
-                    <DialogDescription>"Mounted in the dark theme scope."</DialogDescription>
-                    <DialogClose>"Close"</DialogClose>
-                </DialogContent>
-            </DialogRoot>
-        </section>
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[component]
 fn DarkThemeDialog() -> impl IntoView {
     view! {
         <section class="preview-pane" data-ui-theme="dark">
             <DialogRoot>
                 <DialogTrigger>"Open dark dialog"</DialogTrigger>
-                <DialogContent>
+                <DialogContent portal_mount=explicit_dialog_portal_mount()>
                     <DialogTitle>"Dark dialog title"</DialogTitle>
                     <DialogDescription>"Mounted in the dark theme scope."</DialogDescription>
                     <DialogClose>"Close"</DialogClose>
@@ -600,4 +579,9 @@ fn explicit_dialog_portal_mount() -> Option<PortalMount> {
     leptos::web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id("dark-theme-portal-root"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn explicit_dialog_portal_mount() -> Option<PortalMount> {
+    Some(())
 }
