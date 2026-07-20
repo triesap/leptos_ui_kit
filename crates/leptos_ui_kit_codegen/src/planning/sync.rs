@@ -109,7 +109,7 @@ pub(crate) fn plan_sync_from_config(
 
     let config_hash = hash_bytes(config_content.as_bytes());
     let lock_path = install_lock_path(&config);
-    let mut lock = load_or_empty_lock(context, &lock_path, config_hash.clone())?;
+    let mut lock = load_or_empty_lock(context, &lock_path, config_hash.clone(), &config)?;
     let prior_lock = lock.clone();
     lock.project.config_hash = config_hash;
     let mut item_ids = Vec::new();

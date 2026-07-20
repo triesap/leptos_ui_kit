@@ -40,7 +40,8 @@ crate family.
   TSX, and legacy config fields are not supported.
 - The CLI does not mutate `Cargo.toml`; it emits and verifies dependency plans.
 - Built-in registry items are the only supported registry source.
-- The supported app may be a single crate or a single-package workspace root.
+- The supported target may be a Trunk CSR single crate, a single-package
+  workspace root, or a shared library crate invoked from its package root.
 - SSR, hydration, islands, multi-member workspace installs, and remote
   registries are future work.
 - Generated CSS classes use `.kit-*`; CSS custom properties use `--kit-*`.

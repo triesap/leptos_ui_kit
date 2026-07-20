@@ -17,6 +17,7 @@ pub(crate) fn load_or_empty_lock(
     context: &PlanningContext,
     lock_path: &str,
     config_hash: String,
+    config: &leptos_ui_kit_registry::KitConfig,
 ) -> Result<InstallLock, CodegenError> {
     let path = context.project_root().join(lock_path);
     if let Some(input) = context.read_optional_string(lock_path)? {
@@ -28,10 +29,14 @@ pub(crate) fn load_or_empty_lock(
         })?;
         lock.validate_at_path(Path::new(lock_path))?;
         lock.project.config_hash = config_hash;
+        lock.project.kind = config.project.kind.as_str().to_owned();
         return Ok(lock);
     }
 
-    Ok(InstallLock::empty(config_hash))
+    Ok(InstallLock::empty_for_project(
+        config_hash,
+        config.project.kind,
+    ))
 }
 
 pub(crate) fn plan_generated_source_file(
@@ -287,8 +292,9 @@ pub(crate) fn empty_lock_json(
     config_content: &str,
     state_path: &str,
 ) -> Result<String, CodegenError> {
+    let config = leptos_ui_kit_registry::parse_kit_json_str(config_content)?;
     lock_to_json_at_path(
-        &InstallLock::empty(hash_bytes(config_content.as_bytes())),
+        &InstallLock::empty_for_project(hash_bytes(config_content.as_bytes()), config.project.kind),
         Path::new(state_path),
     )
 }

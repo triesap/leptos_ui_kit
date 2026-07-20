@@ -727,7 +727,12 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
         output.detected.project_root.display(),
         output.detected.workspace_mode,
         output.detected.source_root.display(),
-        output.detected.index_html_path.display(),
+        output
+            .detected
+            .index_html_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not-applicable".to_owned()),
         output.detected.css_file_path.display(),
         output
             .detected
@@ -1674,14 +1679,22 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
         );
     }
 
-    match fs::read_to_string(&info.detected.index_html_path) {
+    let Some(index_html_path) = info.detected.index_html_path.as_ref() else {
+        checks.push(DoctorCheck::pass(
+            "stylesheet_link",
+            "shared-library-crate does not own a Trunk index.html",
+        ));
+        return checks;
+    };
+
+    match fs::read_to_string(index_html_path) {
         Ok(html) if contains_trunk_css_link(&html, css_logical_path) => {
             checks.push(
                 DoctorCheck::pass(
                     "stylesheet_link",
                     format!("index.html links {css_logical_path} for Trunk"),
                 )
-                .with_path(info.detected.index_html_path.display().to_string()),
+                .with_path(index_html_path.display().to_string()),
             );
         }
         Ok(_) => checks.push(
@@ -1690,7 +1703,7 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
                 "stylesheet_link",
                 format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
             )
-            .with_path(info.detected.index_html_path.display().to_string()),
+            .with_path(index_html_path.display().to_string()),
         ),
         Err(error) => checks.push(
             strict_check(
@@ -1698,7 +1711,7 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
                 "stylesheet_link",
                 format!("failed to read index.html: {error}"),
             )
-            .with_path(info.detected.index_html_path.display().to_string()),
+            .with_path(index_html_path.display().to_string()),
         ),
     }
 

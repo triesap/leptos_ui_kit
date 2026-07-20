@@ -39,7 +39,7 @@ cargo leptos_ui_kit doctor --strict
 
 Write commands support `--dry-run`. Structured output commands support `--json`.
 
-## Supported App Shape
+## Supported Project Shapes
 
 ```text
 Cargo.toml
@@ -49,7 +49,11 @@ src/
 ```
 
 The app may be a single crate or a single-package workspace root.
-Multi-member workspace installs are not supported.
+Generated source may also target a library crate when `kit.json` declares
+`project.kind` as `shared-library-crate`; that target omits `indexHtml` and
+does not patch Trunk HTML. Invoke generation from the package root even when
+the library is a member of a larger workspace. Multi-member workspace-root
+installs are not supported.
 
 ## Dependency Plan
 
@@ -65,7 +69,7 @@ Only `collapsible`, `dialog`, `menu`, and `tabs` additionally require:
 
 ```toml
 [dependencies]
-web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "a7ad19e203c08be19040154fa6bce909701d402f", features = ["leptos"] }
 ```
 
 `router-link` additionally requires:

@@ -5,7 +5,8 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryItem, RegistryRoot,
+    KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryItem, RegistryRoot,
+    canonical_kit_json,
 };
 use serde_json::{Value, json};
 
@@ -82,6 +83,36 @@ fn package_registry_schemas_are_valid_draft_2020_12() {
         );
         assert_eq!(schema["$id"], json!(expected_id));
     }
+}
+
+#[test]
+fn kit_schema_accepts_trunk_and_shared_library_targets() {
+    let path = package_root().join("schema/0.9.0-alpha/kit.schema.json");
+    let (schema, validator) = compile_draft_2020_12_schema(&path);
+    assert_eq!(schema["$id"], json!(KIT_SCHEMA_URL));
+
+    let trunk = serde_json::from_str::<Value>(&canonical_kit_json().expect("canonical kit config"))
+        .expect("parse canonical kit config");
+    assert_valid(&validator, &trunk, &path);
+
+    let mut shared = trunk.clone();
+    shared["project"]["kind"] = json!("shared-library-crate");
+    shared["project"]
+        .as_object_mut()
+        .expect("project object")
+        .remove("indexHtml");
+    assert_valid(&validator, &shared, &path);
+
+    let mut shared_with_html = shared.clone();
+    shared_with_html["project"]["indexHtml"] = json!("index.html");
+    assert!(!validator.is_valid(&shared_with_html));
+
+    let mut trunk_without_html = trunk;
+    trunk_without_html["project"]
+        .as_object_mut()
+        .expect("project object")
+        .remove("indexHtml");
+    assert!(!validator.is_valid(&trunk_without_html));
 }
 
 #[test]

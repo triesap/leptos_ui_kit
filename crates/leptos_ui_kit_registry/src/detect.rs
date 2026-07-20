@@ -9,7 +9,7 @@ use toml::Value as TomlValue;
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    RenderMode, WorkspaceMode, normalize_single_crate_project, parse_kit_json_str,
+    ProjectKind, RenderMode, WorkspaceMode, normalize_project, parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -56,9 +56,10 @@ impl From<ConfigError> for DetectionError {
 pub struct DetectedProject {
     pub project_root: PathBuf,
     pub cargo_manifest_path: PathBuf,
+    pub project_kind: ProjectKind,
     pub workspace_mode: WorkspaceMode,
     pub source_root: PathBuf,
-    pub index_html_path: PathBuf,
+    pub index_html_path: Option<PathBuf>,
     pub css_file_path: PathBuf,
     pub render_mode: Option<RenderMode>,
     pub dependency_plan: DependencyPlan,
@@ -119,7 +120,7 @@ pub struct InfoOutput {
     pub normalized_config: Option<NormalizedProjectConfig>,
 }
 
-pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
+pub fn detect_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
     let cargo_manifest_path = project_root.join("Cargo.toml");
     if !cargo_manifest_path.is_file() {
         return Err(DetectionError::MissingCargoManifest(cargo_manifest_path));
@@ -147,15 +148,28 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         return Err(DetectionError::MissingSourceRoot(source_root));
     }
 
-    let index_html_path = project_root.join("index.html");
-    if !index_html_path.is_file() {
-        return Err(DetectionError::MissingIndexHtml(index_html_path));
-    }
-
     let kit_config_path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
     let kit_config_path = kit_config_path.is_file().then_some(kit_config_path);
     let kit_config = match kit_config_path.as_ref() {
         Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
+        None => None,
+    };
+    let project_kind = kit_config
+        .as_ref()
+        .map(|config| config.project.kind)
+        .unwrap_or(ProjectKind::SingleCrateTrunkCsr);
+    let index_html_path = match kit_config
+        .as_ref()
+        .and_then(|config| config.project.index_html.as_deref())
+        .or_else(|| (project_kind == ProjectKind::SingleCrateTrunkCsr).then_some("index.html"))
+    {
+        Some(relative) => {
+            let path = project_root.join(relative);
+            if !path.is_file() {
+                return Err(DetectionError::MissingIndexHtml(path));
+            }
+            Some(path)
+        }
         None => None,
     };
     let css_file_path = project_root.join(
@@ -171,6 +185,7 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
     Ok(DetectedProject {
         project_root: project_root.to_path_buf(),
         cargo_manifest_path,
+        project_kind,
         workspace_mode,
         source_root,
         index_html_path,
@@ -179,6 +194,10 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         dependency_plan,
         kit_config_path,
     })
+}
+
+pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
+    detect_project(project_root)
 }
 
 fn detect_workspace_mode(manifest: &TomlValue) -> Result<WorkspaceMode, DetectionError> {
@@ -205,7 +224,7 @@ fn detect_workspace_mode(manifest: &TomlValue) -> Result<WorkspaceMode, Detectio
 }
 
 pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionError> {
-    let detected = detect_single_crate_project(project_root)?;
+    let detected = detect_project(project_root)?;
 
     let kit_config = match detected.kit_config_path.as_ref() {
         Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
@@ -213,7 +232,7 @@ pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionErr
     };
 
     let normalized_config = match kit_config.as_ref() {
-        Some(config) => Some(normalize_single_crate_project(
+        Some(config) => Some(normalize_project(
             config,
             &NormalizeOptions {
                 project_root: detected.project_root.clone(),
@@ -441,7 +460,8 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(detected.workspace_mode, WorkspaceMode::SingleCrate);
         assert_eq!(detected.source_root, root.join("src"));
-        assert_eq!(detected.index_html_path, root.join("index.html"));
+        assert_eq!(detected.project_kind, ProjectKind::SingleCrateTrunkCsr);
+        assert_eq!(detected.index_html_path, Some(root.join("index.html")));
         assert_eq!(detected.css_file_path, root.join("styles/kit.css"));
         assert_eq!(detected.render_mode, Some(RenderMode::Csr));
         assert_eq!(
@@ -483,6 +503,39 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(
             detected.dependency_plan.leptos.status,
             DependencyStatus::Satisfied
+        );
+    }
+
+    #[test]
+    fn detects_shared_library_without_index_html() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        write_homepage_fixture(root, "\"csr\"");
+        fs::remove_file(root.join("index.html")).expect("remove app-only index");
+        let mut config =
+            serde_json::from_str::<serde_json::Value>(&canonical_kit_json().expect("config"))
+                .expect("parse config JSON");
+        config["project"]["kind"] = serde_json::json!("shared-library-crate");
+        config["project"]
+            .as_object_mut()
+            .expect("project object")
+            .remove("indexHtml");
+        write_kit_config(
+            root,
+            serde_json::to_vec_pretty(&config).expect("serialize shared config"),
+        );
+
+        let detected = detect_project(root).expect("detect shared library");
+
+        assert_eq!(detected.project_kind, ProjectKind::SharedLibraryCrate);
+        assert_eq!(detected.index_html_path, None);
+        assert_eq!(detected.css_file_path, root.join("styles/kit.css"));
+        assert_eq!(detected.render_mode, Some(RenderMode::Csr));
+
+        let info = build_info_output(root).expect("shared info");
+        assert_eq!(
+            info.normalized_config.expect("normalized").project_kind,
+            ProjectKind::SharedLibraryCrate
         );
     }
 
@@ -547,13 +600,13 @@ edition = "2024"
     fn dependency_requirement_reports_satisfied_version_dependency() {
         let manifest: TomlValue = toml::from_str(
             r#"[dependencies]
-web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
+web_ui_primitives = { version = "0.2.0", features = ["leptos"] }
 "#,
         )
         .expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::version("0.1.0"),
+            source: CargoPlanSource::version("0.2.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };
@@ -568,7 +621,7 @@ web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
         let manifest: TomlValue = toml::from_str("[dependencies]\n").expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::version("0.1.0"),
+            source: CargoPlanSource::version("0.2.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };

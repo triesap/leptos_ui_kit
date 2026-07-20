@@ -7,6 +7,10 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Add a typed `shared-library-crate` project target that omits Trunk HTML
+  mutation while preserving source-contained component and stylesheet output.
+- Upgrade primitive-backed generated components and dependency plans to
+  `web_ui_primitives` `0.2.0`.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,

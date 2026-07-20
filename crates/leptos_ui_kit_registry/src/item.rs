@@ -16,7 +16,9 @@ use crate::{
     embedded_assets::{AssetProviderError, EmbeddedAssetKind},
 };
 
-pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
+pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.2.0";
+pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
+pub const WEB_UI_PRIMITIVES_GIT_REV: &str = "a7ad19e203c08be19040154fa6bce909701d402f";
 
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
@@ -671,8 +673,11 @@ impl CargoPlanEntry {
                 expect_features("cargoPlan[].features", &[], &self.features)
             }
             "web_ui_primitives" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", WEB_UI_PRIMITIVES_VERSION)?;
+                self.source.expect_git(
+                    "cargoPlan[].source",
+                    WEB_UI_PRIMITIVES_GIT_URL,
+                    WEB_UI_PRIMITIVES_GIT_REV,
+                )?;
                 expect_features("cargoPlan[].features", &["leptos"], &self.features)
             }
             value => Err(RegistryError::InvalidValue {
@@ -763,6 +768,26 @@ impl CargoPlanSource {
             _ => Err(RegistryError::InvalidValue {
                 field,
                 expected: expected.to_owned(),
+                actual: format!("{self:?}"),
+            }),
+        }
+    }
+
+    fn expect_git(
+        &self,
+        field: &'static str,
+        expected_url: &str,
+        expected_rev: &str,
+    ) -> Result<(), RegistryError> {
+        match (self.kind, self.url.as_deref(), self.rev.as_deref()) {
+            (CargoPlanSourceKind::Git, Some(url), Some(rev))
+                if url == expected_url && rev == expected_rev =>
+            {
+                Ok(())
+            }
+            _ => Err(RegistryError::InvalidValue {
+                field,
+                expected: format!("git source {expected_url} at revision {expected_rev}"),
                 actual: format!("{self:?}"),
             }),
         }
@@ -1689,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_web_ui_primitives_version_cargo_plan_entry() {
+    fn accepts_pinned_web_ui_primitives_git_cargo_plan_entry() {
         let item = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
@@ -1711,8 +1736,9 @@ mod tests {
                 {
                   "crate": "web_ui_primitives",
                   "source": {
-                    "kind": "version",
-                    "version": "0.1.0"
+                    "kind": "git",
+                    "url": "https://github.com/triesap/web_ui_primitives",
+                    "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
                   },
                   "features": ["leptos"],
                   "required": true

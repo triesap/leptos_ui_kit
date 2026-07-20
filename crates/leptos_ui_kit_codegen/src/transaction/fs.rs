@@ -595,7 +595,7 @@ impl FaultFs {
         *fs.final_revalidation_mutation
             .lock()
             .expect("mutation lock") = Some(FinalRevalidationMutation::WriteFile {
-            target: path,
+            target: normalize_test_path(path),
             content,
         });
         fs
@@ -605,7 +605,7 @@ impl FaultFs {
         let fs = Self::passthrough();
         *fs.post_revalidation_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::WriteFile {
-                target: path,
+                target: normalize_test_path(path),
                 content,
             });
         fs
@@ -615,7 +615,7 @@ impl FaultFs {
         let fs = Self::passthrough();
         *fs.publication_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::WriteFile {
-                target: path,
+                target: normalize_test_path(path),
                 content,
             });
         fs
@@ -632,10 +632,10 @@ impl FaultFs {
         *fs.final_revalidation_mutation
             .lock()
             .expect("mutation lock") = Some(FinalRevalidationMutation::ReplaceParentWithSymlink {
-            target,
-            parent,
-            moved_parent,
-            referent,
+            target: normalize_test_path(target),
+            parent: normalize_test_path(parent),
+            moved_parent: normalize_test_path(moved_parent),
+            referent: normalize_test_path(referent),
         });
         fs
     }
@@ -650,10 +650,10 @@ impl FaultFs {
         let fs = Self::passthrough();
         *fs.post_revalidation_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::ReplaceParentWithSymlink {
-                target,
-                parent,
-                moved_parent,
-                referent,
+                target: normalize_test_path(target),
+                parent: normalize_test_path(parent),
+                moved_parent: normalize_test_path(moved_parent),
+                referent: normalize_test_path(referent),
             });
         fs
     }
@@ -667,9 +667,9 @@ impl FaultFs {
         let fs = Self::passthrough();
         *fs.post_revalidation_mutation.lock().expect("mutation lock") =
             Some(FinalRevalidationMutation::ReplaceParentWithDirectory {
-                target,
-                parent,
-                moved_parent,
+                target: normalize_test_path(target),
+                parent: normalize_test_path(parent),
+                moved_parent: normalize_test_path(moved_parent),
             });
         fs
     }
@@ -743,6 +743,30 @@ impl FaultFs {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn normalize_test_path(path: PathBuf) -> PathBuf {
+    let mut existing = path.as_path();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            return path;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            return path;
+        };
+        existing = parent;
+    }
+
+    let Ok(mut normalized) = fs::canonicalize(existing) else {
+        return path;
+    };
+    for component in suffix.into_iter().rev() {
+        normalized.push(component);
+    }
+    normalized
 }
 
 #[cfg(test)]

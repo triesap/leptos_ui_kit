@@ -144,6 +144,43 @@ fn init_plan_does_not_require_compiled_provenance_for_an_existing_config() {
 }
 
 #[test]
+fn init_plan_supports_shared_library_without_index_html() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    let mut config =
+        serde_json::from_str::<serde_json::Value>(&canonical_kit_json().expect("config"))
+            .expect("parse config");
+    config["project"]["kind"] = serde_json::json!("shared-library-crate");
+    config["project"]
+        .as_object_mut()
+        .expect("project object")
+        .remove("indexHtml");
+    write_kit_config(
+        root,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&config).expect("serialize shared config")
+        ),
+    );
+
+    let plan = plan_init(root).expect("plan shared init");
+
+    assert!(!plan.files.iter().any(|file| file.path == "index.html"));
+    let lock = plan
+        .files
+        .iter()
+        .find(|file| file.path == DEFAULT_KIT_LOCK_PATH)
+        .expect("planned lock");
+    assert!(lock.content.contains("\"kind\": \"shared-library-crate\""));
+    assert!(
+        plan.files
+            .iter()
+            .any(|file| file.path == "src/components/ui/mod.rs")
+    );
+}
+
+#[test]
 fn init_plan_uses_configured_stylesheet_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -3946,7 +3983,13 @@ fn expected_absent_publication_never_clobbers_a_last_moment_creator() {
     );
     assert!(fault_fs.events().iter().any(|event| {
         event.operation == FsOperation::HardLink
-            && event.destination.as_deref() == Some(target.as_path())
+            && event.destination.as_deref()
+                == Some(
+                    fs::canonicalize(root)
+                        .expect("canonical project root")
+                        .join("styles/kit.css")
+                        .as_path(),
+                )
     }));
 }
 
@@ -4255,15 +4298,30 @@ fn transaction_stages_the_complete_sorted_cohort_and_commits_the_install_lock_la
     assert_eq!(publications.len(), 3);
     assert_eq!(
         publications[0].destination.as_deref(),
-        Some(root.join("styles/first.css").as_path())
+        Some(
+            fs::canonicalize(root)
+                .expect("canonical project root")
+                .join("styles/first.css")
+                .as_path()
+        )
     );
     assert_eq!(
         publications[1].destination.as_deref(),
-        Some(root.join("styles/second.css").as_path())
+        Some(
+            fs::canonicalize(root)
+                .expect("canonical project root")
+                .join("styles/second.css")
+                .as_path()
+        )
     );
     assert_eq!(
         publications[2].destination.as_deref(),
-        Some(root.join(DEFAULT_KIT_LOCK_PATH).as_path())
+        Some(
+            fs::canonicalize(root)
+                .expect("canonical project root")
+                .join(DEFAULT_KIT_LOCK_PATH)
+                .as_path()
+        )
     );
 }
 
@@ -4431,7 +4489,12 @@ fn existing_targets_are_backed_up_before_the_first_commit_and_cleaned_after_succ
     }));
     assert_eq!(
         events[first_rename].destination.as_deref(),
-        Some(root.join("styles/first.css").as_path())
+        Some(
+            fs::canonicalize(root)
+                .expect("canonical project root")
+                .join("styles/first.css")
+                .as_path()
+        )
     );
     assert_eq!(
         fs::read(root.join("styles/first.css")).expect("first result"),

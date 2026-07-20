@@ -21,13 +21,13 @@ pub use config::{
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
     desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
     desired_builtin_status_item, desired_builtin_tabs_item, desired_builtin_tokens_item,
-    kit_config_for_write, kit_config_to_json, kit_config_with_desired_item,
+    kit_config_for_write, kit_config_to_json, kit_config_with_desired_item, normalize_project,
     normalize_single_crate_project, parse_kit_json_str,
 };
 pub use detect::{
     DependencyPlan, DependencyRequirement, DependencyStatus, DetectedDependencySource,
     DetectedProject, DetectionError, InfoOutput, build_info_output,
-    dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
+    dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements, detect_project,
     detect_single_crate_project,
 };
 #[allow(
