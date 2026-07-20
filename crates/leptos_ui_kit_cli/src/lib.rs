@@ -484,7 +484,7 @@ struct CliError {
     status: CommandStatus,
     category: ErrorCategory,
     code: &'static str,
-    message: String,
+    message: Box<str>,
     logical_path: Option<String>,
     suggestion: Option<&'static str>,
     source: Option<Box<dyn std::error::Error>>,
@@ -505,7 +505,7 @@ impl CliError {
             status: CommandStatus::Unsupported,
             category: ErrorCategory::Usage,
             code,
-            message: message.into(),
+            message: message.into().into_boxed_str(),
             logical_path: None,
             suggestion: Some("Run the command with --help to inspect supported arguments."),
             source: None,
@@ -528,7 +528,7 @@ impl CliError {
             status: CommandStatus::Error,
             category: ErrorCategory::Operational,
             code,
-            message: message.into(),
+            message: message.into().into_boxed_str(),
             logical_path,
             suggestion: Some("Resolve the reported project or filesystem error and retry."),
             source,
@@ -544,7 +544,7 @@ impl CliError {
             status: CommandStatus::Error,
             category: ErrorCategory::Doctor,
             code: "doctor.checks_failed",
-            message: "doctor checks failed".to_owned(),
+            message: "doctor checks failed".into(),
             logical_path: None,
             suggestion: Some("Resolve the failing doctor checks and retry."),
             source: None,
@@ -703,7 +703,8 @@ impl CliError {
             status,
             category,
             code,
-            message: redact_project_root(&format!("{action}: {error_message}"), project_root),
+            message: redact_project_root(&format!("{action}: {error_message}"), project_root)
+                .into_boxed_str(),
             logical_path,
             suggestion: Some(suggestion),
             source: Some(Box::new(error)),
@@ -802,7 +803,8 @@ impl CliError {
             message: redact_project_root(
                 &format!("failed to inspect project: {error_message}"),
                 project_root,
-            ),
+            )
+            .into_boxed_str(),
             logical_path,
             suggestion: Some(suggestion),
             source: Some(Box::new(error)),
@@ -845,7 +847,8 @@ impl CliError {
             message: format!(
                 "failed to load registry item {selector}: {}",
                 registry_error_message(&error)
-            ),
+            )
+            .into_boxed_str(),
             logical_path,
             suggestion: Some(
                 "Verify the built-in registry package and requested item, then retry.",
@@ -874,7 +877,7 @@ impl CliError {
             | ErrorCategory::UnsafePath
             | ErrorCategory::RegistryPackage => DiagnosticLevel::Error,
         };
-        let mut diagnostic = Diagnostic::new(level, self.code, self.message.clone());
+        let mut diagnostic = Diagnostic::new(level, self.code, self.message.to_string());
         if let Some(path) = &self.logical_path {
             diagnostic = diagnostic.with_path(path);
         }
