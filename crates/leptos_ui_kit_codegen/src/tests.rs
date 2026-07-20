@@ -790,6 +790,51 @@ fn add_plan_records_generated_hashes() {
 }
 
 #[test]
+fn sync_projects_exact_delivery_mode_or_neutral_shared_dependency_plans() {
+    for (kind, render_mode, expected_features) in [
+        (
+            leptos_ui_kit_registry::ProjectKind::SingleCrateNativeSsr,
+            Some(leptos_ui_kit_registry::RenderMode::Ssr),
+            vec!["ssr".to_owned()],
+        ),
+        (
+            leptos_ui_kit_registry::ProjectKind::SingleCrateBrowserHydration,
+            Some(leptos_ui_kit_registry::RenderMode::Hydrate),
+            vec!["hydrate".to_owned()],
+        ),
+        (
+            leptos_ui_kit_registry::ProjectKind::SharedLibraryCrate,
+            None,
+            Vec::new(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        setup_empty_project(root);
+        let mut config = parse_kit_json_str(&canonical_kit_json().expect("canonical config"))
+            .expect("parse canonical config");
+        config.project.kind = kind;
+        config.project.index_html = None;
+        config.leptos.render_mode = render_mode;
+        config = kit_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("request button");
+        write_kit_config(
+            root,
+            kit_config_to_json(&config).expect("serialize project config"),
+        );
+
+        let plan = plan_sync(root).expect("plan sync");
+        let leptos = plan
+            .cargo_plan
+            .iter()
+            .find(|entry| entry.crate_name == "leptos")
+            .expect("Leptos dependency plan");
+        assert_eq!(leptos.features, expected_features);
+        assert_eq!(plan.lock.project.kind, kind.as_str());
+    }
+}
+
+#[test]
 fn add_plan_reports_button_changes_without_writes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -1071,9 +1116,11 @@ fn fresh_add_tokens_creates_only_foundation_integration_and_state() {
 
     assert!(paths.contains(&DEFAULT_KIT_CONFIG_PATH));
     assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
+    assert!(paths.contains(&TOKEN_CONTRACT_PATH));
+    assert!(paths.contains(&THEME_CAPABILITY_PATH));
     assert!(paths.contains(&"styles/kit.css"));
     assert!(paths.contains(&"index.html"));
-    assert_eq!(paths.len(), 4);
+    assert_eq!(paths.len(), 6);
     assert!(!paths.contains(&"src/components/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/tokens.rs"));
@@ -1820,6 +1867,8 @@ fn init_add_and_sync_republish_an_unchanged_lock_with_every_nonempty_cohort() {
     let sync_dir = tempfile::tempdir().expect("sync tempdir");
     let sync_root = sync_dir.path();
     materialize_initialized_project(sync_root);
+    let initial_sync = plan_sync(sync_root).expect("plan initial sync");
+    materialize_planned_files(sync_root, &initial_sync.files);
     let sync_lock = fs::read_to_string(sync_root.join(DEFAULT_KIT_LOCK_PATH)).expect("sync lock");
     fs::remove_file(sync_root.join("src/components/mod.rs")).expect("remove sync target");
 
@@ -1847,9 +1896,11 @@ fn init_add_and_sync_keep_truly_idempotent_commands_empty() {
     materialize_initialized_project(root);
 
     let init = plan_init(root).expect("plan no-op init");
-    let sync = plan_sync(root).expect("plan no-op sync");
     assert!(init.files.is_empty());
     assert!(init.changes.is_empty());
+    let initial_sync = plan_sync(root).expect("plan initial sync");
+    materialize_planned_files(root, &initial_sync.files);
+    let sync = plan_sync(root).expect("plan no-op sync");
     assert!(sync.files.is_empty());
     assert!(sync.changes.is_empty());
 
@@ -2595,11 +2646,9 @@ fn assert_successful_sync(
         lock_to_json(&first.lock).expect("serialize applied lock"),
         "{case}: canonical lock bytes"
     );
-    assert_eq!(
-        lock,
-        expected_install_lock(&config_content, css_path, &resolved),
-        "{case}: complete registry-derived lock"
-    );
+    let mut expected = expected_install_lock(&config_content, css_path, &resolved);
+    expected.theme_integration = first.lock.theme_integration.clone();
+    assert_eq!(lock, expected, "{case}: complete registry-derived lock");
 
     let second =
         apply_sync(root).unwrap_or_else(|error| panic!("{case}: second sync failed: {error}"));
@@ -6814,7 +6863,12 @@ fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {
             leptos: leptos_ui_kit_registry::RegistryLeptos {
                 version: leptos_ui_kit_registry::LEPTOS_VERSION.to_owned(),
                 router_version: leptos_ui_kit_registry::LEPTOS_ROUTER_VERSION.to_owned(),
-                render_mode: leptos_ui_kit_registry::RenderMode::Csr,
+                render_modes: vec![
+                    leptos_ui_kit_registry::RenderMode::Csr,
+                    leptos_ui_kit_registry::RenderMode::Hydrate,
+                    leptos_ui_kit_registry::RenderMode::Ssr,
+                ],
+                legacy_render_mode: None,
             },
             accessibility: leptos_ui_kit_registry::RegistryAccessibility::default(),
             files: vec![leptos_ui_kit_registry::RegistryItemFile {

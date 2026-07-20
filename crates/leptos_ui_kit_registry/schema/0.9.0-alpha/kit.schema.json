@@ -72,6 +72,8 @@
         "kind": {
           "enum": [
             "single-crate-trunk-csr",
+            "single-crate-native-ssr",
+            "single-crate-browser-hydration",
             "shared-library-crate"
           ]
         },
@@ -107,7 +109,11 @@
           "if": {
             "properties": {
               "kind": {
-                "const": "shared-library-crate"
+                "enum": [
+                  "single-crate-native-ssr",
+                  "single-crate-browser-hydration",
+                  "shared-library-crate"
+                ]
               }
             },
             "required": [
@@ -129,8 +135,7 @@
       "additionalProperties": false,
       "required": [
         "version",
-        "routerVersion",
-        "renderMode"
+        "routerVersion"
       ],
       "properties": {
         "version": {
@@ -140,7 +145,11 @@
           "const": "0.9.0-alpha"
         },
         "renderMode": {
-          "const": "csr"
+          "enum": [
+            "csr",
+            "hydrate",
+            "ssr"
+          ]
         }
       }
     },
@@ -241,5 +250,112 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-trunk-csr"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "csr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-native-ssr"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "ssr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-browser-hydration"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "hydrate"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "shared-library-crate"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "not": {
+              "required": [
+                "renderMode"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

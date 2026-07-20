@@ -111,7 +111,7 @@ fn all_package_schemas_are_valid_draft_2020_12() {
 }
 
 #[test]
-fn kit_schema_accepts_trunk_and_shared_library_targets() {
+fn kit_schema_accepts_each_project_render_contract() {
     let (_, validator) = compile_draft_2020_12_schema(&schema_root().join("kit.schema.json"));
     let trunk = serde_json::to_value(canonical_kit_config().expect("canonical kit config"))
         .expect("serialize canonical kit config");
@@ -123,7 +123,28 @@ fn kit_schema_accepts_trunk_and_shared_library_targets() {
         .as_object_mut()
         .expect("project object")
         .remove("indexHtml");
+    shared["leptos"]
+        .as_object_mut()
+        .expect("leptos object")
+        .remove("renderMode");
     assert_valid(&validator, &shared, "shared-library config");
+
+    for (kind, mode) in [
+        ("single-crate-native-ssr", "ssr"),
+        ("single-crate-browser-hydration", "hydrate"),
+    ] {
+        let mut delivery = trunk.clone();
+        delivery["project"]["kind"] = json!(kind);
+        delivery["project"]
+            .as_object_mut()
+            .expect("project object")
+            .remove("indexHtml");
+        delivery["leptos"]["renderMode"] = json!(mode);
+        assert_valid(&validator, &delivery, kind);
+
+        delivery["leptos"]["renderMode"] = json!("csr");
+        assert_invalid(&validator, &delivery, &format!("{kind} with csr"));
+    }
 
     let mut shared_with_html = shared.clone();
     shared_with_html["project"]["indexHtml"] = json!("index.html");
@@ -131,6 +152,14 @@ fn kit_schema_accepts_trunk_and_shared_library_targets() {
         &validator,
         &shared_with_html,
         "shared-library config with indexHtml",
+    );
+
+    let mut shared_with_mode = shared;
+    shared_with_mode["leptos"]["renderMode"] = json!("csr");
+    assert_invalid(
+        &validator,
+        &shared_with_mode,
+        "shared-library config with renderMode",
     );
 
     let mut trunk_without_html = trunk;
@@ -180,6 +209,22 @@ fn schemas_and_public_parsers_accept_every_canonical_document() {
         typed_items.push(typed_item);
     }
     validate_registry_graph(&typed_items).expect("validate complete registry graph");
+
+    let mut legacy_item = read_json(&registry_root().join("ui/button.json"));
+    let render_modes = legacy_item["leptos"]
+        .as_object_mut()
+        .expect("Leptos object")
+        .remove("renderModes")
+        .expect("canonical render modes");
+    legacy_item["leptos"]["renderMode"] = json!("csr");
+    assert_valid(&item_validator, &legacy_item, "legacy CSR registry item");
+    parse_registry_item_str(&json_string(&legacy_item)).expect("parse legacy CSR registry item");
+    legacy_item["leptos"]["renderModes"] = render_modes;
+    assert_invalid(
+        &item_validator,
+        &legacy_item,
+        "registry item with legacy and compatibility render fields",
+    );
 
     let mut discovered_paths = BTreeSet::new();
     for directory in ["foundation", "ui"] {

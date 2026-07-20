@@ -127,7 +127,7 @@ fn json_help_uses_exact_success_envelopes() {
             "diagnostics": [],
             "changes": [],
             "data": {
-                "usage": "leptos_ui_kit\n\nusage: leptos_ui_kit <command> [options]\n\ncommands:\n  info                 inspect a supported Trunk CSR Leptos app\n  init                 create src/components/ui/_kit/kit.json and kit-managed app files\n  view <item>          show a registry item\n  add <item>           add a registry item to the app\n  sync                 reconcile installed items with src/components/ui/_kit/kit.json\n  doctor               validate generated source, CSS, lock metadata, and dependencies\n\nglobal options:\n  --cwd <path>         run against a different project root\n  --quiet              accepted for script compatibility\n  --verbose            accepted for script compatibility\n  --help               print help\n  --version            print version"
+                "usage": "leptos_ui_kit\n\nusage: leptos_ui_kit <command> [options]\n\ncommands:\n  info                 inspect a supported Leptos project\n  init                 create src/components/ui/_kit/kit.json and kit-managed app files\n  view <item>          show a registry item\n  add <item>           add a registry item to the app\n  sync                 reconcile installed items with src/components/ui/_kit/kit.json\n  doctor               validate generated source, CSS, lock metadata, and dependencies\n\nglobal options:\n  --cwd <path>         run against a different project root\n  --quiet              accepted for script compatibility\n  --verbose            accepted for script compatibility\n  --help               print help\n  --version            print version"
             }
         })
     );

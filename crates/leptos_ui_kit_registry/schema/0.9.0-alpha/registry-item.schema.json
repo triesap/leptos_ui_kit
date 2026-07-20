@@ -117,8 +117,7 @@
       "additionalProperties": false,
       "required": [
         "version",
-        "routerVersion",
-        "renderMode"
+        "routerVersion"
       ],
       "properties": {
         "version": {
@@ -127,10 +126,49 @@
         "routerVersion": {
           "const": "0.9.0-alpha"
         },
+        "renderModes": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "csr"
+            },
+            {
+              "const": "hydrate"
+            },
+            {
+              "const": "ssr"
+            }
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        },
         "renderMode": {
           "const": "csr"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "renderModes"
+          ],
+          "not": {
+            "required": [
+              "renderMode"
+            ]
+          }
+        },
+        {
+          "required": [
+            "renderMode"
+          ],
+          "not": {
+            "required": [
+              "renderModes"
+            ]
+          }
+        }
+      ]
     },
     "accessibility": {
       "type": "object",

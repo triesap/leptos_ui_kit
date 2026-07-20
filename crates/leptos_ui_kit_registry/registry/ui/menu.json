@@ -9,7 +9,11 @@
   "leptos": {
     "version": "0.9.0-alpha",
     "routerVersion": "0.9.0-alpha",
-    "renderMode": "csr"
+    "renderModes": [
+      "csr",
+      "hydrate",
+      "ssr"
+    ]
   },
   "accessibility": {
     "behaviors": [
@@ -137,9 +141,7 @@
         "kind": "version",
         "version": "0.9.0-alpha"
       },
-      "features": [
-        "csr"
-      ],
+      "features": [],
       "required": true
     },
     {

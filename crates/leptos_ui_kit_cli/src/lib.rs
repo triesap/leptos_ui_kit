@@ -18,10 +18,11 @@ use leptos_ui_kit_codegen::{
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
-    DependencyRequirement, DependencyStatus, DetectionError, InfoOutput, KitConfig, RegistryError,
-    ResolvedRegistryItem, SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
-    ToolSourceConfig, build_info_output, canonical_tool_config, detect_cargo_plan_requirements,
-    kit_config_to_json, load_registry_item, read_built_in_registry_source,
+    DependencyRequirement, DependencyStatus, DetectionError, InfoOutput, KitConfig, ProjectKind,
+    RegistryError, RenderModeContract, RenderModeSelection, ResolvedRegistryItem, SCHEMA_VERSION,
+    TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig, build_info_output,
+    canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json, load_registry_item,
+    normalize_cargo_plan_for_project, read_built_in_registry_source,
     resolve_built_in_registry_items, validate_built_in_registry_health,
 };
 use serde::Serialize;
@@ -197,11 +198,14 @@ struct HelpCommandOutput {
 #[serde(rename_all = "camelCase")]
 struct InfoCommandOutput {
     project_root: &'static str,
+    project_kind: &'static str,
     workspace_mode: &'static str,
     cargo_manifest: String,
     source_root: String,
     index_html: String,
     stylesheet: String,
+    render_mode_contract: RenderModeContract,
+    render_mode_selection: RenderModeSelection,
     render_mode: Option<&'static str>,
     config_path: Option<String>,
     registry_available: bool,
@@ -423,7 +427,7 @@ enum DoctorLockState {
     Valid {
         logical_path: String,
         path: PathBuf,
-        lock: InstallLock,
+        lock: Box<InstallLock>,
     },
 }
 
@@ -446,7 +450,7 @@ impl DoctorLockState {
 
     fn lock(&self) -> Option<&InstallLock> {
         match self {
-            Self::Valid { lock, .. } => Some(lock),
+            Self::Valid { lock, .. } => Some(lock.as_ref()),
             Self::Missing { .. } | Self::Invalid { .. } => None,
         }
     }
@@ -1766,6 +1770,7 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     let installed_lock = read_info_install_lock(project_root, output.kit_config.as_ref());
     let command_output = InfoCommandOutput {
         project_root: ".",
+        project_kind: output.detected.project_kind.as_str(),
         workspace_mode: match output.detected.workspace_mode {
             leptos_ui_kit_registry::WorkspaceMode::SingleCrate => "single-crate",
             leptos_ui_kit_registry::WorkspaceMode::SinglePackageWorkspaceRoot => {
@@ -1784,7 +1789,9 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
             .unwrap_or_else(|| "not-applicable".to_owned()),
         stylesheet: logical_path(project_root, &output.detected.css_file_path)
             .unwrap_or_else(|| DEFAULT_CSS_PATH.to_owned()),
-        render_mode: output.detected.render_mode.map(|_| "csr"),
+        render_mode_contract: output.detected.render_mode_contract,
+        render_mode_selection: output.detected.render_mode_selection.clone(),
+        render_mode: output.detected.render_mode.map(|mode| mode.as_str()),
         config_path: output
             .detected
             .kit_config_path
@@ -1809,12 +1816,15 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
     }
 
     Ok(format!(
-        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
+        "project_root: {}\nproject_kind: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode_contract: {:?}\nrender_mode_selection: {:?}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
         command_output.project_root,
+        command_output.project_kind,
         output.detected.workspace_mode,
         command_output.source_root,
         command_output.index_html,
         command_output.stylesheet,
+        command_output.render_mode_contract,
+        command_output.render_mode_selection,
         output
             .detected
             .render_mode
@@ -1973,6 +1983,7 @@ fn build_doctor_output_with_registry_health(
     registry_health: impl FnOnce() -> Result<(), String>,
 ) -> DoctorOutput {
     let mut checks = Vec::new();
+    let mut detected_project_kind = None;
 
     match check_pending_recovery(cwd) {
         Ok(()) => checks.push(DoctorCheck::pass(
@@ -1984,9 +1995,13 @@ fn build_doctor_output_with_registry_health(
 
     match build_info_output(cwd) {
         Ok(info) => {
+            detected_project_kind = Some(info.detected.project_kind);
             checks.push(DoctorCheck::pass(
                 "project",
-                "supported Trunk CSR project detected",
+                format!(
+                    "supported {} project detected",
+                    info.detected.project_kind.as_str()
+                ),
             ));
             dependency_check(
                 &mut checks,
@@ -2011,6 +2026,7 @@ fn build_doctor_output_with_registry_health(
                     names,
                     &config.install.ui_dir,
                     Some(&config.styles.css),
+                    config.project.kind.render_mode_contract(),
                 ) {
                     Ok(snapshot) => {
                         checks.extend(config_closure_checks(strict, &snapshot));
@@ -2058,6 +2074,7 @@ fn build_doctor_output_with_registry_health(
                         names,
                         DEFAULT_UI_DIR,
                         css_path.as_deref(),
+                        info.detected.render_mode_contract,
                     ) {
                         Ok(snapshot) => {
                             checks.push(DoctorCheck::warning(
@@ -2099,16 +2116,19 @@ fn build_doctor_output_with_registry_health(
     }
 
     if check {
-        checks.push(run_command_check(
-            "build.cargo_check",
-            cwd,
-            "cargo",
-            &["check", "--target", "wasm32-unknown-unknown"],
-        ));
+        let args = doctor_cargo_check_args(detected_project_kind);
+        checks.push(run_command_check("build.cargo_check", cwd, "cargo", args));
     }
 
     if trunk_build {
-        checks.push(run_command_check("build.trunk", cwd, "trunk", &["build"]));
+        if detected_project_kind == Some(ProjectKind::SingleCrateTrunkCsr) {
+            checks.push(run_command_check("build.trunk", cwd, "trunk", &["build"]));
+        } else {
+            checks.push(DoctorCheck::fail(
+                "build.trunk",
+                "--trunk-build is supported only for single-crate-trunk-csr projects",
+            ));
+        }
     }
 
     DoctorOutput {
@@ -2120,21 +2140,40 @@ fn build_doctor_output_with_registry_health(
     }
 }
 
+fn doctor_cargo_check_args(project_kind: Option<ProjectKind>) -> &'static [&'static str] {
+    match project_kind {
+        Some(ProjectKind::SingleCrateTrunkCsr | ProjectKind::SingleCrateBrowserHydration) => {
+            &["check", "--target", "wasm32-unknown-unknown"]
+        }
+        Some(ProjectKind::SingleCrateNativeSsr | ProjectKind::SharedLibraryCrate) | None => {
+            &["check"]
+        }
+    }
+}
+
 fn resolve_doctor_registry_snapshot(
     requested_names: BTreeSet<String>,
     ui_dir: &str,
     css_path: Option<&str>,
+    render_mode_contract: RenderModeContract,
 ) -> Result<DoctorRegistrySnapshot, String> {
     let sorted_names = requested_names.iter().cloned().collect::<Vec<_>>();
     let resolved =
         resolve_built_in_registry_items(&sorted_names).map_err(|error| error.to_string())?;
-    build_doctor_registry_snapshot(requested_names, ui_dir, css_path, resolved)
+    build_doctor_registry_snapshot(
+        requested_names,
+        ui_dir,
+        css_path,
+        render_mode_contract,
+        resolved,
+    )
 }
 
 fn build_doctor_registry_snapshot(
     requested_names: BTreeSet<String>,
     ui_dir: &str,
     css_path: Option<&str>,
+    render_mode_contract: RenderModeContract,
     resolved: Vec<ResolvedRegistryItem>,
 ) -> Result<DoctorRegistrySnapshot, String> {
     let mut resolved_names = BTreeSet::new();
@@ -2146,7 +2185,7 @@ fn build_doctor_registry_snapshot(
         .iter()
         .flat_map(|item| item.item.cargo_plan.iter().cloned())
         .collect::<Vec<_>>();
-    let cargo_plan = leptos_ui_kit_registry::normalize_cargo_plan(&cargo_plan_entries)
+    let cargo_plan = normalize_cargo_plan_for_project(&cargo_plan_entries, render_mode_contract)
         .map_err(|error| error.to_string())?;
     let style_ids_by_item = resolved
         .iter()
@@ -2285,7 +2324,7 @@ fn load_doctor_lock(cwd: &Path, config: Option<&KitConfig>) -> DoctorLockState {
         Ok(lock) => DoctorLockState::Valid {
             logical_path,
             path,
-            lock,
+            lock: Box::new(lock),
         },
         Err(error) => DoctorLockState::Invalid {
             logical_path,
@@ -2848,7 +2887,10 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
     let Some(index_html_path) = info.detected.index_html_path.as_ref() else {
         checks.push(DoctorCheck::pass(
             "stylesheet_link",
-            "shared-library-crate does not own a Trunk index.html",
+            format!(
+                "{} does not own a Trunk index.html",
+                info.detected.project_kind.as_str()
+            ),
         ));
         return checks;
     };
@@ -3204,7 +3246,7 @@ fn help_text() -> String {
         "usage: leptos_ui_kit <command> [options]",
         "",
         "commands:",
-        "  info                 inspect a supported Trunk CSR Leptos app",
+        "  info                 inspect a supported Leptos project",
         "  init                 create src/components/ui/_kit/kit.json and kit-managed app files",
         "  view <item>          show a registry item",
         "  add <item>           add a registry item to the app",
@@ -3236,7 +3278,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "info" => vec![
             "usage: leptos_ui_kit info [path] [--json]",
             "",
-            "Inspects a supported single-crate Trunk CSR Leptos app.",
+            "Inspects a supported Leptos CSR, SSR, hydration, or shared-library project.",
         ],
         "init" => vec![
             "usage: leptos_ui_kit init [--dry-run] [--json]",
@@ -3325,6 +3367,9 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"info\""));
         assert!(output.contains("\"projectRoot\": \".\""));
+        assert!(output.contains("\"projectKind\": \"single-crate-trunk-csr\""));
+        assert!(output.contains("\"renderModeContract\""));
+        assert!(output.contains("\"renderModeSelection\""));
         assert!(output.contains("\"renderMode\": \"csr\""));
         assert!(output.contains("\"stylesheet\": \"styles/kit.css\""));
         assert!(!output.contains(&root.display().to_string()));
@@ -5240,6 +5285,26 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(check.status, DoctorCheckStatus::Fail);
         assert!(check.message.contains("failed to run"));
+    }
+
+    #[test]
+    fn doctor_selects_the_build_target_from_the_project_contract() {
+        for kind in [
+            ProjectKind::SingleCrateTrunkCsr,
+            ProjectKind::SingleCrateBrowserHydration,
+        ] {
+            assert_eq!(
+                doctor_cargo_check_args(Some(kind)),
+                ["check", "--target", "wasm32-unknown-unknown"]
+            );
+        }
+        for kind in [
+            ProjectKind::SingleCrateNativeSsr,
+            ProjectKind::SharedLibraryCrate,
+        ] {
+            assert_eq!(doctor_cargo_check_args(Some(kind)), ["check"]);
+        }
+        assert_eq!(doctor_cargo_check_args(None), ["check"]);
     }
 
     fn assert_doctor_check(

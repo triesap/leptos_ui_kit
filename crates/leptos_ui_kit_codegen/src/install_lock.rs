@@ -69,11 +69,14 @@ impl InstallLock {
         }
         if !matches!(
             self.project.kind.as_str(),
-            "single-crate-trunk-csr" | "shared-library-crate"
+            "single-crate-trunk-csr"
+                | "single-crate-native-ssr"
+                | "single-crate-browser-hydration"
+                | "shared-library-crate"
         ) {
             return invalid_lock(
                 path,
-                "project.kind must be single-crate-trunk-csr or shared-library-crate",
+                "project.kind must be single-crate-trunk-csr, single-crate-native-ssr, single-crate-browser-hydration, or shared-library-crate",
             );
         }
         validate_lock_hash(path, "project.configHash", &self.project.config_hash)?;

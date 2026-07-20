@@ -8,8 +8,9 @@ use leptos_ui_kit_registry::{
     DesiredItemConfig, KitConfig, LAYER_ORDER, PORTAL_ABI_VERSION, PORTAL_MOUNT_TYPE,
     PRESENCE_ABI_VERSION, RegistryError, ResolvedRegistryItem, WEB_UI_PRIMITIVES_GIT_REV,
     WEB_UI_PRIMITIVES_REQUIREMENT, WEB_UI_PRIMITIVES_VERSION, kit_config_for_write,
-    kit_config_to_json, load_built_in_registry_item, parse_kit_json_str,
-    read_built_in_registry_source, resolve_built_in_registry_items, token_contract_json,
+    kit_config_to_json, load_built_in_registry_item, normalize_cargo_plan_for_project,
+    parse_kit_json_str, read_built_in_registry_source, resolve_built_in_registry_items,
+    token_contract_json,
 };
 
 use super::{
@@ -176,7 +177,10 @@ fn project_desired_state_from_resolved(
         cargo_plan_entries.extend(item.item.cargo_plan.iter().cloned());
     }
 
-    let cargo_plan = leptos_ui_kit_registry::normalize_cargo_plan(&cargo_plan_entries)?;
+    let cargo_plan = normalize_cargo_plan_for_project(
+        &cargo_plan_entries,
+        config.project.kind.render_mode_contract(),
+    )?;
     let css_dependencies = managed_css_dependencies(&resolved_items);
     Ok(DesiredStateProjection {
         desired_items,

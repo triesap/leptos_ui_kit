@@ -98,6 +98,7 @@ const TOKEN_ABI_SCHEMA_REQUIRED: &[&str] = &[
 struct SchemaContract {
     logical_path: &'static str,
     schema_id: &'static str,
+    schema_version: &'static str,
     required: &'static [&'static str],
 }
 
@@ -105,31 +106,37 @@ const SCHEMA_CONTRACTS: [SchemaContract; 6] = [
     SchemaContract {
         logical_path: SCHEMA_PATHS[0],
         schema_id: KIT_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: KIT_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: SCHEMA_PATHS[1],
         schema_id: REGISTRY_ITEM_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: REGISTRY_ITEM_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: SCHEMA_PATHS[2],
         schema_id: REGISTRY_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: REGISTRY_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: THEME_CONTRACT_SCHEMA_PATH,
         schema_id: THEME_CONTRACT_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: THEME_CONTRACT_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: "schema/0.2.0/theme-integration.schema.json",
         schema_id: THEME_INTEGRATION_SCHEMA_URL,
+        schema_version: "1.0.0",
         required: THEME_INTEGRATION_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: "schema/0.2.0/token-contract.schema.json",
         schema_id: TOKEN_CONTRACT_SCHEMA_URL,
+        schema_version: "1.0.0",
         required: TOKEN_ABI_SCHEMA_REQUIRED,
     },
 ];
@@ -1505,7 +1512,7 @@ fn validate_schema_contract(
         contract.logical_path,
         schema,
         "/properties/schemaVersion/const",
-        &Value::String(SCHEMA_VERSION.to_owned()),
+        &Value::String(contract.schema_version.to_owned()),
     )
 }
 
@@ -1742,7 +1749,7 @@ mod tests {
             );
             assert!(snapshot.registry_source("ui/button.rs").is_ok());
             assert_eq!(snapshot.theme_contract().contract_version, "1");
-            assert_eq!(snapshot.schema_count(), 4);
+            assert_eq!(snapshot.schema_count(), 6);
         }
         assert_eq!(provider.enumerations.load(Ordering::SeqCst), 1);
         assert_eq!(provider.lookups.load(Ordering::SeqCst), 0);

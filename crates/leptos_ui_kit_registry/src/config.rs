@@ -124,6 +124,7 @@ impl KitConfig {
         self.tool.validate()?;
         self.project.validate()?;
         self.leptos.validate()?;
+        validate_render_mode_contract(self.project.kind, self.leptos.render_mode)?;
         self.install.validate()?;
         self.styles.validate()?;
         validate_distinct_file_targets(self)?;
@@ -189,10 +190,20 @@ impl ProjectConfig {
                 expected: "index.html for a single-crate-trunk-csr project",
                 actual: "missing".to_owned(),
             }),
-            (ProjectKind::SharedLibraryCrate, None) => Ok(()),
-            (ProjectKind::SharedLibraryCrate, Some(index_html)) => Err(ConfigError::InvalidValue {
+            (
+                ProjectKind::SingleCrateNativeSsr
+                | ProjectKind::SingleCrateBrowserHydration
+                | ProjectKind::SharedLibraryCrate,
+                None,
+            ) => Ok(()),
+            (
+                ProjectKind::SingleCrateNativeSsr
+                | ProjectKind::SingleCrateBrowserHydration
+                | ProjectKind::SharedLibraryCrate,
+                Some(index_html),
+            ) => Err(ConfigError::InvalidValue {
                 field: "project.indexHtml",
-                expected: "absent for a shared-library-crate project",
+                expected: "absent unless project.kind is single-crate-trunk-csr",
                 actual: index_html.to_owned(),
             }),
         }
@@ -203,6 +214,8 @@ impl ProjectConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectKind {
     SingleCrateTrunkCsr,
+    SingleCrateNativeSsr,
+    SingleCrateBrowserHydration,
     SharedLibraryCrate,
 }
 
@@ -210,7 +223,18 @@ impl ProjectKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SingleCrateTrunkCsr => "single-crate-trunk-csr",
+            Self::SingleCrateNativeSsr => "single-crate-native-ssr",
+            Self::SingleCrateBrowserHydration => "single-crate-browser-hydration",
             Self::SharedLibraryCrate => "shared-library-crate",
+        }
+    }
+
+    pub const fn render_mode_contract(self) -> RenderModeContract {
+        match self {
+            Self::SingleCrateTrunkCsr => RenderModeContract::Selected(RenderMode::Csr),
+            Self::SingleCrateNativeSsr => RenderModeContract::Selected(RenderMode::Ssr),
+            Self::SingleCrateBrowserHydration => RenderModeContract::Selected(RenderMode::Hydrate),
+            Self::SharedLibraryCrate => RenderModeContract::Neutral,
         }
     }
 }
@@ -220,7 +244,8 @@ impl ProjectKind {
 pub struct LeptosConfig {
     pub version: String,
     pub router_version: String,
-    pub render_mode: RenderMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_mode: Option<RenderMode>,
 }
 
 impl LeptosConfig {
@@ -238,6 +263,25 @@ impl LeptosConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum RenderMode {
     Csr,
+    Hydrate,
+    Ssr,
+}
+
+impl RenderMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Csr => "csr",
+            Self::Hydrate => "hydrate",
+            Self::Ssr => "ssr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "mode", rename_all = "kebab-case")]
+pub enum RenderModeContract {
+    Neutral,
+    Selected(RenderMode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,7 +468,7 @@ pub struct InstallRoots {
 pub struct NormalizedProjectConfig {
     pub schema_version: String,
     pub project_kind: ProjectKind,
-    pub render_mode: RenderMode,
+    pub render_mode: Option<RenderMode>,
     pub desired_items: Vec<DesiredItemConfig>,
     pub workspace_mode: WorkspaceMode,
     pub project_root: PathBuf,
@@ -482,7 +526,7 @@ fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigE
         leptos: LeptosConfig {
             version: LEPTOS_VERSION.to_owned(),
             router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-            render_mode: RenderMode::Csr,
+            render_mode: Some(RenderMode::Csr),
         },
         install: InstallConfig {
             ui_dir: DEFAULT_UI_DIR.to_owned(),
@@ -500,6 +544,52 @@ fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigE
     };
     config.validate()?;
     Ok(config)
+}
+
+fn validate_render_mode_contract(
+    project_kind: ProjectKind,
+    render_mode: Option<RenderMode>,
+) -> Result<(), ConfigError> {
+    let expected = project_kind.render_mode_contract();
+    let valid = matches!(
+        (expected, render_mode),
+        (RenderModeContract::Neutral, None)
+            | (
+                RenderModeContract::Selected(RenderMode::Csr),
+                Some(RenderMode::Csr)
+            )
+            | (
+                RenderModeContract::Selected(RenderMode::Hydrate),
+                Some(RenderMode::Hydrate)
+            )
+            | (
+                RenderModeContract::Selected(RenderMode::Ssr),
+                Some(RenderMode::Ssr)
+            )
+    );
+    if valid {
+        return Ok(());
+    }
+
+    Err(ConfigError::InvalidValue {
+        field: "leptos.renderMode",
+        expected: match expected {
+            RenderModeContract::Neutral => "absent for a shared-library-crate project",
+            RenderModeContract::Selected(RenderMode::Csr) => {
+                "csr for a single-crate-trunk-csr project"
+            }
+            RenderModeContract::Selected(RenderMode::Hydrate) => {
+                "hydrate for a single-crate-browser-hydration project"
+            }
+            RenderModeContract::Selected(RenderMode::Ssr) => {
+                "ssr for a single-crate-native-ssr project"
+            }
+        },
+        actual: render_mode
+            .map(RenderMode::as_str)
+            .unwrap_or("missing")
+            .to_owned(),
+    })
 }
 
 /// Replaces a configuration's tool source with this binary's proven Git
@@ -970,7 +1060,7 @@ mod tests {
         assert!(matches!(config.tool.source, ToolSourceConfig::Git { .. }));
         assert_eq!(config.leptos.version, LEPTOS_VERSION);
         assert_eq!(config.leptos.router_version, LEPTOS_ROUTER_VERSION);
-        assert_eq!(config.leptos.render_mode, RenderMode::Csr);
+        assert_eq!(config.leptos.render_mode, Some(RenderMode::Csr));
         assert_eq!(config.styles.mode, StylesMode::PureCss);
         assert_eq!(config.registry.source, RegistrySource::Builtin);
         assert!(config.items.is_empty());
@@ -1164,13 +1254,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_csr_render_mode() {
+    fn rejects_render_mode_that_does_not_match_project_kind() {
         let input =
             valid_config_json().replace("\"renderMode\": \"csr\"", "\"renderMode\": \"hydrate\"");
 
         let error = parse_kit_json_str(&input).expect_err("hydrate should fail");
 
-        assert!(matches!(error, ConfigError::Parse(_)));
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "leptos.renderMode",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1252,7 +1348,7 @@ mod tests {
         )
         .expect("normalize");
 
-        assert_eq!(normalized.render_mode, RenderMode::Csr);
+        assert_eq!(normalized.render_mode, Some(RenderMode::Csr));
         assert_eq!(normalized.source_root, PathBuf::from("/workspace/demo/src"));
         assert_eq!(
             normalized.install_roots.ui_dir,
@@ -1274,6 +1370,7 @@ mod tests {
         let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
         config.project.kind = ProjectKind::SharedLibraryCrate;
         config.project.index_html = None;
+        config.leptos.render_mode = None;
 
         let encoded = kit_config_to_json(&config).expect("serialize shared config");
         assert!(encoded.contains("\"kind\": \"shared-library-crate\""));
@@ -1288,11 +1385,45 @@ mod tests {
         )
         .expect("normalize shared project");
         assert_eq!(normalized.project_kind, ProjectKind::SharedLibraryCrate);
+        assert_eq!(normalized.render_mode, None);
         assert_eq!(normalized.index_html, None);
         assert_eq!(
             normalized.install_roots.ui_dir,
             PathBuf::from("/workspace/shared_ui/src/components/ui")
         );
+    }
+
+    #[test]
+    fn native_ssr_and_browser_hydration_projects_round_trip_exact_modes() {
+        for (kind, mode, serialized_kind) in [
+            (
+                ProjectKind::SingleCrateNativeSsr,
+                RenderMode::Ssr,
+                "single-crate-native-ssr",
+            ),
+            (
+                ProjectKind::SingleCrateBrowserHydration,
+                RenderMode::Hydrate,
+                "single-crate-browser-hydration",
+            ),
+        ] {
+            let mut config = parse_kit_json_str(&valid_config_json()).expect("canonical config");
+            config.project.kind = kind;
+            config.project.index_html = None;
+            config.leptos.render_mode = Some(mode);
+
+            let encoded = kit_config_to_json(&config).expect("serialize delivery config");
+            assert!(encoded.contains(&format!("\"kind\": \"{serialized_kind}\"")));
+            assert!(encoded.contains(&format!("\"renderMode\": \"{}\"", mode.as_str())));
+            assert!(!encoded.contains("\"indexHtml\""));
+
+            let parsed = parse_kit_json_str(&encoded).expect("parse delivery config");
+            assert_eq!(
+                parsed.project.kind.render_mode_contract(),
+                RenderModeContract::Selected(mode)
+            );
+            assert_eq!(parsed.leptos.render_mode, Some(mode));
+        }
     }
 
     #[test]

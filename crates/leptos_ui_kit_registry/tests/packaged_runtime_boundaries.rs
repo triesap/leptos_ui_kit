@@ -53,7 +53,7 @@ const EXPECTED_PACKAGE_SUPPORT: [&str; 7] = [
     "build_provenance.rs",
 ];
 
-const EXPECTED_PACKAGE_SOURCES: [&str; 8] = [
+const EXPECTED_PACKAGE_SOURCES: [&str; 9] = [
     "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
@@ -62,6 +62,7 @@ const EXPECTED_PACKAGE_SOURCES: [&str; 8] = [
     "src/lib.rs",
     "src/registry_health.rs",
     "src/theme_contract.rs",
+    "src/token_abi.rs",
 ];
 
 const EXPECTED_PACKAGE_TESTS: [&str; 7] = [
@@ -656,13 +657,13 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
 }
 
 #[test]
-fn approved_embedded_inventory_has_68_unique_logical_assets() {
+fn approved_embedded_inventory_has_70_unique_logical_assets() {
     let logical_assets = ASSET_SPECS
         .iter()
         .map(|spec| spec.logical_path.to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(logical_assets.len(), 68);
+    assert_eq!(logical_assets.len(), 70);
     assert!(logical_assets.contains("registry/registry.json"));
     assert!(logical_assets.contains("registry/contracts/theme-v1.json"));
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
@@ -710,7 +711,7 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 90);
+    assert_eq!(expected.len(), 93);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(actual.contains(schema), "missing packaged schema: {schema}");

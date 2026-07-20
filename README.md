@@ -75,6 +75,15 @@ selected final delivery mode. Trunk CSR, native SSR, and browser hydration
 deliveries are supported compatibility targets; a shared-library target does
 not force one of those modes into downstream consumers.
 
+The corresponding `project.kind` values are
+`single-crate-trunk-csr`, `single-crate-native-ssr`,
+`single-crate-browser-hydration`, and `shared-library-crate`. Final delivery
+configs require the matching `leptos.renderMode` (`csr`, `ssr`, or `hydrate`);
+shared-library configs omit `leptos.renderMode`. `info --json` reports the
+configured render contract, the detected dependency selection, and the
+qualified render mode independently so a missing, mismatched, or mixed mode
+cannot be mistaken for a neutral shared-library dependency.
+
 ## Dependency Plan
 
 A supported final delivery provides Leptos with exactly one of `csr`,

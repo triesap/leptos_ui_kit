@@ -783,21 +783,36 @@ fn assert_info(value: &Value, installed: bool) {
             "configPath",
             "indexHtml",
             "installed",
+            "projectKind",
             "projectRoot",
             "registryAvailable",
             "renderMode",
+            "renderModeContract",
+            "renderModeSelection",
             "sourceRoot",
             "stylesheet",
             "workspaceMode",
         ],
     );
     assert_eq!(value["data"]["projectRoot"], ".");
-    assert_eq!(value["data"]["workspaceMode"], "single-crate");
+    assert_eq!(value["data"]["projectKind"], "single-crate-trunk-csr");
+    assert_eq!(
+        value["data"]["workspaceMode"],
+        "single-package-workspace-root"
+    );
     assert_eq!(value["data"]["cargoManifest"], "Cargo.toml");
     assert_eq!(value["data"]["sourceRoot"], "src");
     assert_eq!(value["data"]["indexHtml"], "index.html");
     assert_eq!(value["data"]["stylesheet"], "styles/kit.css");
     assert_eq!(value["data"]["renderMode"], "csr");
+    assert_eq!(
+        value["data"]["renderModeContract"],
+        serde_json::json!({"kind": "selected", "mode": "csr"})
+    );
+    assert_eq!(
+        value["data"]["renderModeSelection"],
+        serde_json::json!({"kind": "selected", "mode": "csr"})
+    );
     assert_eq!(value["data"]["registryAvailable"], true);
     if installed {
         assert_eq!(value["data"]["configPath"], CONFIG_PATH);

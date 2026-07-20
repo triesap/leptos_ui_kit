@@ -464,7 +464,7 @@ fn build_entries(
                             PreimageV2::regular(
                                 exact_file(&observation).map_err(model_error_at(path))?,
                             ),
-                            FileModePolicyV2::PreservePreimage,
+                            FileModePolicyV2::NormalReplaceResolveOnStage,
                         )
                     }
                     _ => {
@@ -1311,7 +1311,10 @@ fn prepare_files(
             Path::new(&owner_name),
             &owner_path,
             ordered.file.content(),
-            stage_owner_final_mode(snapshot.preimage(logical_path).expect("validated preimage")),
+            stage_owner_final_mode(
+                entry.planned().mode_policy(),
+                snapshot.preimage(logical_path).expect("validated preimage"),
+            ),
         )?;
         sync_transaction_workspace(context, lock, store, &owner_path)?;
         runtime.observe(TransitionKey::OwnerPrepared {
@@ -3452,13 +3455,13 @@ fn recovery_missing(path: &str, context: &PlanningContext) -> CodegenError {
     }
 }
 
-fn stage_owner_final_mode(preimage: &PathPreimage) -> PreservedFileMode {
-    match preimage {
-        PathPreimage::Absent => PreservedFileMode {
+fn stage_owner_final_mode(policy: FileModePolicyV2, preimage: &PathPreimage) -> PreservedFileMode {
+    match (policy, preimage) {
+        (FileModePolicyV2::PreservePreimage, PathPreimage::RegularFile { mode, .. }) => *mode,
+        _ => PreservedFileMode {
             readonly: false,
             posix_mode: if cfg!(unix) { Some(0o644) } else { None },
         },
-        PathPreimage::RegularFile { mode, .. } => *mode,
     }
 }
 

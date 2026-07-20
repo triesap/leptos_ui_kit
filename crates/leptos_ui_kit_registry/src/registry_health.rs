@@ -241,7 +241,7 @@ impl std::error::Error for RegistryHealthError {
 )]
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
     let snapshot = built_in_registry_snapshot().map_err(snapshot_health_error)?;
-    debug_assert_eq!(snapshot.schema_count(), 4);
+    debug_assert_eq!(snapshot.schema_count(), 6);
     Ok(())
 }
 

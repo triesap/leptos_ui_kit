@@ -305,6 +305,7 @@ impl FileStateV2 {
 pub(super) enum FileModePolicyV2 {
     PreservePreimage,
     NormalCreateResolveOnStage,
+    NormalReplaceResolveOnStage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +334,10 @@ impl PlannedFileStateV2 {
         self.byte_len
     }
 
+    pub(super) const fn mode_policy(&self) -> FileModePolicyV2 {
+        self.mode_policy
+    }
+
     fn validate(&self) -> Result<(), JournalModelError> {
         Sha256Digest::parse(self.content_hash.as_str()).map(|_| ())
     }
@@ -347,6 +352,10 @@ impl PlannedFileStateV2 {
         match self.mode_policy {
             FileModePolicyV2::NormalCreateResolveOnStage => {
                 matches!(preimage, PreimageV2::Absent)
+            }
+            FileModePolicyV2::NormalReplaceResolveOnStage => {
+                matches!(preimage, PreimageV2::Regular { .. })
+                    && state.posix_mode == normal_create_file_mode()
             }
             FileModePolicyV2::PreservePreimage => match preimage {
                 PreimageV2::Regular { exact } => state.posix_mode == exact.state.posix_mode,
@@ -908,9 +917,13 @@ impl JournalEntryV2 {
                         self.logical_path
                     )));
                 }
-                if self.planned.mode_policy != FileModePolicyV2::PreservePreimage {
+                if !matches!(
+                    self.planned.mode_policy,
+                    FileModePolicyV2::PreservePreimage
+                        | FileModePolicyV2::NormalReplaceResolveOnStage
+                ) {
                     return Err(JournalModelError::new(format!(
-                        "replacement {} must use preserve-preimage mode policy",
+                        "replacement {} must use a replacement mode policy",
                         self.logical_path
                     )));
                 }
@@ -3046,10 +3059,13 @@ impl JournalSnapshotV2 {
             }
             PreparationSlot::StageOwner(entry_index) => {
                 let entry = &self.entries[entry_index];
-                let (final_readonly, final_posix_mode) = match &entry.preimage {
-                    PreimageV2::Absent => (false, normal_create_file_mode()),
-                    PreimageV2::Regular { exact } => (exact.state.readonly, exact.state.posix_mode),
-                };
+                let (final_readonly, final_posix_mode) =
+                    match (entry.planned.mode_policy, &entry.preimage) {
+                        (FileModePolicyV2::PreservePreimage, PreimageV2::Regular { exact }) => {
+                            (exact.state.readonly, exact.state.posix_mode)
+                        }
+                        _ => (false, normal_create_file_mode()),
+                    };
                 Ok(OwnerCreationIntentV2 {
                     ordinal: entry.ordinal,
                     artifact: OwnerArtifactKindV2::Stage,
@@ -7600,6 +7616,24 @@ mod tests {
             .unwrap(),
         );
         assert!(invalid_replace.is_err());
+        for policy in [
+            FileModePolicyV2::PreservePreimage,
+            FileModePolicyV2::NormalReplaceResolveOnStage,
+        ] {
+            assert!(
+                JournalEntryV2::new(
+                    &transaction_id,
+                    ArtifactOrdinal::new(0).unwrap(),
+                    "src/components/ui/_kit/theme.css",
+                    EntryActionV2::Replace,
+                    EntryRoleV2::Ordinary,
+                    PreimageV2::regular(exact_file(3, 1, b"old", 0o751, 1)),
+                    PlannedFileStateV2::new(content_hash(desired), desired.len() as u64, policy)
+                        .unwrap(),
+                )
+                .is_ok()
+            );
+        }
 
         let snapshot = build_snapshot(false);
         let mut value: serde_json::Value =

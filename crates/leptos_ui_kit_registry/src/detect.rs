@@ -11,8 +11,8 @@ use toml::{Table as TomlTable, Value as TomlValue};
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    ProjectKind, RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan,
-    normalize_project_with_workspace_mode, parse_kit_json_str,
+    ProjectKind, RegistryError, RenderMode, RenderModeContract, WorkspaceMode,
+    normalize_cargo_plan, normalize_project_with_workspace_mode, parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -72,6 +72,8 @@ pub struct DetectedProject {
     pub source_root: PathBuf,
     pub index_html_path: Option<PathBuf>,
     pub css_file_path: PathBuf,
+    pub render_mode_contract: RenderModeContract,
+    pub render_mode_selection: RenderModeSelection,
     pub render_mode: Option<RenderMode>,
     pub dependency_plan: DependencyPlan,
     pub kit_config_path: Option<PathBuf>,
@@ -83,17 +85,39 @@ pub struct DependencyPlan {
 }
 
 impl DependencyPlan {
-    fn from_manifest(manifest: &TomlValue) -> Self {
+    fn from_manifest(manifest: &TomlValue, contract: RenderModeContract) -> Self {
+        let features = match contract {
+            RenderModeContract::Neutral => Vec::new(),
+            RenderModeContract::Selected(mode) => vec![mode.as_str().to_owned()],
+        };
         let leptos = dependency_requirement_for_cargo_plan(
             manifest,
             &CargoPlanEntry {
                 crate_name: "leptos".to_owned(),
                 source: CargoPlanSource::version(LEPTOS_VERSION),
-                features: vec!["csr".to_owned()],
+                features,
                 required: true,
             },
         );
         Self { leptos }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RenderModeSelection {
+    Neutral,
+    Missing,
+    Selected { mode: RenderMode },
+    Conflicting { features: Vec<String> },
+}
+
+impl RenderModeSelection {
+    const fn selected_mode(&self) -> Option<RenderMode> {
+        match self {
+            Self::Selected { mode } => Some(*mode),
+            Self::Neutral | Self::Missing | Self::Conflicting { .. } => None,
+        }
     }
 }
 
@@ -223,6 +247,7 @@ fn detect_project_snapshot_with(
         .as_ref()
         .map(|config| config.project.kind)
         .unwrap_or(ProjectKind::SingleCrateTrunkCsr);
+    let render_mode_contract = project_kind.render_mode_contract();
     let index_html_path = match kit_config
         .as_ref()
         .and_then(|config| config.project.index_html.as_deref())
@@ -244,8 +269,12 @@ fn detect_project_snapshot_with(
             .unwrap_or(DEFAULT_CSS_PATH),
     );
 
-    let dependency_plan = DependencyPlan::from_manifest(&manifest);
-    let render_mode = detect_render_mode(&dependency_plan);
+    let dependency_plan = DependencyPlan::from_manifest(&manifest, render_mode_contract);
+    let render_mode_selection =
+        detect_render_mode_selection(&dependency_plan.leptos.features, render_mode_contract);
+    let render_mode = (dependency_plan.leptos.status == DependencyStatus::Satisfied)
+        .then(|| render_mode_selection.selected_mode())
+        .flatten();
 
     Ok(ProjectSnapshot {
         detected: DetectedProject {
@@ -256,6 +285,8 @@ fn detect_project_snapshot_with(
             source_root,
             index_html_path,
             css_file_path,
+            render_mode_contract,
+            render_mode_selection,
             render_mode,
             dependency_plan,
             kit_config_path,
@@ -333,12 +364,35 @@ pub fn detect_cargo_plan_requirements(
         .collect())
 }
 
-fn detect_render_mode(dependency_plan: &DependencyPlan) -> Option<RenderMode> {
-    if dependency_plan.leptos.status == DependencyStatus::Satisfied {
-        return Some(RenderMode::Csr);
+fn detect_render_mode_selection(
+    features: &[String],
+    contract: RenderModeContract,
+) -> RenderModeSelection {
+    let mut selected = features
+        .iter()
+        .filter(|feature| matches!(feature.as_str(), "csr" | "hydrate" | "ssr" | "islands"))
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.sort();
+    selected.dedup();
+
+    if selected.is_empty() {
+        return match contract {
+            RenderModeContract::Neutral => RenderModeSelection::Neutral,
+            RenderModeContract::Selected(_) => RenderModeSelection::Missing,
+        };
+    }
+    if selected.len() != 1 || selected[0] == "islands" {
+        return RenderModeSelection::Conflicting { features: selected };
     }
 
-    None
+    let mode = match selected[0].as_str() {
+        "csr" => RenderMode::Csr,
+        "hydrate" => RenderMode::Hydrate,
+        "ssr" => RenderMode::Ssr,
+        _ => unreachable!("selected render feature was filtered above"),
+    };
+    RenderModeSelection::Selected { mode }
 }
 
 pub fn dependency_requirement_for_cargo_plan(
@@ -378,7 +432,7 @@ pub fn dependency_requirement_for_cargo_plan(
                 .then_some(DependencyIncompatibility::MissingFeatures { features: missing })
         })
         .or_else(|| {
-            let conflicting = conflicting_features(&entry.crate_name, &features);
+            let conflicting = conflicting_features(&entry.crate_name, &entry.features, &features);
             (!conflicting.is_empty()).then_some(DependencyIncompatibility::ConflictingFeatures {
                 features: conflicting,
             })
@@ -737,13 +791,20 @@ fn version_requirement_proves_compatibility(requirement: &str, anchor: &str) -> 
         && comparator.pre == anchor.pre
 }
 
-fn conflicting_features(crate_name: &str, features: &[String]) -> Vec<String> {
+fn conflicting_features(
+    crate_name: &str,
+    required_features: &[String],
+    features: &[String],
+) -> Vec<String> {
     if crate_name != "leptos" {
         return Vec::new();
     }
     features
         .iter()
-        .filter(|feature| matches!(feature.as_str(), "hydrate" | "ssr" | "islands"))
+        .filter(|feature| {
+            matches!(feature.as_str(), "csr" | "hydrate" | "ssr" | "islands")
+                && !required_features.contains(feature)
+        })
         .cloned()
         .collect()
 }
@@ -970,6 +1031,109 @@ leptos_router = "0.9.0-alpha"
             detected.dependency_plan.leptos.status,
             DependencyStatus::Satisfied
         );
+    }
+
+    #[test]
+    fn detects_native_ssr_browser_hydration_and_neutral_shared_projects() {
+        for (kind, mode, feature, expected_selection) in [
+            (
+                ProjectKind::SingleCrateNativeSsr,
+                Some(RenderMode::Ssr),
+                "\"ssr\"",
+                RenderModeSelection::Selected {
+                    mode: RenderMode::Ssr,
+                },
+            ),
+            (
+                ProjectKind::SingleCrateBrowserHydration,
+                Some(RenderMode::Hydrate),
+                "\"hydrate\"",
+                RenderModeSelection::Selected {
+                    mode: RenderMode::Hydrate,
+                },
+            ),
+            (
+                ProjectKind::SharedLibraryCrate,
+                None,
+                "",
+                RenderModeSelection::Neutral,
+            ),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            write_homepage_fixture(root, feature);
+            let mut config =
+                crate::parse_kit_json_str(&canonical_kit_json().expect("canonical config"))
+                    .expect("parse canonical config");
+            config.project.kind = kind;
+            config.project.index_html = None;
+            config.leptos.render_mode = mode;
+            write_kit_config(
+                root,
+                crate::kit_config_to_json(&config).expect("serialize config"),
+            );
+
+            let detected = detect_project(root).expect("detect project");
+            assert_eq!(detected.project_kind, kind);
+            assert_eq!(detected.render_mode_contract, kind.render_mode_contract());
+            assert_eq!(detected.render_mode_selection, expected_selection);
+            assert_eq!(detected.render_mode, mode);
+            assert_eq!(detected.index_html_path, None);
+            assert_eq!(
+                detected.dependency_plan.leptos.status,
+                DependencyStatus::Satisfied
+            );
+        }
+    }
+
+    #[test]
+    fn diagnoses_missing_conflicting_and_mode_mismatched_delivery_features() {
+        for (kind, mode, feature, expected_selection) in [
+            (
+                ProjectKind::SingleCrateNativeSsr,
+                RenderMode::Ssr,
+                "",
+                RenderModeSelection::Missing,
+            ),
+            (
+                ProjectKind::SingleCrateBrowserHydration,
+                RenderMode::Hydrate,
+                "\"ssr\"",
+                RenderModeSelection::Selected {
+                    mode: RenderMode::Ssr,
+                },
+            ),
+            (
+                ProjectKind::SingleCrateNativeSsr,
+                RenderMode::Ssr,
+                "\"hydrate\", \"ssr\"",
+                RenderModeSelection::Conflicting {
+                    features: vec!["hydrate".to_owned(), "ssr".to_owned()],
+                },
+            ),
+        ] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            write_homepage_fixture(root, feature);
+            let mut config =
+                crate::parse_kit_json_str(&canonical_kit_json().expect("canonical config"))
+                    .expect("parse canonical config");
+            config.project.kind = kind;
+            config.project.index_html = None;
+            config.leptos.render_mode = Some(mode);
+            write_kit_config(
+                root,
+                crate::kit_config_to_json(&config).expect("serialize config"),
+            );
+
+            let detected = detect_project(root).expect("detect project");
+            assert_eq!(detected.render_mode_selection, expected_selection);
+            assert_eq!(detected.render_mode, None);
+            assert_eq!(
+                detected.dependency_plan.leptos.status,
+                DependencyStatus::Incompatible
+            );
+        }
     }
 
     #[test]
@@ -1425,7 +1589,7 @@ leptos_router = "0.9.0-alpha"
 
         assert!(info.kit_config.is_some());
         let normalized = info.normalized_config.expect("normalized config");
-        assert_eq!(normalized.render_mode, RenderMode::Csr);
+        assert_eq!(normalized.render_mode, Some(RenderMode::Csr));
         assert_eq!(
             normalized.install_roots.css_file,
             root.join("styles/kit.css")

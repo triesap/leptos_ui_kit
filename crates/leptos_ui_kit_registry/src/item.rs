@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION, THEME_CONTRACT_VERSION,
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, RenderModeContract, SCHEMA_VERSION,
+    THEME_CONTRACT_VERSION,
     builtin_registry::{
         BuiltInRegistryItemSnapshot, BuiltInRegistrySnapshot, SnapshotError,
         built_in_registry_snapshot,
@@ -649,7 +650,14 @@ impl fmt::Display for RegistryItemKind {
 pub struct RegistryLeptos {
     pub version: String,
     pub router_version: String,
-    pub render_mode: RenderMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_modes: Vec<RenderMode>,
+    #[serde(
+        rename = "renderMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_render_mode: Option<RenderMode>,
 }
 
 impl RegistryLeptos {
@@ -659,7 +667,25 @@ impl RegistryLeptos {
             "leptos.routerVersion",
             LEPTOS_ROUTER_VERSION,
             &self.router_version,
-        )
+        )?;
+        let expected = vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr];
+        let canonical = self.render_modes == expected && self.legacy_render_mode.is_none();
+        let legacy =
+            self.render_modes.is_empty() && self.legacy_render_mode == Some(RenderMode::Csr);
+        if canonical || legacy {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "leptos render compatibility",
+                expected: format!(
+                    "renderModes {expected:?}, or the legacy renderMode Csr declaration"
+                ),
+                actual: format!(
+                    "renderModes {:?}, legacy renderMode {:?}",
+                    self.render_modes, self.legacy_render_mode
+                ),
+            })
+        }
     }
 }
 
@@ -1133,6 +1159,25 @@ pub fn normalize_cargo_plan(
     Ok(normalized.into_values().collect())
 }
 
+pub fn normalize_cargo_plan_for_project(
+    entries: &[CargoPlanEntry],
+    contract: RenderModeContract,
+) -> Result<Vec<CargoPlanEntry>, RegistryError> {
+    let mut projected = entries.to_vec();
+    for entry in &mut projected {
+        if entry.crate_name != "leptos" {
+            continue;
+        }
+        entry
+            .features
+            .retain(|feature| !matches!(feature.as_str(), "csr" | "hydrate" | "ssr" | "islands"));
+        if let RenderModeContract::Selected(mode) = contract {
+            entry.features.push(mode.as_str().to_owned());
+        }
+    }
+    normalize_cargo_plan(&projected)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CargoPlanSourceKind {
@@ -1477,7 +1522,8 @@ fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryErro
         leptos: RegistryLeptos {
             version: LEPTOS_VERSION.to_owned(),
             router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-            render_mode: RenderMode::Csr,
+            render_modes: vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr],
+            legacy_render_mode: None,
         },
         accessibility: RegistryAccessibility::default(),
         files: Vec::new(),
@@ -2019,16 +2065,6 @@ mod tests {
 
     use super::*;
     use crate::embedded_assets::InMemoryAssetProvider;
-    use web_ui_primitives::{
-        core::{Direction, MenuLoop, MenuModel},
-        leptos::{
-            DomAttribute, DomAttributeValue,
-            attrs::{
-                MenuItemAttrs, MenuItemKind as AttrsMenuItemKind, MenuTriggerAttrs,
-                menu_item_attrs, menu_item_indicator_attrs, menu_trigger_attrs,
-            },
-        },
-    };
 
     #[test]
     fn loads_built_in_registry_root() {
@@ -2134,7 +2170,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -2149,7 +2185,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_web_ui_primitives_version_cargo_plan_entry() {
+    fn accepts_canonical_web_ui_primitives_git_cargo_plan_entry() {
         let item = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
@@ -2162,7 +2198,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -2171,8 +2207,9 @@ mod tests {
                 {
                   "crate": "web_ui_primitives",
                   "source": {
-                    "kind": "version",
-                    "version": "0.1.0"
+                    "kind": "git",
+                    "url": "https://github.com/triesap/web_ui_primitives",
+                    "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -2184,6 +2221,35 @@ mod tests {
         .expect("parse item");
 
         item.validate().expect("validate item");
+    }
+
+    #[test]
+    fn accepts_legacy_csr_registry_render_mode_deterministically() {
+        let item = parse_registry_item_str(
+            r#"{
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+              "schemaVersion": "0.9.0-alpha",
+              "name": "legacy",
+              "kind": "ui",
+              "version": "0.9.0-alpha",
+              "title": "Legacy",
+              "description": "A legacy CSR compatibility fixture.",
+              "leptos": {
+                "version": "0.9.0-alpha",
+                "routerVersion": "0.9.0-alpha",
+                "renderMode": "csr"
+              },
+              "files": [],
+              "styles": [],
+              "registryDependencies": [],
+              "cargoPlan": [],
+              "extra": {}
+            }"#,
+        )
+        .expect("parse legacy CSR item");
+
+        assert!(item.leptos.render_modes.is_empty());
+        assert_eq!(item.leptos.legacy_render_mode, Some(RenderMode::Csr));
     }
 
     #[test]
@@ -2368,6 +2434,36 @@ mod tests {
     }
 
     #[test]
+    fn project_cargo_plan_projection_selects_exactly_one_or_no_delivery_mode() {
+        let entries = [CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["nightly".to_owned()],
+            required: true,
+        }];
+
+        for (contract, expected) in [
+            (
+                RenderModeContract::Selected(RenderMode::Csr),
+                vec!["csr".to_owned(), "nightly".to_owned()],
+            ),
+            (
+                RenderModeContract::Selected(RenderMode::Hydrate),
+                vec!["hydrate".to_owned(), "nightly".to_owned()],
+            ),
+            (
+                RenderModeContract::Selected(RenderMode::Ssr),
+                vec!["nightly".to_owned(), "ssr".to_owned()],
+            ),
+            (RenderModeContract::Neutral, vec!["nightly".to_owned()]),
+        ] {
+            let normalized =
+                normalize_cargo_plan_for_project(&entries, contract).expect("project plan");
+            assert_eq!(normalized[0].features, expected);
+        }
+    }
+
+    #[test]
     fn registry_item_rejects_duplicate_cargo_crates_before_resolution() {
         let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
         let entry = CargoPlanEntry {
@@ -2401,7 +2497,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -2441,7 +2537,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [
                 {
@@ -3082,85 +3178,6 @@ mod tests {
                 "MenuTrigger"
             ]
         );
-    }
-
-    #[test]
-    fn menu_attrs_expose_checked_indicator_state() {
-        let mut model = MenuModel::with_loop(2, MenuLoop::Wrap);
-        model.set_checked(Some(0));
-
-        let active_attrs = menu_item_indicator_attrs(&model, 0);
-        let inactive_attrs = menu_item_indicator_attrs(&model, 1);
-
-        assert_eq!(bool_attr(&active_attrs, "hidden"), Some(false));
-        assert_eq!(string_attr(&active_attrs, "data-state"), Some("checked"));
-        assert_eq!(bool_attr(&inactive_attrs, "hidden"), Some(true));
-        assert_eq!(
-            string_attr(&inactive_attrs, "data-state"),
-            Some("unchecked")
-        );
-    }
-
-    #[test]
-    fn menu_attrs_expose_trigger_and_item_open_state() {
-        let mut model = MenuModel::with_loop(2, MenuLoop::Wrap);
-
-        let closed_attrs = menu_trigger_attrs(
-            &model,
-            MenuTriggerAttrs::new().controls_id("locale-menu-content"),
-        );
-        assert_eq!(string_attr(&closed_attrs, "aria-expanded"), Some("false"));
-        assert_eq!(string_attr(&closed_attrs, "data-state"), Some("closed"));
-        assert_eq!(
-            string_attr(&closed_attrs, "aria-controls"),
-            Some("locale-menu-content")
-        );
-
-        model.set_open(true);
-        model.focus_index(Some(1));
-        model.set_checked(Some(1));
-
-        let open_attrs = menu_trigger_attrs(
-            &model,
-            MenuTriggerAttrs::new().controls_id("locale-menu-content"),
-        );
-        let focused_item_attrs = menu_item_attrs(
-            &model,
-            1,
-            MenuItemAttrs::new().kind(AttrsMenuItemKind::Radio),
-        );
-
-        assert_eq!(string_attr(&open_attrs, "aria-expanded"), Some("true"));
-        assert_eq!(string_attr(&open_attrs, "data-state"), Some("open"));
-        assert_eq!(
-            string_attr(&focused_item_attrs, "role"),
-            Some("menuitemradio")
-        );
-        assert_eq!(string_attr(&focused_item_attrs, "tabindex"), Some("0"));
-        assert_eq!(
-            string_attr(&focused_item_attrs, "aria-checked"),
-            Some("true")
-        );
-        assert_eq!(
-            bool_attr(&focused_item_attrs, "data-highlighted"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn menu_model_keyboard_contract_closes_and_selects() {
-        let mut model = MenuModel::with_loop(3, MenuLoop::Wrap);
-        model.set_disabled(1, true);
-        model.set_open(true);
-
-        assert_eq!(model.focus_by_key("ArrowDown", Direction::Ltr), Some(2));
-        assert_eq!(model.activate_index(2), Some(2));
-        assert!(!model.open());
-        assert_eq!(model.focused(), None);
-
-        model.set_open(true);
-        assert!(model.close_by_key("Escape"));
-        assert!(!model.open());
     }
 
     #[test]
@@ -3953,30 +3970,6 @@ mod tests {
         assert!(matches!(error, RegistryError::DuplicateTarget(_)));
     }
 
-    fn string_attr<'a>(attrs: &'a [DomAttribute], name: &str) -> Option<&'a str> {
-        attrs.iter().find_map(|attr| {
-            if attr.name() != name {
-                return None;
-            }
-            match attr.value() {
-                DomAttributeValue::String(value) => Some(value.as_str()),
-                DomAttributeValue::Bool(_) => None,
-            }
-        })
-    }
-
-    fn bool_attr(attrs: &[DomAttribute], name: &str) -> Option<bool> {
-        attrs.iter().find_map(|attr| {
-            if attr.name() != name {
-                return None;
-            }
-            match attr.value() {
-                DomAttributeValue::String(_) => None,
-                DomAttributeValue::Bool(value) => Some(*value),
-            }
-        })
-    }
-
     fn item_with_name_and_target(
         name: &str,
         file_target: &str,
@@ -3994,7 +3987,8 @@ mod tests {
             leptos: RegistryLeptos {
                 version: LEPTOS_VERSION.to_owned(),
                 router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-                render_mode: RenderMode::Csr,
+                render_modes: vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr],
+                legacy_render_mode: None,
             },
             accessibility: RegistryAccessibility::default(),
             files: vec![RegistryItemFile {

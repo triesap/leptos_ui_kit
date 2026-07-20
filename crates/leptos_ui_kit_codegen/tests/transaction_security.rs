@@ -97,7 +97,10 @@ fn unchanged_init_and_sync_inputs_still_have_exact_preimages() {
 
     assert!(init.files.is_empty());
     assert_eq!(observation_paths(&init.snapshot), expected_init_paths());
-    assert_eq!(observation_paths(&sync.snapshot), expected_init_paths());
+    assert_eq!(
+        observation_paths(&sync.snapshot),
+        expected_initialized_paths()
+    );
     for path in INIT_OBSERVATIONS {
         assert!(matches!(
             sync.snapshot.preimage(path),
@@ -112,7 +115,7 @@ fn apply_and_no_change_commands_preserve_the_exact_coordination_residual() {
     setup_project(directory.path());
 
     apply_init(directory.path()).expect("apply init");
-    assert_exact_coordination_residual(directory.path());
+    assert_exact_init_coordination_residual(directory.path());
     #[cfg(any(unix, windows))]
     let initial_identity = coordination_lock_identity(directory.path());
     #[cfg(unix)]
@@ -127,7 +130,7 @@ fn apply_and_no_change_commands_preserve_the_exact_coordination_residual() {
     assert!(!add.is_empty());
     assert!(second_add.is_empty());
     assert!(sync.is_empty());
-    assert_exact_coordination_residual(directory.path());
+    assert_exact_theme_coordination_residual(directory.path());
     #[cfg(any(unix, windows))]
     assert_eq!(
         coordination_lock_identity(directory.path()),
@@ -297,7 +300,7 @@ fn existing_coordination_directory_is_tightened_through_its_open_handle() {
     let plan = apply_init(directory.path()).expect("tighten existing coordination directory");
 
     assert!(plan.is_empty());
-    assert_exact_coordination_residual(directory.path());
+    assert_exact_init_coordination_residual(directory.path());
 }
 
 #[test]
@@ -494,7 +497,7 @@ fn sync_snapshot_covers_installed_items_nested_targets_and_dependency_closure() 
     assert!(paths.contains(&"src/components/ui/dialog/root.rs"));
     assert!(paths.contains(&"src/components/ui/dialog/description.rs"));
 
-    let mut expected = INIT_OBSERVATIONS
+    let mut expected = expected_initialized_paths()
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -1008,7 +1011,7 @@ fn root_aliases_are_bound_and_published_files_use_canonical_mode() {
             & 0o7777,
         0o644
     );
-    assert_exact_coordination_residual(&real_root);
+    assert_exact_init_coordination_residual(&real_root);
 }
 
 #[cfg(unix)]
@@ -1067,7 +1070,23 @@ fn seed_coordination(root: &Path, marker: &[u8]) {
     }
 }
 
-fn assert_exact_coordination_residual(root: &Path) {
+fn assert_exact_init_coordination_residual(root: &Path) {
+    assert_exact_coordination_residual(root, &["kit.json", "kit.lock.json"]);
+}
+
+fn assert_exact_theme_coordination_residual(root: &Path) {
+    assert_exact_coordination_residual(
+        root,
+        &[
+            "kit.json",
+            "kit.lock.json",
+            "theme-integration.json",
+            "token-contract.json",
+        ],
+    );
+}
+
+fn assert_exact_coordination_residual(root: &Path, managed_names: &[&str]) {
     let coordination_dir = root.join(KIT_COORDINATION_DIR);
     let gitignore = root.join(KIT_GITIGNORE_PATH);
     let lock = root.join(DEFAULT_KIT_WRITE_LOCK_PATH);
@@ -1101,10 +1120,10 @@ fn assert_exact_coordination_residual(root: &Path) {
         })
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(
-        names,
-        vec![".gitignore", ".write.lock", "kit.json", "kit.lock.json"]
-    );
+    let mut expected_names = vec![".gitignore", ".write.lock"];
+    expected_names.extend_from_slice(managed_names);
+    expected_names.sort_unstable();
+    assert_eq!(names, expected_names);
     assert!(!coordination_dir.join(".transactions").exists());
 
     #[cfg(unix)]
@@ -1217,6 +1236,16 @@ fn setup_project(root: &Path) {
 
 fn expected_init_paths() -> Vec<&'static str> {
     INIT_OBSERVATIONS.to_vec()
+}
+
+fn expected_initialized_paths() -> Vec<&'static str> {
+    let mut paths = expected_init_paths();
+    paths.extend([
+        "src/components/ui/_kit/theme-integration.json",
+        "src/components/ui/_kit/token-contract.json",
+    ]);
+    paths.sort_unstable();
+    paths
 }
 
 fn observation_paths(snapshot: &leptos_ui_kit_codegen::PlanSnapshot) -> Vec<&str> {

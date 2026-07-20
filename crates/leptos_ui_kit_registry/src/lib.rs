@@ -15,8 +15,8 @@ pub use config::{
     ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_KIT_DIR, DEFAULT_UI_DIR,
     DesiredItemConfig, DesiredItemName, InstallConfig, InstallRoots, KIT_SCHEMA_URL, KitConfig,
     LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, LeptosConfig, NormalizeOptions, NormalizedProjectConfig,
-    ProjectConfig, ProjectKind, RegistryConfig, RegistrySource, RenderMode, SCHEMA_VERSION,
-    StylesConfig, StylesMode, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
+    ProjectConfig, ProjectKind, RegistryConfig, RegistrySource, RenderMode, RenderModeContract,
+    SCHEMA_VERSION, StylesConfig, StylesMode, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig,
     ToolSourceConfig, WorkspaceMode, canonical_kit_config, canonical_kit_json,
     canonical_tool_config, desired_builtin_anchor_item, desired_builtin_button_item,
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
@@ -28,8 +28,8 @@ pub use config::{
 pub use detect::{
     DependencyDeclarationKind, DependencyIncompatibility, DependencyPlan, DependencyRequirement,
     DependencyStatus, DetectedDependencySource, DetectedProject, DetectionError, InfoOutput,
-    build_info_output, dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
-    detect_project, detect_single_crate_project,
+    RenderModeSelection, build_info_output, dependency_requirement_for_cargo_plan,
+    detect_cargo_plan_requirements, detect_project, detect_single_crate_project,
 };
 #[allow(
     deprecated,
@@ -48,9 +48,10 @@ pub use item::{
     ResolvedRegistryTargets, ResolvedStyleBlockTarget, ResolvedUiTarget, WEB_UI_PRIMITIVES_GIT_REV,
     WEB_UI_PRIMITIVES_GIT_URL, WEB_UI_PRIMITIVES_REQUIREMENT, WEB_UI_PRIMITIVES_VERSION,
     load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
-    normalize_cargo_plan, parse_registry_item_str, parse_registry_root_str,
-    read_built_in_registry_source, resolve_built_in_registry_items, resolve_registry_targets,
-    validate_registry_graph, validate_registry_item_name, validate_registry_manifest_identity,
+    normalize_cargo_plan, normalize_cargo_plan_for_project, parse_registry_item_str,
+    parse_registry_root_str, read_built_in_registry_source, resolve_built_in_registry_items,
+    resolve_registry_targets, validate_registry_graph, validate_registry_item_name,
+    validate_registry_manifest_identity,
 };
 pub use registry_health::{
     RegistryHealthError, RegistryHealthFileKind, validate_built_in_registry_health,
