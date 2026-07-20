@@ -66,7 +66,7 @@ pub fn MenuItem(
     }
 
     let click_context = context.clone();
-    let click_on_select = on_select.clone();
+    let click_on_select = on_select;
     let on_click = move |_| {
         if disabled.get_untracked() {
             return;
