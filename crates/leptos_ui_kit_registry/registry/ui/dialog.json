@@ -130,9 +130,10 @@
       "crate": "web_ui_primitives",
       "source": {
         "kind": "version",
-        "version": "0.1.0"
+        "version": "0.2.0"
       },
       "features": [
+        "core",
         "leptos"
       ],
       "required": true

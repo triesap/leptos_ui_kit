@@ -171,14 +171,30 @@ pub struct ProjectConfig {
     pub kind: ProjectKind,
     pub crate_root: String,
     pub src_dir: String,
-    pub index_html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_html: Option<String>,
 }
 
 impl ProjectConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         expect_path("project.crateRoot", ".", &self.crate_root)?;
         expect_path("project.srcDir", "src", &self.src_dir)?;
-        expect_path("project.indexHtml", "index.html", &self.index_html)
+        match (self.kind, self.index_html.as_deref()) {
+            (ProjectKind::SingleCrateTrunkCsr, Some(index_html)) => {
+                expect_path("project.indexHtml", "index.html", index_html)
+            }
+            (ProjectKind::SingleCrateTrunkCsr, None) => Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                expected: "index.html for single-crate-trunk-csr",
+                actual: "<missing>".to_owned(),
+            }),
+            (ProjectKind::SharedLibrary, None) => Ok(()),
+            (ProjectKind::SharedLibrary, Some(index_html)) => Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                expected: "absent for shared-library",
+                actual: index_html.to_owned(),
+            }),
+        }
     }
 }
 
@@ -186,6 +202,16 @@ impl ProjectConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectKind {
     SingleCrateTrunkCsr,
+    SharedLibrary,
+}
+
+impl ProjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleCrateTrunkCsr => "single-crate-trunk-csr",
+            Self::SharedLibrary => "shared-library",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +366,7 @@ impl DesiredItemName {
 pub enum WorkspaceMode {
     SingleCrate,
     SinglePackageWorkspaceRoot,
+    SharedLibrary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +379,7 @@ pub struct InstallRoots {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedProjectConfig {
+    pub project_kind: ProjectKind,
     pub schema_version: String,
     pub render_mode: RenderMode,
     pub desired_items: Vec<DesiredItemConfig>,
@@ -359,7 +387,7 @@ pub struct NormalizedProjectConfig {
     pub project_root: PathBuf,
     pub crate_root: PathBuf,
     pub source_root: PathBuf,
-    pub index_html: PathBuf,
+    pub index_html: Option<PathBuf>,
     pub install_roots: InstallRoots,
 }
 
@@ -406,7 +434,7 @@ fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigE
             kind: ProjectKind::SingleCrateTrunkCsr,
             crate_root: ".".to_owned(),
             src_dir: "src".to_owned(),
-            index_html: "index.html".to_owned(),
+            index_html: Some("index.html".to_owned()),
         },
         leptos: LeptosConfig {
             version: LEPTOS_VERSION.to_owned(),
@@ -591,6 +619,20 @@ pub fn normalize_single_crate_project(
     config: &KitConfig,
     options: &NormalizeOptions,
 ) -> Result<NormalizedProjectConfig, ConfigError> {
+    if config.project.kind != ProjectKind::SingleCrateTrunkCsr {
+        return Err(ConfigError::InvalidValue {
+            field: "project.kind",
+            expected: "single-crate-trunk-csr",
+            actual: config.project.kind.as_str().to_owned(),
+        });
+    }
+    normalize_project(config, options)
+}
+
+pub fn normalize_project(
+    config: &KitConfig,
+    options: &NormalizeOptions,
+) -> Result<NormalizedProjectConfig, ConfigError> {
     config.validate()?;
 
     let project_root = options.project_root.clone();
@@ -600,17 +642,22 @@ pub fn normalize_single_crate_project(
         "project.crateRoot",
     )?;
     let source_root = join_checked(&project_root, &config.project.src_dir, "project.srcDir")?;
-    let index_html = join_checked(
-        &project_root,
-        &config.project.index_html,
-        "project.indexHtml",
-    )?;
+    let index_html = config
+        .project
+        .index_html
+        .as_deref()
+        .map(|path| join_checked(&project_root, path, "project.indexHtml"))
+        .transpose()?;
 
     Ok(NormalizedProjectConfig {
+        project_kind: config.project.kind,
         schema_version: config.schema_version.clone(),
         render_mode: config.leptos.render_mode,
         desired_items: config.items.clone(),
-        workspace_mode: WorkspaceMode::SingleCrate,
+        workspace_mode: match config.project.kind {
+            ProjectKind::SingleCrateTrunkCsr => WorkspaceMode::SingleCrate,
+            ProjectKind::SharedLibrary => WorkspaceMode::SharedLibrary,
+        },
         project_root: project_root.clone(),
         crate_root,
         source_root,
@@ -1087,5 +1134,60 @@ mod tests {
             normalized.install_roots.css_file,
             PathBuf::from("/workspace/demo/styles/kit.css")
         );
+    }
+
+    #[test]
+    fn parses_and_normalizes_shared_library_project_without_html() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/shared_library/src/components/ui/_kit/kit.json");
+        let config = parse_kit_json_str(
+            &std::fs::read_to_string(&fixture).expect("read shared-library fixture"),
+        )
+        .expect("parse shared-library config");
+
+        assert_eq!(config.project.kind, ProjectKind::SharedLibrary);
+        assert_eq!(config.project.index_html, None);
+
+        let normalized = normalize_project(
+            &config,
+            &NormalizeOptions {
+                project_root: PathBuf::from("/workspace/shared_ui"),
+            },
+        )
+        .expect("normalize shared library");
+        assert_eq!(normalized.project_kind, ProjectKind::SharedLibrary);
+        assert_eq!(normalized.workspace_mode, WorkspaceMode::SharedLibrary);
+        assert_eq!(normalized.index_html, None);
+        assert_eq!(
+            normalized.install_roots.ui_dir,
+            PathBuf::from("/workspace/shared_ui/src/components/ui")
+        );
+    }
+
+    #[test]
+    fn rejects_project_kind_and_html_shape_mismatches() {
+        let app_without_html = valid_config_json().replace(
+            "    \"srcDir\": \"src\",\n    \"indexHtml\": \"index.html\"\n",
+            "    \"srcDir\": \"src\"\n",
+        );
+        assert!(matches!(
+            parse_kit_json_str(&app_without_html),
+            Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                ..
+            })
+        ));
+
+        let shared_with_html = valid_config_json().replace(
+            "\"kind\": \"single-crate-trunk-csr\"",
+            "\"kind\": \"shared-library\"",
+        );
+        assert!(matches!(
+            parse_kit_json_str(&shared_with_html),
+            Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                ..
+            })
+        ));
     }
 }

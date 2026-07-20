@@ -66,12 +66,14 @@
       "required": [
         "kind",
         "crateRoot",
-        "srcDir",
-        "indexHtml"
+        "srcDir"
       ],
       "properties": {
         "kind": {
-          "const": "single-crate-trunk-csr"
+          "enum": [
+            "single-crate-trunk-csr",
+            "shared-library"
+          ]
         },
         "crateRoot": {
           "const": "."
@@ -82,7 +84,45 @@
         "indexHtml": {
           "const": "index.html"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-trunk-csr"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "indexHtml"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "shared-library"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "indexHtml"
+              ]
+            }
+          }
+        }
+      ]
     },
     "leptos": {
       "type": "object",

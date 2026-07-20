@@ -9,7 +9,7 @@ use toml::Value as TomlValue;
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    RenderMode, WorkspaceMode, normalize_single_crate_project, parse_kit_json_str,
+    ProjectKind, RenderMode, WorkspaceMode, normalize_project, parse_kit_json_str,
 };
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ pub struct DetectedProject {
     pub cargo_manifest_path: PathBuf,
     pub workspace_mode: WorkspaceMode,
     pub source_root: PathBuf,
-    pub index_html_path: PathBuf,
+    pub index_html_path: Option<PathBuf>,
     pub css_file_path: PathBuf,
     pub render_mode: Option<RenderMode>,
     pub dependency_plan: DependencyPlan,
@@ -140,16 +140,9 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
         ));
     }
 
-    let workspace_mode = detect_workspace_mode(&manifest)?;
-
     let source_root = project_root.join("src");
     if !source_root.is_dir() {
         return Err(DetectionError::MissingSourceRoot(source_root));
-    }
-
-    let index_html_path = project_root.join("index.html");
-    if !index_html_path.is_file() {
-        return Err(DetectionError::MissingIndexHtml(index_html_path));
     }
 
     let kit_config_path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
@@ -157,6 +150,23 @@ pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProjec
     let kit_config = match kit_config_path.as_ref() {
         Some(path) => Some(parse_kit_json_str(&read_to_string(path)?)?),
         None => None,
+    };
+    let workspace_mode = match kit_config.as_ref().map(|config| config.project.kind) {
+        Some(ProjectKind::SharedLibrary) => {
+            detect_workspace_mode(&manifest)?;
+            WorkspaceMode::SharedLibrary
+        }
+        _ => detect_workspace_mode(&manifest)?,
+    };
+    let index_html_path = match kit_config.as_ref().map(|config| config.project.kind) {
+        Some(ProjectKind::SharedLibrary) => None,
+        _ => {
+            let index_html_path = project_root.join("index.html");
+            if !index_html_path.is_file() {
+                return Err(DetectionError::MissingIndexHtml(index_html_path));
+            }
+            Some(index_html_path)
+        }
     };
     let css_file_path = project_root.join(
         kit_config
@@ -213,7 +223,7 @@ pub fn build_info_output(project_root: &Path) -> Result<InfoOutput, DetectionErr
     };
 
     let normalized_config = match kit_config.as_ref() {
-        Some(config) => Some(normalize_single_crate_project(
+        Some(config) => Some(normalize_project(
             config,
             &NormalizeOptions {
                 project_root: detected.project_root.clone(),
@@ -441,7 +451,7 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(detected.workspace_mode, WorkspaceMode::SingleCrate);
         assert_eq!(detected.source_root, root.join("src"));
-        assert_eq!(detected.index_html_path, root.join("index.html"));
+        assert_eq!(detected.index_html_path, Some(root.join("index.html")));
         assert_eq!(detected.css_file_path, root.join("styles/kit.css"));
         assert_eq!(detected.render_mode, Some(RenderMode::Csr));
         assert_eq!(
@@ -484,6 +494,23 @@ leptos_router = "0.9.0-alpha"
             detected.dependency_plan.leptos.status,
             DependencyStatus::Satisfied
         );
+    }
+
+    #[test]
+    fn detects_configured_shared_library_without_index_html() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared_library");
+
+        let detected = detect_single_crate_project(&root).expect("detect shared library");
+        assert_eq!(detected.workspace_mode, WorkspaceMode::SharedLibrary);
+        assert_eq!(detected.index_html_path, None);
+        assert_eq!(detected.source_root, root.join("src"));
+
+        let info = build_info_output(&root).expect("build shared-library info");
+        let normalized = info.normalized_config.expect("normalized shared config");
+        assert_eq!(normalized.project_kind, ProjectKind::SharedLibrary);
+        assert_eq!(normalized.workspace_mode, WorkspaceMode::SharedLibrary);
+        assert_eq!(normalized.index_html, None);
     }
 
     #[test]
@@ -547,13 +574,13 @@ edition = "2024"
     fn dependency_requirement_reports_satisfied_version_dependency() {
         let manifest: TomlValue = toml::from_str(
             r#"[dependencies]
-web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
+web_ui_primitives = { version = "0.2.0", features = ["leptos"] }
 "#,
         )
         .expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::version("0.1.0"),
+            source: CargoPlanSource::version("0.2.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };
@@ -568,7 +595,7 @@ web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
         let manifest: TomlValue = toml::from_str("[dependencies]\n").expect("parse manifest");
         let entry = CargoPlanEntry {
             crate_name: "web_ui_primitives".to_owned(),
-            source: CargoPlanSource::version("0.1.0"),
+            source: CargoPlanSource::version("0.2.0"),
             features: vec!["leptos".to_owned()],
             required: true,
         };

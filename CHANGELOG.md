@@ -7,6 +7,11 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Add a strict `shared-library` project target that omits Trunk HTML ownership
+  while retaining source, stylesheet, lock, dependency, and transaction
+  validation.
+- Advance the generated composite-component dependency plan to
+  `web_ui_primitives` `0.2.0`.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,

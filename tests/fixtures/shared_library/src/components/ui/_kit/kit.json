@@ -1,0 +1,69 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/kit.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "tool": {
+    "package": "leptos_ui_kit_cli",
+    "binary": "leptos_ui_kit",
+    "source": {
+      "kind": "git",
+      "url": "https://github.com/triesap/leptos_ui_kit",
+      "rev": "0123456789abcdef0123456789abcdef01234567"
+    }
+  },
+  "project": {
+    "kind": "shared-library",
+    "crateRoot": ".",
+    "srcDir": "src"
+  },
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderMode": "csr"
+  },
+  "install": {
+    "uiDir": "src/components/ui",
+    "uiMod": "src/components/ui/mod.rs",
+    "componentsMod": "src/components/mod.rs"
+  },
+  "styles": {
+    "mode": "pure-css",
+    "css": "styles/kit.css"
+  },
+  "registry": {
+    "source": "builtin"
+  },
+  "items": [
+    {
+      "name": "tokens",
+      "source": "builtin"
+    },
+    {
+      "name": "anchor",
+      "source": "builtin"
+    },
+    {
+      "name": "spinner",
+      "source": "builtin"
+    },
+    {
+      "name": "button",
+      "source": "builtin"
+    },
+    {
+      "name": "field",
+      "source": "builtin"
+    },
+    {
+      "name": "menu",
+      "source": "builtin"
+    },
+    {
+      "name": "router-link",
+      "source": "builtin"
+    },
+    {
+      "name": "status",
+      "source": "builtin"
+    }
+  ]
+}

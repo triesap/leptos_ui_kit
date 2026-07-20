@@ -16,7 +16,7 @@ use crate::{
     embedded_assets::{AssetProviderError, EmbeddedAssetKind},
 };
 
-pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
+pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.2.0";
 
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
@@ -673,7 +673,7 @@ impl CargoPlanEntry {
             "web_ui_primitives" => {
                 self.source
                     .expect_version("cargoPlan[].source.version", WEB_UI_PRIMITIVES_VERSION)?;
-                expect_features("cargoPlan[].features", &["leptos"], &self.features)
+                expect_features("cargoPlan[].features", &["core", "leptos"], &self.features)
             }
             value => Err(RegistryError::InvalidValue {
                 field: "cargoPlan[].crate",
@@ -1712,9 +1712,9 @@ mod tests {
                   "crate": "web_ui_primitives",
                   "source": {
                     "kind": "version",
-                    "version": "0.1.0"
+                    "version": "0.2.0"
                   },
-                  "features": ["leptos"],
+                  "features": ["core", "leptos"],
                   "required": true
                 }
               ],

@@ -1,0 +1,10 @@
+[package]
+name = "shared_ui_fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+leptos = { version = "=0.9.0-alpha", features = ["csr"] }
+leptos_router = "=0.9.0-alpha"
+web_ui_primitives = { version = "0.2.0", default-features = false, features = ["core", "leptos"] }

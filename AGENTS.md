@@ -41,7 +41,9 @@ crate family.
 - The CLI does not mutate `Cargo.toml`; it emits and verifies dependency plans.
 - Built-in registry items are the only supported registry source.
 - The supported app may be a single crate or a single-package workspace root.
-- SSR, hydration, islands, multi-member workspace installs, and remote
+- A configured `shared-library` target may install into one library package
+  without owning Trunk HTML; the consuming app owns stylesheet loading.
+- SSR, hydration, islands, multi-member workspace-root installs, and remote
   registries are future work.
 - Generated CSS classes use `.kit-*`; CSS custom properties use `--kit-*`.
 

@@ -1,4 +1,4 @@
-use leptos_ui_kit_registry::KitConfig;
+use leptos_ui_kit_registry::{KitConfig, ProjectKind};
 
 use crate::path_safety::PlanningContext;
 use crate::planning::push_file_plan;
@@ -10,6 +10,9 @@ pub(crate) fn plan_index_html(
     changes: &mut Vec<ChangeRecord>,
     config: &KitConfig,
 ) -> Result<(), CodegenError> {
+    if config.project.kind == ProjectKind::SharedLibrary {
+        return Ok(());
+    }
     let path = context.project_root().join("index.html");
     let html = context.read_string("index.html")?;
     let css_path = config.styles.css.as_str();

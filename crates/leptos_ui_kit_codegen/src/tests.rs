@@ -81,6 +81,30 @@ fn init_plan_creates_missing_project_files_without_writes() {
 }
 
 #[test]
+fn shared_library_init_skips_html_and_records_project_kind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src/components/ui/_kit")).expect("create kit directory");
+    fs::write(
+        root.join(DEFAULT_KIT_CONFIG_PATH),
+        include_str!("../../../tests/fixtures/shared_library/src/components/ui/_kit/kit.json"),
+    )
+    .expect("write shared-library config");
+
+    let plan = plan_init(root).expect("plan shared-library init");
+
+    assert!(!plan.files.iter().any(|file| file.path == "index.html"));
+    assert!(plan.files.iter().any(|file| file.path == "styles/kit.css"));
+    let lock_file = plan
+        .files
+        .iter()
+        .find(|file| file.path == DEFAULT_KIT_LOCK_PATH)
+        .expect("shared install lock");
+    let lock = parse_install_lock_str(&lock_file.content).expect("parse shared install lock");
+    assert_eq!(lock.project.kind, "shared-library");
+}
+
+#[test]
 fn init_plan_rejects_invalid_existing_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

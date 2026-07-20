@@ -2,8 +2,9 @@
 
 Source-first UI components for Leptos `0.9.0-alpha`.
 
-`leptos_ui_kit` provides a CLI and packaged registry for installing editable,
-app-owned Rust and CSS into Trunk CSR apps.
+`leptos_ui_kit` provides a CLI and packaged registry for installing editable
+Rust and CSS into Trunk CSR apps and explicitly configured shared UI
+libraries.
 
 ## Install
 
@@ -39,7 +40,9 @@ cargo leptos_ui_kit doctor --strict
 
 Write commands support `--dry-run`. Structured output commands support `--json`.
 
-## Supported App Shape
+## Supported Consumer Shapes
+
+The ordinary app-owned source shape is:
 
 ```text
 Cargo.toml
@@ -50,6 +53,22 @@ src/
 
 The app may be a single crate or a single-package workspace root.
 Multi-member workspace installs are not supported.
+
+A shared UI package uses the same generated component and stylesheet roots but
+does not own `index.html`:
+
+```text
+Cargo.toml
+styles/kit.css
+src/lib.rs
+src/components/ui/_kit/kit.json
+```
+
+Its strict `kit.json` declares `"project.kind": "shared-library"` and omits
+`project.indexHtml`. `sync` and `doctor --strict` then skip Trunk HTML
+reconciliation while retaining dependency, generated-source, stylesheet, lock,
+and transaction checks. The consuming application remains responsible for
+loading the generated stylesheet.
 
 ## Dependency Plan
 
@@ -65,7 +84,7 @@ Only `collapsible`, `dialog`, `menu`, and `tabs` additionally require:
 
 ```toml
 [dependencies]
-web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
+web_ui_primitives = { version = "0.2.0", default-features = false, features = ["core", "leptos"] }
 ```
 
 `router-link` additionally requires:

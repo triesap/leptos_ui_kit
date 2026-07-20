@@ -2455,9 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "web_ui_primitives"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8fc9ade76709c99ea2b112880a7cc67605aa68520d00ddc154234cc625ba473"
+version = "0.2.0"
 dependencies = [
  "web_ui_primitives_core",
  "web_ui_primitives_leptos",
@@ -2465,19 +2463,17 @@ dependencies = [
 
 [[package]]
 name = "web_ui_primitives_core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "632b68bc0ec4463b81bd9d810e04ea6c5a7149d4cbb85f0d2d7565ab5e97b4ef"
+version = "0.2.0"
 
 [[package]]
 name = "web_ui_primitives_leptos"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d47ff21541819ea7773cc4864a7e0e20d286a6be359263c86aff2fc7bda405a"
+version = "0.2.0"
 dependencies = [
+ "js-sys",
  "leptos",
  "send_wrapper",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web_ui_primitives_core",
 ]
