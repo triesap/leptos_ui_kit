@@ -23,6 +23,9 @@ pub const PACKAGE_NAMES: [&str; 5] = [
     "leptos_ui_kit_registry",
 ];
 
+pub const PACKAGE_WORKSPACE_LOCK: &[u8] =
+    include_bytes!("../fixtures/package_workspace.Cargo.lock");
+
 const PATCHED_PACKAGE_NAMES: [&str; 3] = [
     "leptos_ui_kit_registry",
     "leptos_ui_kit_codegen",

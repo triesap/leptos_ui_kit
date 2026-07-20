@@ -31,6 +31,8 @@ Semantic Versioning.
   variants.
 - Add isolated archive acceptance proving both installed binaries keep working
   after package source, build targets, and Cargo caches are deleted.
+- Pin the extracted package-only dependency graph independently from
+  source-only ABI tests that consume unpublished upstream revisions.
 - Add the packaged v1 semantic theme contract and CSS-only `tokens` foundation
   item, installed before every styled built-in component.
 - Replace component `:root` aliases with property-local semantic and structural
