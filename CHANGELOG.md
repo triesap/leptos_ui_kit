@@ -17,6 +17,11 @@ Semantic Versioning.
   and dialog surfaces.
 - Emit the canonical kit cascade-layer order and place token and component
   rules in their owned layers.
+- Publish newly generated public files with deterministic mode `0644` even
+  under a restrictive process umask, while retaining private coordination
+  modes and preserving existing app-owned target modes.
+- Package and exercise a source-contained shared-library workflow fixture
+  alongside the canonical Trunk application fixture.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,

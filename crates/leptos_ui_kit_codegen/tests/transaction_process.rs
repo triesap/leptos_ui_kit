@@ -231,6 +231,52 @@ fn killed_transaction_is_rolled_back_by_the_next_fresh_process() {
     panic!("could not observe a durable in-flight journal before the worker completed");
 }
 
+#[cfg(unix)]
+#[test]
+fn restrictive_umask_cannot_make_public_generated_files_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = tempdir().expect("process-test sandbox");
+    let project = sandbox.path().join("project");
+    let control = sandbox.path().join("control");
+    setup_project(&project);
+    fs::create_dir(&control).expect("create process control directory");
+
+    let executable = env::current_exe().expect("current process-test executable");
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            "umask 077; exec \"$1\" --exact transaction_process_worker --nocapture --test-threads=1",
+            "leptos-ui-kit-umask-worker",
+        ])
+        .arg(executable)
+        .env(WORKER_ROLE_ENV, "apply-init")
+        .env(WORKER_PROJECT_ENV, &project)
+        .env(WORKER_CONTROL_ENV, &control)
+        .env(WORKER_ID_ENV, "umask")
+        .status()
+        .expect("run restrictive-umask worker");
+    assert!(
+        status.success(),
+        "restrictive-umask worker failed: {status}"
+    );
+
+    for logical_path in [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/_kit/kit.json",
+        "src/components/ui/_kit/kit.lock.json",
+        "styles/kit.css",
+    ] {
+        let mode = fs::metadata(project.join(logical_path))
+            .unwrap_or_else(|error| panic!("metadata {logical_path}: {error}"))
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o644, "public generated mode for {logical_path}");
+    }
+}
+
 #[test]
 fn transaction_process_worker() {
     let Some(role) = env::var_os(WORKER_ROLE_ENV) else {

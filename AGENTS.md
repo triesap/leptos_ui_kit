@@ -29,6 +29,9 @@ crate family.
 - `tests/fixtures/homepage_trunk_csr` is the canonical Trunk CSR fixture.
 - `crates/leptos_ui_kit_cli/tests/fixtures/homepage_trunk_csr` is its
   package-local mirror for extracted-package and installed-runtime acceptance.
+- `tests/fixtures/shared_library` is the canonical shared-package fixture;
+  `crates/leptos_ui_kit_cli/tests/fixtures/shared_library` is its package-local
+  mirror.
 
 ## Product Contract
 
@@ -128,8 +131,10 @@ For schema edits, validate JSON syntax and run the Rust test lane.
 For CLI integration edits, keep or extend `tests/fixtures/homepage_trunk_csr`,
 its package-local mirror under
 `crates/leptos_ui_kit_cli/tests/fixtures/homepage_trunk_csr`, and
-`crates/leptos_ui_kit_cli/tests/workflow.rs`. Keep both fixture copies aligned;
-the workflow parity test must continue to guard their exact contents.
+`tests/fixtures/shared_library` and its package-local mirror under
+`crates/leptos_ui_kit_cli/tests/fixtures/shared_library`, plus
+`crates/leptos_ui_kit_cli/tests/workflow.rs`. Keep both fixture pairs aligned;
+the workflow parity tests must continue to guard their exact contents.
 
 For package manifests, include lists, embedded assets, provenance, or CLI
 installation changes, also run:

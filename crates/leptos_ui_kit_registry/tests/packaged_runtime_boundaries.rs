@@ -53,7 +53,7 @@ const EXPECTED_PACKAGE_SUPPORT: [&str; 7] = [
     "build_provenance.rs",
 ];
 
-const EXPECTED_PACKAGE_SOURCES: [&str; 8] = [
+const EXPECTED_PACKAGE_SOURCES: [&str; 9] = [
     "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
@@ -61,6 +61,7 @@ const EXPECTED_PACKAGE_SOURCES: [&str; 8] = [
     "src/item.rs",
     "src/lib.rs",
     "src/registry_health.rs",
+    "src/runtime_abi.rs",
     "src/theme_contract.rs",
 ];
 
@@ -710,7 +711,7 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 90);
+    assert_eq!(expected.len(), 91);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(actual.contains(schema), "missing packaged schema: {schema}");

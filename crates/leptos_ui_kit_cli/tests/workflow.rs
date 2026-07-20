@@ -22,7 +22,7 @@ fn packaged_homepage_fixture_matches_workspace_canonical_copy_when_present() {
         canonical.is_dir(),
         "canonical fixture root must be a directory"
     );
-    let mut packaged = fixture_snapshot(&fixture_root());
+    let mut packaged = fixture_snapshot(&homepage_fixture_root());
     let manifest = packaged
         .remove(Path::new("Cargo.toml.fixture"))
         .expect("package-local fixture manifest");
@@ -37,6 +37,77 @@ fn packaged_homepage_fixture_matches_workspace_canonical_copy_when_present() {
         fixture_snapshot(&canonical),
         "package-local homepage fixture diverged from the workspace canonical copy"
     );
+}
+
+#[test]
+fn packaged_shared_fixture_matches_workspace_canonical_copy_when_present() {
+    let canonical = workspace_root().join("tests/fixtures/shared_library");
+    if !canonical
+        .try_exists()
+        .expect("inspect canonical shared fixture root")
+    {
+        return;
+    }
+    assert!(
+        canonical.is_dir(),
+        "canonical shared fixture root must be a directory"
+    );
+    let mut packaged = fixture_snapshot(&shared_fixture_root());
+    let manifest = packaged
+        .remove(Path::new("Cargo.toml.fixture"))
+        .expect("package-local shared fixture manifest");
+    assert!(
+        packaged
+            .insert(PathBuf::from("Cargo.toml"), manifest)
+            .is_none(),
+        "package-local shared fixture must have exactly one manifest"
+    );
+    assert_eq!(
+        packaged,
+        fixture_snapshot(&canonical),
+        "package-local shared fixture diverged from the workspace canonical copy"
+    );
+}
+
+#[test]
+fn shared_library_fixture_cli_workflow() {
+    let directory = tempdir().expect("tempdir");
+    let project = directory.path().join("shared-ui");
+    copy_shared_fixture(&project);
+    assert!(!project.join("index.html").exists());
+
+    assert_success(&project, &["info", "--json"]);
+    assert_success(&project, &["sync", "--dry-run", "--json"]);
+    assert_success(&project, &["sync"]);
+    assert_success(&project, &["doctor", "--strict", "--json"]);
+    assert_success(&project, &["sync", "--dry-run", "--json"]);
+
+    assert!(!project.join("index.html").exists());
+    for logical_path in [
+        "src/components/ui/anchor.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/field/mod.rs",
+        "src/components/ui/menu/mod.rs",
+        "src/components/ui/router_link.rs",
+        "src/components/ui/spinner.rs",
+        "src/components/ui/status.rs",
+        "src/components/ui/_kit/kit.lock.json",
+    ] {
+        assert!(
+            project.join(logical_path).is_file(),
+            "missing shared generated file {logical_path}"
+        );
+    }
+    let stylesheet =
+        fs::read_to_string(project.join("styles/kit.css")).expect("read shared stylesheet");
+    assert_eq!(
+        stylesheet
+            .matches(leptos_ui_kit_registry::KIT_LAYER_ORDER_DECLARATION)
+            .count(),
+        1
+    );
+    assert!(stylesheet.contains("@layer leptos-ui-kit.tokens {"));
+    assert!(stylesheet.contains("@layer leptos-ui-kit.components {"));
 }
 
 #[test]
@@ -610,11 +681,18 @@ fn test_binary(env_var: &str, name: &str) -> PathBuf {
     path
 }
 
-fn fixture_root() -> PathBuf {
+fn homepage_fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/homepage_trunk_csr")
         .canonicalize()
         .expect("canonical fixture root")
+}
+
+fn shared_fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/shared_library")
+        .canonicalize()
+        .expect("canonical shared fixture root")
 }
 
 fn workspace_root() -> PathBuf {
@@ -625,7 +703,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn copy_homepage_fixture(to: &Path) {
-    copy_dir(&fixture_root(), to);
+    copy_dir(&homepage_fixture_root(), to);
     fs::rename(to.join("Cargo.toml.fixture"), to.join("Cargo.toml"))
         .expect("activate fixture Cargo manifest");
     let workspace_lock = workspace_root().join("Cargo.lock");
@@ -637,6 +715,12 @@ fn copy_homepage_fixture(to: &Path) {
     };
     fs::copy(lock, to.join("Cargo.lock"))
         .expect("seed fixture with the validated workspace dependency lock");
+}
+
+fn copy_shared_fixture(to: &Path) {
+    copy_dir(&shared_fixture_root(), to);
+    fs::rename(to.join("Cargo.toml.fixture"), to.join("Cargo.toml"))
+        .expect("activate shared fixture Cargo manifest");
 }
 
 fn copy_dir(from: &Path, to: &Path) {

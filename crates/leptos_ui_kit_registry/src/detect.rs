@@ -348,7 +348,12 @@ fn source_matches_requirement(
 ) -> bool {
     match required.kind {
         CargoPlanSourceKind::Version => {
-            found.kind == CargoPlanSourceKind::Version && found.version == required.version
+            found.kind == CargoPlanSourceKind::Version
+                && found.version.as_deref().map(normalize_version_requirement)
+                    == required
+                        .version
+                        .as_deref()
+                        .map(normalize_version_requirement)
         }
         CargoPlanSourceKind::Git => {
             found.kind == CargoPlanSourceKind::Git
@@ -356,6 +361,14 @@ fn source_matches_requirement(
                 && found.rev == required.rev
         }
     }
+}
+
+fn normalize_version_requirement(requirement: &str) -> &str {
+    requirement
+        .trim()
+        .strip_prefix('=')
+        .map(str::trim)
+        .unwrap_or_else(|| requirement.trim())
 }
 
 fn required_features_are_present(found: &[String], required: &[String]) -> bool {
@@ -582,6 +595,26 @@ web_ui_primitives = { version = "0.2.0", features = ["leptos"] }
             crate_name: "web_ui_primitives".to_owned(),
             source: CargoPlanSource::version("0.2.0"),
             features: vec!["leptos".to_owned()],
+            required: true,
+        };
+
+        let requirement = dependency_requirement_for_cargo_plan(&manifest, &entry);
+
+        assert_eq!(requirement.status, DependencyStatus::Satisfied);
+    }
+
+    #[test]
+    fn dependency_requirement_accepts_an_exact_version_declaration() {
+        let manifest: TomlValue = toml::from_str(
+            r#"[dependencies]
+leptos = { version = "=0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("parse manifest");
+        let entry = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version("0.9.0-alpha"),
+            features: vec!["csr".to_owned()],
             required: true,
         };
 

@@ -39,6 +39,10 @@ cargo leptos_ui_kit doctor --strict
 ```
 
 Write commands support `--dry-run`. Structured output commands support `--json`.
+They publish one validated, recoverable cohort under an advisory project lock.
+On POSIX platforms, newly generated public files receive exact mode `0644`
+regardless of the caller's umask; private coordination state remains
+owner-only, and patched app-owned files preserve their existing mode.
 
 ## Supported Consumer Shapes
 
