@@ -287,14 +287,7 @@ fn sha256(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "point lookup is retained for the injected provider seam"
-    )
-)]
-fn validate_logical_path(logical_path: &str) -> Result<(), AssetProviderError> {
+pub(crate) fn validate_logical_path(logical_path: &str) -> Result<(), AssetProviderError> {
     if logical_path.is_empty() || logical_path.starts_with('/') || logical_path.contains('\\') {
         return Err(invalid_logical_path(
             logical_path,
