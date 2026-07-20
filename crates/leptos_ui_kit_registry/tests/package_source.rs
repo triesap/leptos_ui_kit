@@ -114,31 +114,37 @@ const PACKAGES: [PackageSpec; 6] = [
         name: "leptos_ui_kit",
         path_in_vcs: "crates/leptos_ui_kit",
         files: &FACADE_FILES,
+        expected_file_count: 6,
     },
     PackageSpec {
         name: "leptos_ui_kit_cli",
         path_in_vcs: "crates/leptos_ui_kit_cli",
         files: &CLI_FILES,
+        expected_file_count: 16,
     },
     PackageSpec {
         name: "leptos_ui_kit_codegen",
         path_in_vcs: "crates/leptos_ui_kit_codegen",
         files: &CODEGEN_FILES,
+        expected_file_count: 40,
     },
     PackageSpec {
         name: "leptos_ui_kit_codegen_platform",
         path_in_vcs: "crates/leptos_ui_kit_codegen_platform",
         files: &CODEGEN_PLATFORM_FILES,
+        expected_file_count: 7,
     },
     PackageSpec {
         name: "leptos_ui_kit_primitives",
         path_in_vcs: "crates/leptos_ui_kit_primitives",
         files: &PRIMITIVES_FILES,
+        expected_file_count: 6,
     },
     PackageSpec {
         name: "leptos_ui_kit_registry",
         path_in_vcs: "crates/leptos_ui_kit_registry",
         files: &[],
+        expected_file_count: 91,
     },
 ];
 
@@ -147,6 +153,7 @@ struct PackageSpec {
     name: &'static str,
     path_in_vcs: &'static str,
     files: &'static [&'static str],
+    expected_file_count: usize,
 }
 
 #[test]
@@ -229,7 +236,33 @@ fn extract_workspace(
                 "{} archive leaks source checkout path in {path}",
                 spec.name
             );
+            if path.ends_with(".rs") {
+                for forbidden in [
+                    b"../../schema".as_slice(),
+                    b"../../tests/fixtures".as_slice(),
+                ] {
+                    assert!(
+                        !contains_bytes(&bytes, forbidden),
+                        "{} archive reaches into a workspace-only input from {path}",
+                        spec.name
+                    );
+                }
+            }
         }
+        let readme = fs::read_to_string(extracted.join("README.md"))
+            .unwrap_or_else(|error| panic!("read {} archive README: {error}", spec.name));
+        assert!(
+            readme.contains(
+                "Licensed under either the MIT License or the Apache License, Version 2.0"
+            ),
+            "{} archive README must state the self-contained dual-license terms",
+            spec.name
+        );
+        assert!(
+            !readme.contains("See `LICENSE-MIT`") && !readme.contains("See `LICENSE-APACHE`"),
+            "{} archive README references license files outside the archive",
+            spec.name
+        );
 
         let vcs_path = extracted.join(".cargo_vcs_info.json");
         let vcs: Value = serde_json::from_slice(
@@ -269,8 +302,13 @@ fn expected_inventory(spec: PackageSpec) -> BTreeSet<String> {
         expected.extend(REGISTRY_SOURCES.map(str::to_owned));
         expected.extend(REGISTRY_TESTS.map(str::to_owned));
         expected.extend(ASSET_SPECS.map(|asset| asset.source_path.to_owned()));
-        assert_eq!(expected.len(), 91);
     }
+    assert_eq!(
+        expected.len(),
+        spec.expected_file_count,
+        "intentional {} archive cardinality",
+        spec.name
+    );
     expected
 }
 
