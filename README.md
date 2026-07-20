@@ -3,7 +3,7 @@
 Source-first UI components for Leptos `0.9.0-alpha`.
 
 `leptos_ui_kit` provides a CLI and packaged registry for installing editable,
-app-owned Rust and CSS into Trunk CSR apps.
+app-owned Rust and CSS into Leptos applications.
 
 ## Install
 
@@ -70,10 +70,17 @@ does not patch Trunk HTML. Invoke generation from the package root even when
 the library is a member of a larger workspace. Multi-member workspace-root
 installs are not supported.
 
+The project and dependency contracts distinguish source compatibility from a
+selected final delivery mode. Trunk CSR, native SSR, and browser hydration
+deliveries are supported compatibility targets; a shared-library target does
+not force one of those modes into downstream consumers.
+
 ## Dependency Plan
 
-A supported app provides Leptos with the `csr` feature as its base dependency
-for generated Rust components:
+A supported final delivery provides Leptos with exactly one of `csr`,
+`hydrate`, or `ssr` as its base dependency for generated Rust components. A
+render-neutral shared library leaves that selection to its final consumer.
+For example, a Trunk CSR delivery uses:
 
 ```toml
 [dependencies]
@@ -115,6 +122,12 @@ The registry root publishes a fail-closed compatibility contract for Leptos
 1, and portal ABI 1. Menu and dialog surfaces bind both completion and
 cancellation events, so interrupted transitions and animations cannot strand
 presence state.
+
+SSR/hydration compatibility additionally requires owner/request-stable
+generated IDs, hydration-safe portal structure, and a strict placement sink
+for CSP deployments that reject inline style attributes. Registry capability,
+generated source, fixtures, and dependency plans advance together when those
+ABIs change.
 
 ## Theming
 

@@ -7,6 +7,10 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Add CSR, hydration, and SSR delivery compatibility while keeping shared
+  library dependency plans render-mode neutral.
+- Require hydration-stable IDs, portal structure, and strict-CSP placement in
+  the generated component ABI.
 - Add a typed `shared-library-crate` project target that omits Trunk HTML
   mutation while preserving source-contained component and stylesheet output.
 - Upgrade primitive-backed generated components and dependency plans to
