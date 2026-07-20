@@ -11,5 +11,6 @@ points, readonly targets, and unexpected file types fail closed.
 
 Transaction guarantees require ordinary local-filesystem locking, hard-link,
 rename, and directory-sync semantics. Network and userspace filesystems that
-weaken those primitives are unsupported. File bytes and ordinary POSIX modes
-are preserved; ACLs, extended attributes, ownership, and timestamps are not.
+weaken those primitives are unsupported. Public generated files are published
+with POSIX mode `0644`; private coordination files remain owner-only. ACLs,
+extended attributes, ownership, and timestamps are not preserved.

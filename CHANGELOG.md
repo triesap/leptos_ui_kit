@@ -17,6 +17,8 @@ Semantic Versioning.
   presence, and place generated CSS in explicit kit token/component layers.
 - Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
   recoverable, with independent backups and finish-only committed cleanup.
+- Publish every generated public file with deterministic POSIX mode `0644`
+  while keeping transaction stages and recovery state private.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,
   and package-local public schemas in one deterministic runtime catalog.
 - Resolve package provenance from Cargo VCS metadata as a complete Git

@@ -622,13 +622,6 @@ fn stage_bytes(
         .parent()
         .expect("validated target has a parent")
         .join(stage_name);
-    #[cfg(unix)]
-    let creation_mode = if matches!(snapshot.preimage(logical_path), Some(PathPreimage::Absent)) {
-        0o666
-    } else {
-        0o600
-    };
-    #[cfg(not(unix))]
     let creation_mode = 0o600;
     let mut created = fs
         .create_new_file(&parent, Path::new(stage_name), &stage_path, creation_mode)
@@ -651,13 +644,7 @@ fn stage_bytes(
                     source,
                 )
             })?;
-        preserve_preimage_mode(
-            fs,
-            &created,
-            logical_path,
-            &stage_path,
-            snapshot.preimage(logical_path),
-        )?;
+        prepare_public_file_mode(fs, &created, logical_path, &stage_path)?;
         fs.sync_handle(&created.file, &stage_path)
             .map_err(|source| {
                 filesystem_operation_error(
@@ -2827,33 +2814,24 @@ fn path_depth(path: &str) -> usize {
     Path::new(path).components().count()
 }
 
-fn preserve_preimage_mode(
+fn prepare_public_file_mode(
     fs: &dyn FsOps,
     created: &CreatedFile,
     logical_path: &str,
     stage_path: &Path,
-    preimage: Option<&PathPreimage>,
 ) -> Result<(), CodegenError> {
     #[cfg(unix)]
-    let posix_mode = match preimage {
-        Some(PathPreimage::RegularFile { mode, .. }) => mode.posix_mode,
-        Some(PathPreimage::Absent) => None,
-        None => None,
-    };
-    #[cfg(unix)]
-    if let Some(posix_mode) = posix_mode {
-        fs.set_file_mode(&created.file, stage_path, posix_mode)
-            .map_err(|source| {
-                filesystem_operation_error(
-                    "preserve target mode on transaction stage",
-                    logical_path,
-                    stage_path.to_path_buf(),
-                    source,
-                )
-            })?;
-    }
+    fs.set_file_mode(&created.file, stage_path, 0o644)
+        .map_err(|source| {
+            filesystem_operation_error(
+                "set published file mode on transaction stage",
+                logical_path,
+                stage_path.to_path_buf(),
+                source,
+            )
+        })?;
     #[cfg(not(unix))]
-    let _ = (fs, created, logical_path, stage_path, preimage);
+    let _ = (fs, created, logical_path, stage_path);
     Ok(())
 }
 
