@@ -1309,6 +1309,17 @@ pub fn read_built_in_registry_source(source: &str) -> Result<String, RegistryErr
         .map_err(snapshot_error)
 }
 
+/// Reads one immutable built-in asset by its stable catalog-logical path.
+///
+/// Unlike [`read_built_in_registry_source`], this accepts the complete logical
+/// namespace, including public schemas and registry metadata.
+pub fn read_built_in_asset(logical_path: &str) -> Result<String, RegistryError> {
+    registry_snapshot()?
+        .logical_asset(logical_path)
+        .map(str::to_owned)
+        .map_err(snapshot_error)
+}
+
 pub fn resolve_built_in_registry_items(
     names: &[String],
 ) -> Result<Vec<ResolvedRegistryItem>, RegistryError> {
@@ -2134,6 +2145,20 @@ mod tests {
         let source = read_built_in_registry_source("ui/button.rs").expect("read source");
 
         assert!(source.contains("pub fn Button"));
+    }
+
+    #[test]
+    fn reads_built_in_assets_by_catalog_logical_path() {
+        let registry =
+            read_built_in_asset("registry/registry.json").expect("read registry root asset");
+        assert!(registry.contains("\"name\": \"leptos-ui-kit\""));
+        let schema = read_built_in_asset("schema/0.9.0-alpha/registry.schema.json")
+            .expect("read registry schema asset");
+        assert!(schema.contains(REGISTRY_SCHEMA_URL));
+        assert!(matches!(
+            read_built_in_asset("../registry/registry.json"),
+            Err(RegistryError::UnsafePath { .. })
+        ));
     }
 
     #[test]

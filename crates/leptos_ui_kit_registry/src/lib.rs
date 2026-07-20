@@ -52,9 +52,9 @@ pub use item::{
     WEB_UI_PRIMITIVES_GIT_URL, WEB_UI_PRIMITIVES_REQUIREMENT, WEB_UI_PRIMITIVES_VERSION,
     load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
     normalize_cargo_plan, normalize_cargo_plan_for_project, parse_registry_item_str,
-    parse_registry_root_str, read_built_in_registry_source, resolve_built_in_registry_items,
-    resolve_registry_targets, validate_registry_graph, validate_registry_item_name,
-    validate_registry_manifest_identity,
+    parse_registry_root_str, read_built_in_asset, read_built_in_registry_source,
+    resolve_built_in_registry_items, resolve_registry_targets, validate_registry_graph,
+    validate_registry_item_name, validate_registry_manifest_identity,
 };
 pub use registry_health::{
     RegistryHealthError, RegistryHealthFileKind, validate_built_in_registry_health,

@@ -208,12 +208,16 @@ pub fn probe_checkout(manifest_dir: &Path, git: &mut impl GitRunner) -> Checkout
             rerun_paths,
         };
     };
-    if !is_canonical_repository(&remote) {
+    let canonical_remote = if is_canonical_repository(&remote) {
+        Some(remote.clone())
+    } else if cargo_cache_path(&remote).is_some() {
+        None
+    } else {
         return CheckoutProbe {
             checkout: None,
             rerun_paths,
         };
-    }
+    };
 
     record_git_path(&repository_root, git, "HEAD", &mut rerun_paths);
     record_git_path(&repository_root, git, "packed-refs", &mut rerun_paths);
@@ -225,12 +229,68 @@ pub fn probe_checkout(manifest_dir: &Path, git: &mut impl GitRunner) -> Checkout
             &repository_root,
             &["rev-parse", "--verify", "HEAD^{commit}"],
         )
-        .map(|rev| OwnedCheckoutProvenance { remote, rev });
+        .and_then(|rev| {
+            canonical_remote
+                .or_else(|| cargo_cache_remote(&remote, &rev, git, &mut rerun_paths))
+                .map(|remote| OwnedCheckoutProvenance { remote, rev })
+        });
 
     CheckoutProbe {
         checkout,
         rerun_paths,
     }
+}
+
+fn cargo_cache_path(remote: &str) -> Option<PathBuf> {
+    let path = remote.trim().strip_prefix("file://")?;
+    if !path.starts_with('/') || path.contains(['%', '?', '#']) {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn cargo_cache_remote(
+    remote: &str,
+    rev: &str,
+    git: &mut impl GitRunner,
+    rerun_paths: &mut BTreeSet<PathBuf>,
+) -> Option<String> {
+    let cache_root = fs::canonicalize(cargo_cache_path(remote)?).ok()?;
+    if git
+        .output(&cache_root, &["rev-parse", "--is-bare-repository"])?
+        .trim()
+        != "true"
+    {
+        return None;
+    }
+    let fetch_head = git.output(&cache_root, &["rev-parse", "--git-path", "FETCH_HEAD"])?;
+    let fetch_head = PathBuf::from(fetch_head);
+    let fetch_head = if fetch_head.is_absolute() {
+        fetch_head
+    } else {
+        cache_root.join(fetch_head)
+    };
+    rerun_paths.insert(fetch_head.clone());
+    let metadata = fs::symlink_metadata(&fetch_head).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let contents = fs::read_to_string(fetch_head).ok()?;
+    canonical_fetch_remote(&contents, rev)
+}
+
+pub fn canonical_fetch_remote(contents: &str, rev: &str) -> Option<String> {
+    let rev = normalize_revision(ProvenanceSource::Checkout, rev).ok()?;
+    contents.lines().find_map(|line| {
+        let (fetched_rev, description) = line.split_once('\t')?;
+        let fetched_rev = normalize_revision(ProvenanceSource::Checkout, fetched_rev).ok()?;
+        if fetched_rev != rev {
+            return None;
+        }
+        let (_, remote) = description.rsplit_once(" of ")?;
+        let remote = remote.trim();
+        is_canonical_repository(remote).then(|| remote.to_owned())
+    })
 }
 
 fn record_repository_marker(path: &Path, paths: &mut BTreeSet<PathBuf>) {

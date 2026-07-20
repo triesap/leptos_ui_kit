@@ -25,8 +25,12 @@ Semantic Versioning.
   while keeping transaction stages and recovery state private.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,
   and package-local public schemas in one deterministic runtime catalog.
+- Expose source-neutral reads across the complete logical built-in asset
+  namespace for contract-driven downstream validation.
 - Resolve package provenance from Cargo VCS metadata as a complete Git
   revision and expose stable logical locators instead of build-machine paths.
+- Resolve Cargo Git dependency provenance from the exact checkout revision and
+  canonical upstream recorded by Cargo's validated bare-cache fetch state.
 - Reject dirty, malformed, or wrong-crate Cargo VCS metadata instead of
   attributing changed archive bytes to an unqualified base revision.
 - Expose typed logical built-in asset failures through public registry,

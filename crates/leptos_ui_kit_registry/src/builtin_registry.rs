@@ -14,7 +14,7 @@ use crate::{
     THEME_INTEGRATION_SCHEMA_URL, TOKEN_CONTRACT_SCHEMA_URL, ThemeContract, ThemeContractError,
     embedded_assets::{
         AssetProvider, AssetProviderError, EmbeddedAssetKind, embedded_asset_inventory,
-        embedded_asset_provider,
+        embedded_asset_provider, validate_logical_path,
     },
     item::{
         parse_registry_item_raw_str, parse_registry_root_raw_str, resolve_registry_targets,
@@ -263,6 +263,11 @@ impl BuiltInRegistrySnapshot {
     pub(crate) fn registry_source(&self, source: &str) -> Result<&str, SnapshotError> {
         let logical_path = format!("registry/{source}");
         self.asset_text(&logical_path, None)
+    }
+
+    pub(crate) fn logical_asset(&self, logical_path: &str) -> Result<&str, SnapshotError> {
+        validate_logical_path(logical_path).map_err(SnapshotError::Provider)?;
+        self.asset_text(logical_path, None)
     }
 
     pub(crate) fn theme_contract(&self) -> &ThemeContract {

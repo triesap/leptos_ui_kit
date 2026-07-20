@@ -22,8 +22,8 @@ mod build_provenance;
 use build_assets::ASSET_SPECS;
 use build_provenance::{
     CheckoutProvenance, EXPECTED_CRATE_PATH, GIT_REPOSITORY_OVERRIDE_ENV, GitRunner,
-    ProvenanceError, ProvenanceSource, ResolvedProvenance, SystemGit, explicit_revision,
-    is_canonical_repository, probe_checkout, read_cargo_vcs, resolve_provenance,
+    ProvenanceError, ProvenanceSource, ResolvedProvenance, SystemGit, canonical_fetch_remote,
+    explicit_revision, is_canonical_repository, probe_checkout, read_cargo_vcs, resolve_provenance,
 };
 use tempfile::tempdir;
 
@@ -293,6 +293,34 @@ fn checkout_fallback_requires_the_canonical_repository() {
 }
 
 #[test]
+fn cargo_fetch_head_requires_the_exact_revision_and_canonical_remote() {
+    let canonical =
+        format!("{REV_A}\t\t'{REV_A}' of https://github.com/triesap/leptos_ui_kit.git\n");
+    assert_eq!(
+        canonical_fetch_remote(&canonical, REV_A),
+        Some("https://github.com/triesap/leptos_ui_kit.git".to_owned())
+    );
+    assert_eq!(canonical_fetch_remote(&canonical, REV_B), None);
+    assert_eq!(
+        canonical_fetch_remote(
+            &format!("{REV_A}\t\t'{REV_A}' of https://github.com/example/leptos_ui_kit.git\n"),
+            REV_A
+        ),
+        None
+    );
+    assert_eq!(
+        canonical_fetch_remote(
+            &format!(
+                "{REV_A}\t\t'branch of interest' of ssh://git@github.com/triesap/leptos_ui_kit.git\n"
+            ),
+            REV_A
+        ),
+        Some("ssh://git@github.com/triesap/leptos_ui_kit.git".to_owned())
+    );
+    assert_eq!(canonical_fetch_remote("malformed\n", REV_A), None);
+}
+
+#[test]
 fn hostile_parent_checkout_is_not_a_provenance_source() {
     assert_eq!(
         resolve_provenance(
@@ -305,6 +333,120 @@ fn hostile_parent_checkout_is_not_a_provenance_source() {
         ),
         Ok(None)
     );
+}
+
+#[test]
+fn checkout_probe_accepts_a_cargo_git_cache_with_canonical_fetch_evidence() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("checkout");
+    let cache = dir.path().join("cargo-git-db");
+    let manifest_dir = root.join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    fs::create_dir_all(&cache).expect("create Cargo Git cache");
+    let fetch_head = cache.join("FETCH_HEAD");
+    fs::write(
+        &fetch_head,
+        format!("{REV_A}\t\t'{REV_A}' of https://github.com/triesap/leptos_ui_kit.git\n"),
+    )
+    .expect("write Cargo fetch evidence");
+
+    let mut git = FakeGit::canonical(&root, REV_A);
+    git.outputs.insert(
+        vec![
+            "config".to_owned(),
+            "--local".to_owned(),
+            "--get-all".to_owned(),
+            "remote.origin.url".to_owned(),
+        ],
+        format!("file://{}", cache.display()),
+    );
+    git.outputs.insert(
+        vec!["rev-parse".to_owned(), "--is-bare-repository".to_owned()],
+        "true".to_owned(),
+    );
+    git.outputs.insert(
+        vec![
+            "rev-parse".to_owned(),
+            "--git-path".to_owned(),
+            "FETCH_HEAD".to_owned(),
+        ],
+        fetch_head.display().to_string(),
+    );
+
+    let probe = probe_checkout(&manifest_dir, &mut git);
+    assert_eq!(
+        probe.checkout,
+        Some(build_provenance::OwnedCheckoutProvenance {
+            remote: "https://github.com/triesap/leptos_ui_kit.git".to_owned(),
+            rev: REV_A.to_owned(),
+        })
+    );
+    assert!(probe.rerun_paths.contains(&fetch_head));
+
+    fs::write(
+        &fetch_head,
+        format!("{REV_B}\t\t'{REV_B}' of https://github.com/triesap/leptos_ui_kit.git\n"),
+    )
+    .expect("replace Cargo fetch evidence");
+    let mut mismatched = git.clone_without_calls();
+    assert_eq!(
+        probe_checkout(&manifest_dir, &mut mismatched).checkout,
+        None
+    );
+
+    fs::write(
+        &fetch_head,
+        format!("{REV_A}\t\t'{REV_A}' of https://github.com/example/leptos_ui_kit.git\n"),
+    )
+    .expect("replace Cargo fetch evidence");
+    let mut hostile = git.clone_without_calls();
+    assert_eq!(probe_checkout(&manifest_dir, &mut hostile).checkout, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_probe_rejects_symlinked_cargo_fetch_evidence() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path().join("checkout");
+    let cache = dir.path().join("cargo-git-db");
+    let manifest_dir = root.join("crates/leptos_ui_kit_registry");
+    fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+    fs::create_dir_all(&cache).expect("create Cargo Git cache");
+    let target = cache.join("actual-fetch-head");
+    let fetch_head = cache.join("FETCH_HEAD");
+    fs::write(
+        &target,
+        format!("{REV_A}\t\t'{REV_A}' of https://github.com/triesap/leptos_ui_kit.git\n"),
+    )
+    .expect("write Cargo fetch evidence");
+    symlink(&target, &fetch_head).expect("symlink Cargo fetch evidence");
+
+    let mut git = FakeGit::canonical(&root, REV_A);
+    git.outputs.insert(
+        vec![
+            "config".to_owned(),
+            "--local".to_owned(),
+            "--get-all".to_owned(),
+            "remote.origin.url".to_owned(),
+        ],
+        format!("file://{}", cache.display()),
+    );
+    git.outputs.insert(
+        vec!["rev-parse".to_owned(), "--is-bare-repository".to_owned()],
+        "true".to_owned(),
+    );
+    git.outputs.insert(
+        vec![
+            "rev-parse".to_owned(),
+            "--git-path".to_owned(),
+            "FETCH_HEAD".to_owned(),
+        ],
+        fetch_head.display().to_string(),
+    );
+
+    assert_eq!(probe_checkout(&manifest_dir, &mut git).checkout, None);
 }
 
 #[test]
@@ -817,6 +959,13 @@ impl FakeGit {
         );
         Self {
             outputs,
+            calls: Vec::new(),
+        }
+    }
+
+    fn clone_without_calls(&self) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
             calls: Vec::new(),
         }
     }
