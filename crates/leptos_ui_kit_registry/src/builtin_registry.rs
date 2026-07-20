@@ -847,6 +847,53 @@ fn validate_runtime_compatibility_sources(
     assets: &BTreeMap<String, OwnedAsset>,
     items: &[RegistryItem],
 ) -> Result<(), SnapshotError> {
+    let identity = asset_text(assets, "registry/ui/identity.rs", EmbeddedAssetKind::Rust)?;
+    for required in [
+        "pub fn KitIdProvider",
+        "provide_context(KitIdScope::new())",
+        "pub(crate) fn use_kit_id",
+        "use_context::<KitIdScope>()",
+    ] {
+        if !identity.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/identity.rs",
+                format!("identity ABI 1 binding {required:?}"),
+            ));
+        }
+    }
+    for forbidden in ["Atomic", "fetch_add", "static NEXT"] {
+        if identity.contains(forbidden) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/identity.rs",
+                format!("identity ABI 1 without process-global counter {forbidden:?}"),
+            ));
+        }
+    }
+
+    for logical_path in [
+        "registry/ui/collapsible/root.rs",
+        "registry/ui/dialog/root.rs",
+        "registry/ui/field/root.rs",
+        "registry/ui/menu/root.rs",
+        "registry/ui/tabs/root.rs",
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        if !source.contains("use_kit_id(") {
+            return Err(invalid_runtime_compatibility(
+                logical_path,
+                "identity ABI 1 scoped fallback".to_owned(),
+            ));
+        }
+        for forbidden in ["Atomic", "fetch_add", "static NEXT"] {
+            if source.contains(forbidden) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("identity ABI 1 without process-global counter {forbidden:?}"),
+                ));
+            }
+        }
+    }
+
     for logical_path in [
         "registry/ui/dialog/content.rs",
         "registry/ui/menu/content.rs",
@@ -872,11 +919,78 @@ fn validate_runtime_compatibility_sources(
         "registry/ui/dialog/content.rs",
         EmbeddedAssetKind::Rust,
     )?;
-    for required in ["PortalMount", "<Portal", "portal_mount"] {
+    for required in [
+        "web_ui_primitives::leptos::{",
+        "Portal, PortalMount, PortalProps",
+        "#[prop(optional)] portal_mount: Option<PortalMount>",
+        "#[prop(default = true)] portal_reparent: bool",
+        "Portal(PortalProps {",
+    ] {
         if !dialog.contains(required) {
             return Err(invalid_runtime_compatibility(
                 "registry/ui/dialog/content.rs",
                 format!("portal ABI 1 binding {required:?}"),
+            ));
+        }
+    }
+    if dialog.matches("Portal(PortalProps {").count() != 1 {
+        return Err(invalid_runtime_compatibility(
+            "registry/ui/dialog/content.rs",
+            "exactly one qualified portal ABI 1 construction".to_owned(),
+        ));
+    }
+
+    let menu = asset_text(
+        assets,
+        "registry/ui/menu/content.rs",
+        EmbeddedAssetKind::Rust,
+    )?;
+    for required in [
+        "PlacementSink",
+        "#[prop(optional)] placement_sink: PlacementSink",
+        ".sink(placement_sink)",
+        ".strict_id()",
+        "data-web-ui-placement-id=",
+    ] {
+        if !menu.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/menu/content.rs",
+                format!("strict placement binding {required:?}"),
+            ));
+        }
+    }
+
+    for (logical_path, required) in [
+        ("registry/ui/field/message.rs", "unregister_message_id"),
+        ("registry/ui/menu/item.rs", "unregister_item"),
+        ("registry/ui/tabs/trigger.rs", "unregister_trigger"),
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        for binding in ["on_cleanup", required] {
+            if !source.contains(binding) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("dynamic registration cleanup binding {binding:?}"),
+                ));
+            }
+        }
+    }
+
+    for (logical_path, required) in [
+        ("registry/ui/collapsible/content.rs", "hidden=move ||"),
+        (
+            "registry/ui/collapsible/trigger.rs",
+            "aria-expanded=move ||",
+        ),
+        ("registry/ui/tabs/list.rs", "role=move ||"),
+        ("registry/ui/tabs/panel.rs", "aria-labelledby=move ||"),
+        ("registry/ui/tabs/trigger.rs", "aria-selected=move ||"),
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        if !source.contains(required) || source.contains("use_dom_bindings") {
+            return Err(invalid_runtime_compatibility(
+                logical_path,
+                format!("SSR attribute projection binding {required:?}"),
             ));
         }
     }

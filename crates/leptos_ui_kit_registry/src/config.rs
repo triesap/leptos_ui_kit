@@ -401,6 +401,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Identity, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::RouterLink, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
@@ -423,6 +424,7 @@ pub enum DesiredItemName {
     Collapsible,
     Dialog,
     Field,
+    Identity,
     Menu,
     RouterLink,
     Spinner,
@@ -439,6 +441,7 @@ impl DesiredItemName {
             Self::Collapsible => "collapsible",
             Self::Dialog => "dialog",
             Self::Field => "field",
+            Self::Identity => "identity",
             Self::Menu => "menu",
             Self::RouterLink => "router-link",
             Self::Spinner => "spinner",
@@ -658,6 +661,13 @@ pub fn desired_builtin_dialog_item() -> DesiredItemConfig {
 pub fn desired_builtin_field_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Field,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_identity_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Identity,
         source: RegistrySource::Builtin,
     }
 }
@@ -1122,6 +1132,7 @@ mod tests {
             DesiredItemName::Collapsible,
             DesiredItemName::Dialog,
             DesiredItemName::Field,
+            DesiredItemName::Identity,
             DesiredItemName::Menu,
             DesiredItemName::RouterLink,
             DesiredItemName::Spinner,

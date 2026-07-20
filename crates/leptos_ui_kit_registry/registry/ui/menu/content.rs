@@ -3,8 +3,8 @@ use leptos::prelude::*;
 use web_ui_primitives::core::{PlacementAlign, PlacementSide};
 use web_ui_primitives::leptos::{
     DismissibleFocusOutsideEvent, DismissiblePointerDownOutsideEvent, DismissibleReason,
-    MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions, use_menu_layer_with_node_ref,
-    use_menu_placement_with_node_refs,
+    MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions, PlacementSink,
+    use_menu_layer_with_node_ref, use_menu_placement_with_node_refs,
 };
 
 use super::root::{MenuContext, class_with_base};
@@ -53,6 +53,7 @@ pub fn MenuContent(
     #[prop(optional, default = MenuContentAlign::Start)] align: MenuContentAlign,
     #[prop(optional, default = 4.0)] spacing: f64,
     #[prop(optional, default = 8.0)] viewport_padding: f64,
+    #[prop(optional)] placement_sink: PlacementSink,
     #[prop(optional, into)] class: String,
     children: ChildrenFn,
 ) -> impl IntoView {
@@ -102,7 +103,8 @@ pub fn MenuContent(
             align.as_placement(),
         )
         .spacing(spacing)
-        .viewport_padding(viewport_padding),
+        .viewport_padding(viewport_padding)
+        .sink(placement_sink),
     );
     let transition_end = layer.transition_end_handler();
     let transition_cancel = layer.transition_cancel_handler();
@@ -172,6 +174,7 @@ fn menu_surface(
     children: StoredValue<ChildrenFn>,
 ) -> impl IntoView {
     let style_placement = placement.clone();
+    let strict_id_placement = placement.clone();
     let side_placement = placement.clone();
     let align_placement = placement.clone();
 
@@ -182,7 +185,17 @@ fn menu_surface(
             class=move || content_class.get()
             role="menu"
             tabindex="-1"
-            style=move || style_placement.style()
+            style=move || {
+                style_placement
+                    .strict_id()
+                    .is_none()
+                    .then(|| style_placement.style())
+            }
+            data-web-ui-placement-id=move || {
+                strict_id_placement
+                    .strict_id()
+                    .map(|id| id.as_str().to_owned())
+            }
             data-state=move || data_state.get()
             data-side=move || side_placement.data_side()
             data-align=move || align_placement.data_align()

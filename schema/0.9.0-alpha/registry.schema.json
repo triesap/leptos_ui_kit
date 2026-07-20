@@ -27,6 +27,7 @@
       "required": [
         "leptos",
         "primitives",
+        "identityAbi",
         "layerAbi",
         "portalAbi"
       ],
@@ -67,6 +68,26 @@
             }
           }
         },
+        "identityAbi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "providerType",
+            "ownerScopedFallback"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "providerType": {
+              "const": "KitIdProvider"
+            },
+            "ownerScopedFallback": {
+              "const": true
+            }
+          }
+        },
         "layerAbi": {
           "type": "object",
           "additionalProperties": false,
@@ -93,16 +114,20 @@
           "required": [
             "version",
             "mountType",
+            "propsType",
             "bodyHost"
           ],
           "properties": {
             "version": {
               "const": 1
             },
-            "mountType": {
-              "const": "web_ui_primitives::leptos::PortalMount"
-            },
-            "bodyHost": {
+          "mountType": {
+            "const": "web_ui_primitives::leptos::PortalMount"
+          },
+          "propsType": {
+            "const": "web_ui_primitives::leptos::PortalProps"
+          },
+          "bodyHost": {
               "const": true
             }
           }

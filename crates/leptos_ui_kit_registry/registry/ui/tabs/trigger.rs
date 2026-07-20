@@ -1,12 +1,9 @@
 use leptos::ev::{FocusEvent, KeyboardEvent};
 use leptos::html;
 use leptos::prelude::*;
-use web_ui_primitives::leptos::{
-    attrs::{TabsTriggerAttrs, tabs_trigger_attrs},
-    use_dom_bindings,
-};
+use web_ui_primitives::leptos::attrs::{TabsTriggerAttrs, tabs_trigger_attrs};
 
-use super::root::{TabsContext, class_with_base};
+use super::root::{TabsContext, attr_bool, attr_string, class_with_base, data_attr};
 
 #[component]
 pub fn TabsTrigger(
@@ -34,9 +31,12 @@ pub fn TabsTrigger(
                 .controls_id(panel_id.as_str()),
         )
     });
-    let bindings = use_dom_bindings::<html::Button>(attrs, Vec::new());
-    let node_ref = bindings.node_ref();
+    let node_ref = NodeRef::<html::Button>::new();
     context.register_trigger(index, node_ref);
+    let cleanup_context = context.clone();
+    on_cleanup(move || {
+        cleanup_context.unregister_trigger(index);
+    });
 
     let click_context = context.clone();
     let on_click = move |_| {
@@ -89,6 +89,16 @@ pub fn TabsTrigger(
         <button
             node_ref=node_ref
             class=class_with_base("kit-tabs-trigger", &class)
+            type="button"
+            id=move || attr_string(&attrs.get(), "id")
+            role=move || attr_string(&attrs.get(), "role")
+            tabindex=move || attr_string(&attrs.get(), "tabindex")
+            disabled=move || attr_bool(&attrs.get(), "disabled")
+            aria-selected=move || attr_string(&attrs.get(), "aria-selected")
+            aria-controls=move || attr_string(&attrs.get(), "aria-controls")
+            aria-disabled=move || attr_string(&attrs.get(), "aria-disabled")
+            data-state=move || attr_string(&attrs.get(), "data-state")
+            data-disabled=move || data_attr(attr_bool(&attrs.get(), "data-disabled"))
             on:click=on_click
             on:focus=on_focus
             on:keydown=on_keydown

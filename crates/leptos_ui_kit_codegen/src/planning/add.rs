@@ -3,11 +3,11 @@ use std::path::Path;
 use leptos_ui_kit_registry::{
     DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, desired_builtin_anchor_item,
     desired_builtin_button_item, desired_builtin_collapsible_item, desired_builtin_dialog_item,
-    desired_builtin_field_item, desired_builtin_menu_item, desired_builtin_router_link_item,
-    desired_builtin_spinner_item, desired_builtin_status_item, desired_builtin_tabs_item,
-    desired_builtin_tokens_item, kit_config_for_write, kit_config_to_json,
-    kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
-    resolve_built_in_registry_items,
+    desired_builtin_field_item, desired_builtin_identity_item, desired_builtin_menu_item,
+    desired_builtin_router_link_item, desired_builtin_spinner_item, desired_builtin_status_item,
+    desired_builtin_tabs_item, desired_builtin_tokens_item, kit_config_for_write,
+    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
+    parse_kit_json_str, resolve_built_in_registry_items,
 };
 
 use super::{
@@ -116,6 +116,7 @@ pub(crate) fn desired_builtin_item(
         "collapsible" => Ok(desired_builtin_collapsible_item()),
         "dialog" => Ok(desired_builtin_dialog_item()),
         "field" => Ok(desired_builtin_field_item()),
+        "identity" => Ok(desired_builtin_identity_item()),
         "menu" => Ok(desired_builtin_menu_item()),
         "router-link" => Ok(desired_builtin_router_link_item()),
         "spinner" => Ok(desired_builtin_spinner_item()),

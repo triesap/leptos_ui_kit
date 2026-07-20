@@ -145,7 +145,7 @@ const PACKAGES: [PackageSpec; 6] = [
         name: "leptos_ui_kit_registry",
         path_in_vcs: "crates/leptos_ui_kit_registry",
         files: &[],
-        expected_file_count: 94,
+        expected_file_count: 96,
     },
 ];
 

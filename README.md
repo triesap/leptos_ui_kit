@@ -100,7 +100,7 @@ Only `collapsible`, `dialog`, `menu`, and `tabs` additionally require:
 
 ```toml
 [dependencies]
-web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "a7ad19e203c08be19040154fa6bce909701d402f", features = ["leptos"] }
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "a7ad19e203c08be19040154fa6bce909701d402f", features = ["core", "leptos"] }
 ```
 
 `router-link` additionally requires:
@@ -121,22 +121,70 @@ Cargo requirement plan, and verifies that same closure-authoritative plan with
 
 The built-in registry includes `button`, `collapsible`, `tabs`, `dialog`,
 `menu`, `field`, `status`, `spinner`, `anchor`, `router-link`, and the
-CSS-only `tokens` foundation item.
+CSS-only `tokens` foundation item. The generated `identity` support item is
+installed automatically with components that emit related element IDs.
 
 Generated source is app-owned. Managed CSS is delimited with
 `leptos-ui-kit:start` and `leptos-ui-kit:end` markers.
 
 The registry root publishes a fail-closed compatibility contract for Leptos
-`0.9.0-alpha`, `web_ui_primitives` `0.2.0`, Presence ABI 2, cascade-layer ABI
-1, and portal ABI 1. Menu and dialog surfaces bind both completion and
-cancellation events, so interrupted transitions and animations cannot strand
-presence state.
+`0.9.0-alpha`, `web_ui_primitives` `0.2.0`, Presence ABI 2, identity ABI 1,
+cascade-layer ABI 1, and portal ABI 1. Menu and dialog surfaces bind both
+completion and cancellation events, so interrupted transitions and animations
+cannot strand presence state.
 
 SSR/hydration compatibility additionally requires owner/request-stable
 generated IDs, hydration-safe portal structure, and a strict placement sink
 for CSP deployments that reject inline style attributes. Registry capability,
 generated source, fixtures, and dependency plans advance together when those
 ABIs change.
+
+Wrap a rendered app or request subtree in `KitIdProvider` when generated IDs
+can appear. The provider owns deterministic per-prefix ordinals for that
+Leptos owner/request, so independent SSR requests cannot share counters and
+the hydration walk reproduces the server IDs. Each affected component still
+accepts its existing explicit ID override. The owner-scoped fallback keeps
+standalone component examples usable, but an app-level provider is the
+canonical SSR/hydration composition:
+
+```rust
+view! {
+  <KitIdProvider>
+    <App />
+  </KitIdProvider>
+}
+```
+
+`MenuContent` retains the inline-style placement adapter for qualified CSR
+consumers. A strict-CSP delivery selects an authorized stylesheet sink and
+uses a stable validated ID. In that mode the menu emits
+`data-web-ui-placement-id` and omits the inline `style` attribute:
+
+```rust
+use web_ui_primitives::leptos::{
+    PlacementSink, PlacementStyleId, PlacementStyleNonce, StrictPlacementSink,
+};
+
+let placement_sink = PlacementSink::StrictStylesheet(
+    StrictPlacementSink::new(
+        PlacementStyleId::new("account-menu-placement")?,
+    )
+    .authorized(PlacementStyleNonce::new(csp_nonce)?),
+);
+
+view! {
+  <MenuRoot id="account-menu">
+    <MenuTrigger>"Account"</MenuTrigger>
+    <MenuContent placement_sink=placement_sink>
+      // Menu items.
+    </MenuContent>
+  </MenuRoot>
+}
+```
+
+The nonce must be produced by the server’s CSP boundary. Missing or invalid
+authorization fails closed; callers must not substitute `unsafe-inline` or
+arbitrary CSP fragments.
 
 ## Theming
 
@@ -195,9 +243,11 @@ Existing component variables remain optional escape hatches. For example,
 can still be set by an app, but their defaults now fall back to semantic tokens
 or component-local structural values.
 
-`DialogContent` normally portals to the document body. For a dialog opened
-inside a nested theme scope, place a stable mount element below that scope and
-look it up without assuming that a browser DOM exists:
+`DialogContent` renders one deterministic portal container for SSR and
+hydration, then reparents that same container to the document body after the
+hydration walk. Set `portal_reparent=false` to retain it inline. For a dialog
+opened inside a nested theme scope, place a stable mount element below that
+scope and look it up without assuming that a browser DOM exists:
 
 ```rust
 use web_ui_primitives::leptos::PortalMount;

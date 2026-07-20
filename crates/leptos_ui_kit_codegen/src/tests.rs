@@ -1271,7 +1271,7 @@ fn desired_projection_is_exact_for_empty_retained_and_retired_closures() {
             .iter()
             .map(|item| item.item_name())
             .collect::<Vec<_>>(),
-        ["tokens", "dialog", "spinner", "button"]
+        ["identity", "tokens", "dialog", "spinner", "button"]
     );
 
     let mut retained_config = empty_config;
@@ -1287,7 +1287,11 @@ fn desired_projection_is_exact_for_empty_retained_and_retired_closures() {
     );
     assert_eq!(
         retained.retired_item_ids,
-        BTreeSet::from(["builtin:button".to_owned(), "builtin:dialog".to_owned()])
+        BTreeSet::from([
+            "builtin:button".to_owned(),
+            "builtin:dialog".to_owned(),
+            "builtin:identity".to_owned(),
+        ])
     );
     assert_eq!(
         retained

@@ -54,6 +54,10 @@ pub fn MenuItem(
         .map(Signal::get_untracked)
         .unwrap_or_default();
     context.register_item(index, node_ref, initial_label);
+    let cleanup_context = context.clone();
+    on_cleanup(move || {
+        cleanup_context.unregister_item(index);
+    });
     if let Some(label) = label {
         let label_context = context.clone();
         Effect::new(move || {

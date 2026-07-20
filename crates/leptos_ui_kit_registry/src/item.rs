@@ -30,6 +30,9 @@ pub const PRESENCE_ABI_VERSION: u32 = 2;
 pub const LAYER_ABI_VERSION: u32 = 1;
 pub const PORTAL_ABI_VERSION: u32 = 1;
 pub const PORTAL_MOUNT_TYPE: &str = "web_ui_primitives::leptos::PortalMount";
+pub const PORTAL_PROPS_TYPE: &str = "web_ui_primitives::leptos::PortalProps";
+pub const IDENTITY_ABI_VERSION: u32 = 1;
+pub const IDENTITY_PROVIDER_TYPE: &str = "KitIdProvider";
 pub const LAYER_ORDER: [&str; 3] = [
     "leptos-ui-kit.tokens",
     "leptos-ui-kit.themes",
@@ -427,6 +430,7 @@ impl RegistryRoot {
 pub struct RegistryCompatibility {
     pub leptos: RegistryLeptosCompatibility,
     pub primitives: RegistryPrimitivesCompatibility,
+    pub identity_abi: RegistryIdentityCompatibility,
     pub layer_abi: RegistryLayerCompatibility,
     pub portal_abi: RegistryPortalCompatibility,
 }
@@ -443,6 +447,11 @@ impl RegistryCompatibility {
                 version: WEB_UI_PRIMITIVES_VERSION.to_owned(),
                 presence_abi: PRESENCE_ABI_VERSION,
             },
+            identity_abi: RegistryIdentityCompatibility {
+                version: IDENTITY_ABI_VERSION,
+                provider_type: IDENTITY_PROVIDER_TYPE.to_owned(),
+                owner_scoped_fallback: true,
+            },
             layer_abi: RegistryLayerCompatibility {
                 version: LAYER_ABI_VERSION,
                 order: LAYER_ORDER.map(str::to_owned).to_vec(),
@@ -450,6 +459,7 @@ impl RegistryCompatibility {
             portal_abi: RegistryPortalCompatibility {
                 version: PORTAL_ABI_VERSION,
                 mount_type: PORTAL_MOUNT_TYPE.to_owned(),
+                props_type: PORTAL_PROPS_TYPE.to_owned(),
                 body_host: true,
             },
         }
@@ -485,6 +495,14 @@ pub struct RegistryPrimitivesCompatibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryIdentityCompatibility {
+    pub version: u32,
+    pub provider_type: String,
+    pub owner_scoped_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryLayerCompatibility {
     pub version: u32,
@@ -496,6 +514,7 @@ pub struct RegistryLayerCompatibility {
 pub struct RegistryPortalCompatibility {
     pub version: u32,
     pub mount_type: String,
+    pub props_type: String,
     pub body_host: bool,
 }
 
@@ -1165,7 +1184,7 @@ pub fn normalize_cargo_plan_for_project(
 ) -> Result<Vec<CargoPlanEntry>, RegistryError> {
     let mut projected = entries.to_vec();
     for entry in &mut projected {
-        if entry.crate_name != "leptos" {
+        if !matches!(entry.crate_name.as_str(), "leptos" | "web_ui_primitives") {
             continue;
         }
         entry
@@ -2084,6 +2103,7 @@ mod tests {
                 ("collapsible", "ui/collapsible.json"),
                 ("dialog", "ui/dialog.json"),
                 ("field", "ui/field.json"),
+                ("identity", "ui/identity.json"),
                 ("menu", "ui/menu.json"),
                 ("router-link", "ui/router-link.json"),
                 ("spinner", "ui/spinner.json"),
@@ -2435,31 +2455,55 @@ mod tests {
 
     #[test]
     fn project_cargo_plan_projection_selects_exactly_one_or_no_delivery_mode() {
-        let entries = [CargoPlanEntry {
-            crate_name: "leptos".to_owned(),
-            source: CargoPlanSource::version(LEPTOS_VERSION),
-            features: vec!["nightly".to_owned()],
-            required: true,
-        }];
+        let entries = [
+            CargoPlanEntry {
+                crate_name: "leptos".to_owned(),
+                source: CargoPlanSource::version(LEPTOS_VERSION),
+                features: vec!["nightly".to_owned()],
+                required: true,
+            },
+            CargoPlanEntry {
+                crate_name: "web_ui_primitives".to_owned(),
+                source: CargoPlanSource::git(WEB_UI_PRIMITIVES_GIT_URL, WEB_UI_PRIMITIVES_GIT_REV),
+                features: vec!["core".to_owned(), "leptos".to_owned()],
+                required: true,
+            },
+        ];
 
         for (contract, expected) in [
             (
                 RenderModeContract::Selected(RenderMode::Csr),
-                vec!["csr".to_owned(), "nightly".to_owned()],
+                (
+                    vec!["csr".to_owned(), "nightly".to_owned()],
+                    vec!["core".to_owned(), "csr".to_owned(), "leptos".to_owned()],
+                ),
             ),
             (
                 RenderModeContract::Selected(RenderMode::Hydrate),
-                vec!["hydrate".to_owned(), "nightly".to_owned()],
+                (
+                    vec!["hydrate".to_owned(), "nightly".to_owned()],
+                    vec!["core".to_owned(), "hydrate".to_owned(), "leptos".to_owned()],
+                ),
             ),
             (
                 RenderModeContract::Selected(RenderMode::Ssr),
-                vec!["nightly".to_owned(), "ssr".to_owned()],
+                (
+                    vec!["nightly".to_owned(), "ssr".to_owned()],
+                    vec!["core".to_owned(), "leptos".to_owned(), "ssr".to_owned()],
+                ),
             ),
-            (RenderModeContract::Neutral, vec!["nightly".to_owned()]),
+            (
+                RenderModeContract::Neutral,
+                (
+                    vec!["nightly".to_owned()],
+                    vec!["core".to_owned(), "leptos".to_owned()],
+                ),
+            ),
         ] {
             let normalized =
                 normalize_cargo_plan_for_project(&entries, contract).expect("project plan");
-            assert_eq!(normalized[0].features, expected);
+            assert_eq!(normalized[0].features, expected.0);
+            assert_eq!(normalized[1].features, expected.1);
         }
     }
 
@@ -2850,11 +2894,23 @@ mod tests {
     }
 
     #[test]
-    fn collapsible_css_uses_property_local_theme_fallbacks() {
+    fn collapsible_source_projects_ssr_attributes_and_uses_theme_fallbacks() {
         let root = built_in_registry_root();
+        let trigger = fs::read_to_string(root.join("ui/collapsible/trigger.rs"))
+            .expect("read collapsible trigger");
+        let content = fs::read_to_string(root.join("ui/collapsible/content.rs"))
+            .expect("read collapsible content");
         let css =
             fs::read_to_string(root.join("styles/collapsible.css")).expect("read collapsible css");
 
+        assert!(trigger.contains("aria-expanded=move ||"));
+        assert!(trigger.contains("aria-controls=move ||"));
+        assert!(trigger.contains("data-state=move ||"));
+        assert!(content.contains("id=move ||"));
+        assert!(content.contains("hidden=move ||"));
+        assert!(content.contains("data-state=move ||"));
+        assert!(!trigger.contains("use_dom_bindings"));
+        assert!(!content.contains("use_dom_bindings"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-collapsible-trigger-background, transparent)"));
@@ -3107,7 +3163,12 @@ mod tests {
         assert!(content_source.contains("target_is_trigger"));
         assert!(content_source.contains("use_menu_placement_with_node_refs"));
         assert!(content_source.contains("MenuPlacementOptions::new"));
-        assert!(content_source.contains("style=move || style_placement.style()"));
+        assert!(content_source.contains("style=move || {"));
+        assert!(content_source.contains("style_placement"));
+        assert!(content_source.contains(".strict_id()"));
+        assert!(content_source.contains(".is_none()"));
+        assert!(content_source.contains("then(|| style_placement.style())"));
+        assert!(content_source.contains("data-web-ui-placement-id=move ||"));
         assert!(content_source.contains("data-side=move || side_placement.data_side()"));
         assert!(content_source.contains("data-align=move || align_placement.data_align()"));
         assert!(item_source.contains("MenuItemKind::Radio"));
@@ -3256,8 +3317,13 @@ mod tests {
     #[test]
     fn tabs_source_declares_keyboard_accessibility_contract() {
         let root = built_in_registry_root();
+        let tabs_root =
+            fs::read_to_string(root.join("ui/tabs/root.rs")).expect("read tabs root source");
+        let list = fs::read_to_string(root.join("ui/tabs/list.rs")).expect("read tabs list source");
         let trigger =
             fs::read_to_string(root.join("ui/tabs/trigger.rs")).expect("read tabs trigger source");
+        let panel =
+            fs::read_to_string(root.join("ui/tabs/panel.rs")).expect("read tabs panel source");
         let css = fs::read_to_string(root.join("styles/tabs.css")).expect("read tabs css");
         let item = load_built_in_registry_item("tabs").expect("load tabs");
 
@@ -3265,6 +3331,17 @@ mod tests {
         assert!(trigger.contains("focus_by_key"));
         assert!(trigger.contains("activate_focused"));
         assert!(trigger.contains("focus_trigger"));
+        assert!(trigger.contains("on_cleanup"));
+        assert!(trigger.contains("unregister_trigger"));
+        assert!(list.contains("role=move ||"));
+        assert!(trigger.contains("aria-selected=move ||"));
+        assert!(trigger.contains("aria-controls=move ||"));
+        assert!(panel.contains("aria-labelledby=move ||"));
+        assert!(panel.contains("hidden=move ||"));
+        assert!(!list.contains("use_dom_bindings"));
+        assert!(!trigger.contains("use_dom_bindings"));
+        assert!(!panel.contains("use_dom_bindings"));
+        assert!(tabs_root.contains("id.unwrap_or_else(|| use_kit_id(\"kit-tabs\"))"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-tabs-panel-background, transparent)"));
@@ -3305,9 +3382,11 @@ mod tests {
         assert!(content.contains("DialogLayerOptions"));
         assert!(content.contains("PortalMount"));
         assert!(content.contains("#[prop(optional)] portal_mount: Option<PortalMount>"));
-        assert!(content.contains("if let Some(portal_mount) = portal_mount.clone()"));
-        assert!(content.contains("<Portal mount=portal_mount>"));
-        assert!(content.contains("<Portal>"));
+        assert!(content.contains("#[prop(default = true)] portal_reparent: bool"));
+        assert!(content.contains("Portal(PortalProps {"));
+        assert!(content.contains("mount: portal_mount.clone()"));
+        assert!(content.contains("reparent: portal_reparent"));
+        assert_eq!(content.matches("Portal(PortalProps {").count(), 1);
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-dialog-background, var(--kit-color-surface-raised))"));
@@ -3334,6 +3413,98 @@ mod tests {
                 "DialogTitle",
                 "DialogTrigger"
             ]
+        );
+    }
+
+    #[test]
+    fn hydration_identity_and_dynamic_registration_contracts_are_closed() {
+        let root = built_in_registry_root();
+        let identity =
+            fs::read_to_string(root.join("ui/identity.rs")).expect("read identity source");
+
+        assert!(identity.contains("pub fn KitIdProvider"));
+        assert!(identity.contains("provide_context(KitIdScope::new())"));
+        assert!(identity.contains("pub(crate) fn use_kit_id"));
+        assert!(!identity.contains("Atomic"));
+        assert!(!identity.contains("fetch_add"));
+
+        for (item, source, override_binding) in [
+            (
+                "collapsible",
+                "ui/collapsible/root.rs",
+                "content_id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "dialog",
+                "ui/dialog/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "field",
+                "ui/field/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "menu",
+                "ui/menu/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "tabs",
+                "ui/tabs/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+        ] {
+            let source = fs::read_to_string(root.join(source)).expect("read component root");
+            let manifest = load_built_in_registry_item(item).expect("load component manifest");
+
+            assert!(source.contains(override_binding), "{item}");
+            assert!(!source.contains("Atomic"), "{item}");
+            assert!(!source.contains("fetch_add"), "{item}");
+            assert_eq!(manifest.item.registry_dependencies[0], "identity", "{item}");
+            assert!(
+                manifest
+                    .item
+                    .accessibility
+                    .behaviors
+                    .iter()
+                    .any(|behavior| {
+                        behavior.name == "stable-hydration-identity" && behavior.required
+                    }),
+                "{item}"
+            );
+        }
+
+        for (source, cleanup) in [
+            ("ui/field/message.rs", "unregister_message_id"),
+            ("ui/menu/item.rs", "unregister_item"),
+            ("ui/tabs/trigger.rs", "unregister_trigger"),
+        ] {
+            let source = fs::read_to_string(root.join(source)).expect("read registration source");
+            assert!(source.contains("on_cleanup"));
+            assert!(source.contains(cleanup));
+        }
+    }
+
+    #[test]
+    fn menu_source_selects_inline_or_strict_placement_without_mixing_sinks() {
+        let root = built_in_registry_root();
+        let content =
+            fs::read_to_string(root.join("ui/menu/content.rs")).expect("read menu content");
+        let item = load_built_in_registry_item("menu").expect("load menu");
+
+        assert!(content.contains("#[prop(optional)] placement_sink: PlacementSink"));
+        assert!(content.contains(".sink(placement_sink)"));
+        assert!(content.contains(".strict_id()"));
+        assert!(content.contains("data-web-ui-placement-id="));
+        assert!(content.contains(".strict_id()"));
+        assert!(content.contains(".is_none()"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "strict-csp-placement" && behavior.required)
         );
     }
 
@@ -3814,7 +3985,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(names(&first), ["tokens", "dialog", "spinner", "button"]);
+        assert_eq!(
+            names(&first),
+            ["identity", "tokens", "dialog", "spinner", "button"]
+        );
         assert_eq!(names(&second), names(&first));
     }
 

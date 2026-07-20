@@ -1,11 +1,9 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::core::{Direction, MenuLoop, MenuModel};
 use web_ui_primitives::leptos::{DomAttribute, DomAttributeValue};
 
-static NEXT_MENU_ID: AtomicUsize = AtomicUsize::new(1);
+use super::super::identity::use_kit_id;
 
 #[derive(Clone)]
 pub(crate) struct MenuContext {
@@ -49,6 +47,32 @@ impl MenuContext {
         });
         self.item_labels.update(|labels| {
             labels[index] = label;
+        });
+    }
+
+    pub(crate) fn unregister_item(&self, index: usize) {
+        let mut retained_len = 0;
+        self.item_refs.update(|refs| {
+            if let Some(item_ref) = refs.get_mut(index) {
+                *item_ref = None;
+            }
+            retained_len = refs
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |last| last + 1);
+            refs.truncate(retained_len);
+        });
+        self.item_labels.update(|labels| {
+            if let Some(label) = labels.get_mut(index) {
+                label.clear();
+            }
+            labels.truncate(retained_len);
+        });
+        self.model.update(|model| {
+            if index < retained_len {
+                model.set_disabled(index, true);
+            }
+            model.set_len(retained_len);
         });
     }
 
@@ -135,7 +159,7 @@ pub fn MenuRoot(
 ) -> impl IntoView {
     let mut model = MenuModel::with_loop(0, loop_policy);
     model.set_open(default_open);
-    let base_id = id.unwrap_or_else(next_menu_id);
+    let base_id = id.unwrap_or_else(|| use_kit_id("kit-menu"));
     provide_context(MenuContext {
         model: RwSignal::new(model),
         checked_index,
@@ -182,9 +206,4 @@ pub(crate) fn attr_bool(attrs: &[DomAttribute], name: &str) -> bool {
 
 pub(crate) fn data_attr(active: bool) -> Option<&'static str> {
     active.then_some("")
-}
-
-fn next_menu_id() -> String {
-    let id = NEXT_MENU_ID.fetch_add(1, Ordering::Relaxed);
-    format!("kit-menu-{id}")
 }

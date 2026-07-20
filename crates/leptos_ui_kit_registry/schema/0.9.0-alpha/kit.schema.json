@@ -236,6 +236,7 @@
               "collapsible",
               "dialog",
               "field",
+              "identity",
               "menu",
               "router-link",
               "spinner",

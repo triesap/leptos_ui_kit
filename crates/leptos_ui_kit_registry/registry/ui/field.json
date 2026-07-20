@@ -32,6 +32,14 @@
       {
         "name": "field-required-state-propagation",
         "required": true
+      },
+      {
+        "name": "stable-hydration-identity",
+        "required": true
+      },
+      {
+        "name": "dynamic-message-cleanup",
+        "required": true
       }
     ],
     "notes": []
@@ -167,6 +175,7 @@
     }
   ],
   "registryDependencies": [
+    "identity",
     "tokens"
   ],
   "cargoPlan": [

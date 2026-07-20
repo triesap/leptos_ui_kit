@@ -28,6 +28,14 @@
       {
         "name": "hidden-closed-content",
         "required": true
+      },
+      {
+        "name": "stable-hydration-identity",
+        "required": true
+      },
+      {
+        "name": "ssr-attribute-projection",
+        "required": true
       }
     ],
     "notes": []
@@ -80,6 +88,7 @@
     }
   ],
   "registryDependencies": [
+    "identity",
     "tokens"
   ],
   "cargoPlan": [
@@ -100,6 +109,7 @@
         "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
       },
       "features": [
+        "core",
         "leptos"
       ],
       "required": true

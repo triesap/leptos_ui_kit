@@ -58,6 +58,8 @@ include = [
     "registry/ui/field/text_area_field.rs",
     "registry/ui/field/text_field.rs",
     "registry/ui/field/text_input.rs",
+    "registry/ui/identity.json",
+    "registry/ui/identity.rs",
     "registry/ui/menu.json",
     "registry/ui/menu/content.rs",
     "registry/ui/menu/item.rs",

@@ -36,6 +36,14 @@
       {
         "name": "presence-exit-state",
         "required": true
+      },
+      {
+        "name": "stable-hydration-identity",
+        "required": true
+      },
+      {
+        "name": "hydration-safe-portal",
+        "required": true
       }
     ],
     "notes": []
@@ -116,6 +124,7 @@
     }
   ],
   "registryDependencies": [
+    "identity",
     "tokens"
   ],
   "cargoPlan": [
@@ -136,6 +145,7 @@
         "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
       },
       "features": [
+        "core",
         "leptos"
       ],
       "required": true

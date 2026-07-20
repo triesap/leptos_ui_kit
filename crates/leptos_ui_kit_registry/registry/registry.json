@@ -12,6 +12,11 @@
       "version": "0.2.0",
       "presenceAbi": 2
     },
+    "identityAbi": {
+      "version": 1,
+      "providerType": "KitIdProvider",
+      "ownerScopedFallback": true
+    },
     "layerAbi": {
       "version": 1,
       "order": [
@@ -23,6 +28,7 @@
     "portalAbi": {
       "version": 1,
       "mountType": "web_ui_primitives::leptos::PortalMount",
+      "propsType": "web_ui_primitives::leptos::PortalProps",
       "bodyHost": true
     }
   },
@@ -46,6 +52,10 @@
     {
       "name": "field",
       "path": "ui/field.json"
+    },
+    {
+      "name": "identity",
+      "path": "ui/identity.json"
     },
     {
       "name": "menu",
