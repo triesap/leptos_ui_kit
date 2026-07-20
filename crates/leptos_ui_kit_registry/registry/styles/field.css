@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start field */
+@layer leptos-ui-kit.components {
 .kit-field {
   display: grid;
   gap: var(--kit-field-gap, 0.5rem);
@@ -174,5 +175,6 @@
 .kit-field-message[data-invalid],
 .kit-field[data-invalid] .kit-field-message {
   color: var(--kit-field-message-invalid-color, var(--kit-color-danger));
+}
 }
 /* leptos-ui-kit:end field */

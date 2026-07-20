@@ -11,7 +11,7 @@ use toml::{Table as TomlTable, Value as TomlValue};
 use crate::{
     CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind, ConfigError, DEFAULT_CSS_PATH,
     DEFAULT_KIT_CONFIG_PATH, KitConfig, LEPTOS_VERSION, NormalizeOptions, NormalizedProjectConfig,
-    RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan,
+    ProjectKind, RegistryError, RenderMode, WorkspaceMode, normalize_cargo_plan,
     normalize_project_with_workspace_mode, parse_kit_json_str,
 };
 
@@ -67,9 +67,10 @@ impl From<RegistryError> for DetectionError {
 pub struct DetectedProject {
     pub project_root: PathBuf,
     pub cargo_manifest_path: PathBuf,
+    pub project_kind: ProjectKind,
     pub workspace_mode: WorkspaceMode,
     pub source_root: PathBuf,
-    pub index_html_path: PathBuf,
+    pub index_html_path: Option<PathBuf>,
     pub css_file_path: PathBuf,
     pub render_mode: Option<RenderMode>,
     pub dependency_plan: DependencyPlan,
@@ -167,9 +168,13 @@ pub struct InfoOutput {
     pub normalized_config: Option<NormalizedProjectConfig>,
 }
 
-pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
+pub fn detect_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
     detect_project_snapshot_with(project_root, |path| fs::read_to_string(path))
         .map(|snapshot| snapshot.detected)
+}
+
+pub fn detect_single_crate_project(project_root: &Path) -> Result<DetectedProject, DetectionError> {
+    detect_project(project_root)
 }
 
 struct ProjectSnapshot {
@@ -208,15 +213,28 @@ fn detect_project_snapshot_with(
         return Err(DetectionError::MissingSourceRoot(source_root));
     }
 
-    let index_html_path = project_root.join("index.html");
-    if !index_html_path.is_file() {
-        return Err(DetectionError::MissingIndexHtml(index_html_path));
-    }
-
     let kit_config_path = project_root.join(DEFAULT_KIT_CONFIG_PATH);
     let kit_config_path = kit_config_path.is_file().then_some(kit_config_path);
     let kit_config = match kit_config_path.as_ref() {
         Some(path) => Some(parse_kit_json_str(&read_path_with(path, &mut read)?)?),
+        None => None,
+    };
+    let project_kind = kit_config
+        .as_ref()
+        .map(|config| config.project.kind)
+        .unwrap_or(ProjectKind::SingleCrateTrunkCsr);
+    let index_html_path = match kit_config
+        .as_ref()
+        .and_then(|config| config.project.index_html.as_deref())
+        .or_else(|| (project_kind == ProjectKind::SingleCrateTrunkCsr).then_some("index.html"))
+    {
+        Some(relative) => {
+            let path = project_root.join(relative);
+            if !path.is_file() {
+                return Err(DetectionError::MissingIndexHtml(path));
+            }
+            Some(path)
+        }
         None => None,
     };
     let css_file_path = project_root.join(
@@ -233,6 +251,7 @@ fn detect_project_snapshot_with(
         detected: DetectedProject {
             project_root: project_root.to_path_buf(),
             cargo_manifest_path,
+            project_kind,
             workspace_mode,
             source_root,
             index_html_path,
@@ -908,7 +927,7 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(detected.workspace_mode, WorkspaceMode::SingleCrate);
         assert_eq!(detected.source_root, root.join("src"));
-        assert_eq!(detected.index_html_path, root.join("index.html"));
+        assert_eq!(detected.index_html_path, Some(root.join("index.html")));
         assert_eq!(detected.css_file_path, root.join("styles/kit.css"));
         assert_eq!(detected.render_mode, Some(RenderMode::Csr));
         assert_eq!(

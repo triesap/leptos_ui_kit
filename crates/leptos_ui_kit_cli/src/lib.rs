@@ -1776,8 +1776,12 @@ fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String>
             .unwrap_or_else(|| "Cargo.toml".to_owned()),
         source_root: logical_path(project_root, &output.detected.source_root)
             .unwrap_or_else(|| "src".to_owned()),
-        index_html: logical_path(project_root, &output.detected.index_html_path)
-            .unwrap_or_else(|| "index.html".to_owned()),
+        index_html: output
+            .detected
+            .index_html_path
+            .as_ref()
+            .and_then(|path| logical_path(project_root, path))
+            .unwrap_or_else(|| "not-applicable".to_owned()),
         stylesheet: logical_path(project_root, &output.detected.css_file_path)
             .unwrap_or_else(|| DEFAULT_CSS_PATH.to_owned()),
         render_mode: output.detected.render_mode.map(|_| "csr"),
@@ -2841,14 +2845,22 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
         );
     }
 
-    match fs::read_to_string(&info.detected.index_html_path) {
+    let Some(index_html_path) = info.detected.index_html_path.as_ref() else {
+        checks.push(DoctorCheck::pass(
+            "stylesheet_link",
+            "shared-library-crate does not own a Trunk index.html",
+        ));
+        return checks;
+    };
+
+    match fs::read_to_string(index_html_path) {
         Ok(html) => match inspect_html_stylesheet(&html, css_logical_path) {
             Ok(HtmlStylesheetState::Present { .. }) => checks.push(
                 DoctorCheck::pass(
                     "stylesheet_link",
                     format!("index.html links {css_logical_path} for Trunk"),
                 )
-                .with_path(info.detected.index_html_path.display().to_string()),
+                .with_path(index_html_path.display().to_string()),
             ),
             Ok(HtmlStylesheetState::Missing { .. }) => checks.push(
                 strict_check(
@@ -2856,7 +2868,7 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
                     "stylesheet_link",
                     format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
                 )
-                .with_path(info.detected.index_html_path.display().to_string()),
+                .with_path(index_html_path.display().to_string()),
             ),
             Err(error) => checks.push(
                 strict_check(
@@ -2864,7 +2876,7 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
                     "stylesheet_link",
                     format!("index.html cannot be inspected safely: {error}"),
                 )
-                .with_path(info.detected.index_html_path.display().to_string()),
+                .with_path(index_html_path.display().to_string()),
             ),
         },
         Err(error) => checks.push(
@@ -2873,7 +2885,7 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
                 "stylesheet_link",
                 format!("failed to read index.html: {error}"),
             )
-            .with_path(info.detected.index_html_path.display().to_string()),
+            .with_path(index_html_path.display().to_string()),
         ),
     }
 
@@ -5211,7 +5223,7 @@ leptos_router = "0.9.0-alpha"
         assert_eq!(error.command, "doctor");
         assert_eq!(error.category, ErrorCategory::Doctor);
         assert_eq!(error.code, "doctor.checks_failed");
-        assert_eq!(error.message, "doctor checks failed");
+        assert_eq!(error.message.as_ref(), "doctor checks failed");
         assert_eq!(error.exit_code(), 3);
         assert!(error.output_emitted);
     }

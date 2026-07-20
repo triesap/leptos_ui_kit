@@ -15,8 +15,8 @@ use tempfile::tempdir;
 mod package_workspace_support;
 
 use package_workspace_support::{
-    PACKAGE_NAMES, assert_full_revision, assert_local_package_metadata, assert_success,
-    cargo_command, contains_bytes, extract_workspace, package_workspace,
+    PACKAGE_NAMES, PACKAGE_WORKSPACE_LOCK, assert_full_revision, assert_local_package_metadata,
+    assert_success, cargo_command, contains_bytes, extract_workspace, package_workspace,
     sanitize_command_environment, source_head, workspace_root,
 };
 
@@ -98,11 +98,11 @@ fn installed_binaries_run_after_package_source_and_build_state_are_deleted() {
     let extracted_packages = extract_workspace(&archives, &extracted_workspace);
     assert_package_revisions(&extracted_packages, &expected_rev);
 
-    let lock = cargo_command(&extracted_workspace, &cargo_home, &target_dir)
-        .args(["generate-lockfile"])
-        .output()
-        .expect("generate extracted workspace lockfile");
-    assert_success("generate extracted workspace lockfile", &lock);
+    fs::write(
+        extracted_workspace.join("Cargo.lock"),
+        PACKAGE_WORKSPACE_LOCK,
+    )
+    .expect("seed extracted package-only lockfile");
     assert_local_package_metadata(
         "source-deletion installation",
         &extracted_workspace,

@@ -394,8 +394,9 @@ pub(crate) fn empty_lock_json(
     config_content: &str,
     state_path: &str,
 ) -> Result<String, CodegenError> {
+    let config = leptos_ui_kit_registry::parse_kit_json_str(config_content)?;
     lock_to_json_at_path(
-        &InstallLock::empty(hash_bytes(config_content.as_bytes())),
+        &InstallLock::empty_for_project(hash_bytes(config_content.as_bytes()), config.project.kind),
         Path::new(state_path),
     )
 }

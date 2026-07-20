@@ -604,8 +604,11 @@ pub(crate) fn plan_index_html(
     changes: &mut Vec<ChangeRecord>,
     config: &KitConfig,
 ) -> Result<(), CodegenError> {
-    let path = context.project_root().join("index.html");
-    let html = context.read_string("index.html")?;
+    let Some(index_html) = config.project.index_html.as_deref() else {
+        return Ok(());
+    };
+    let path = context.project_root().join(index_html);
+    let html = context.read_string(index_html)?;
     let css_path = config.styles.css.as_str();
     let Some(patched) =
         patch_html_stylesheet_link(&html, css_path).map_err(|error| CodegenError::UnsafePatch {
@@ -619,7 +622,7 @@ pub(crate) fn plan_index_html(
     push_file_plan(
         files,
         changes,
-        "index.html",
+        index_html,
         PlannedFileAction::Update,
         patched,
         ChangeKind::UpdateFile,

@@ -84,7 +84,7 @@ fn project_desired_state_from_resolved(
         .difference(&desired_item_ids)
         .cloned()
         .collect();
-    let mut lock = InstallLock::empty(config_hash);
+    let mut lock = InstallLock::empty_for_project(config_hash, config.project.kind);
     let mut cargo_plan_entries = Vec::new();
     let mut css_operations = Vec::new();
     let mut css_retirements = Vec::new();

@@ -1,4 +1,7 @@
 /* leptos-ui-kit:start tokens */
+@layer leptos-ui-kit.tokens, leptos-ui-kit.themes, leptos-ui-kit.components;
+
+@layer leptos-ui-kit.tokens {
 :root {
   color-scheme: light;
   --kit-color-canvas: #f8fafc;
@@ -44,5 +47,6 @@
   --kit-duration-normal: 140ms;
   --kit-easing-standard: ease;
   --kit-disabled-opacity: 0.55;
+}
 }
 /* leptos-ui-kit:end tokens */

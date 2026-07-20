@@ -18,6 +18,9 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets
 ```
 
+Transaction changes must also keep the codegen all-target suite green on
+Linux, macOS, and Windows. The repository workflow runs that portable matrix.
+
 ## Packaging validation
 
 Changes to package manifests, include lists, embedded assets, provenance, or
@@ -44,6 +47,10 @@ They prove that packaged crates use only local package inputs and that installed
 binaries keep working after package source and build state are deleted. Run
 them from a clean Git worktree; archive metadata marked dirty is rejected
 intentionally because its base revision does not identify the packaged bytes.
+The package-source lane uses `tests/fixtures/package_workspace.Cargo.lock` as
+the canonical dependency graph for the extracted package-only workspace.
+Source-only ABI tests may depend on unpublished revisions, but they must remain
+outside package include lists so published packages stay independently usable.
 
 ## MVP constraints
 

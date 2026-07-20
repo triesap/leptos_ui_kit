@@ -4,7 +4,7 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    KitConfig, RegistryItemKind, SCHEMA_VERSION, validate_registry_item_name,
+    KitConfig, ProjectKind, RegistryItemKind, SCHEMA_VERSION, validate_registry_item_name,
 };
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -30,13 +30,17 @@ pub struct InstallLock {
 
 impl InstallLock {
     pub fn empty(config_hash: String) -> Self {
+        Self::empty_for_project(config_hash, ProjectKind::SingleCrateTrunkCsr)
+    }
+
+    pub fn empty_for_project(config_hash: String, project_kind: ProjectKind) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
             kit_version: SCHEMA_VERSION.to_owned(),
             project: InstallLockProject {
                 config_hash,
                 crate_root: ".".to_owned(),
-                kind: "single-crate-trunk-csr".to_owned(),
+                kind: project_kind.as_str().to_owned(),
             },
             items: BTreeMap::new(),
             files_by_path: BTreeMap::new(),
@@ -58,8 +62,14 @@ impl InstallLock {
         if self.project.crate_root != "." {
             return invalid_lock(path, "project.crateRoot must be .");
         }
-        if self.project.kind != "single-crate-trunk-csr" {
-            return invalid_lock(path, "project.kind must be single-crate-trunk-csr");
+        if !matches!(
+            self.project.kind.as_str(),
+            "single-crate-trunk-csr" | "shared-library-crate"
+        ) {
+            return invalid_lock(
+                path,
+                "project.kind must be single-crate-trunk-csr or shared-library-crate",
+            );
         }
         validate_lock_hash(path, "project.configHash", &self.project.config_hash)?;
 

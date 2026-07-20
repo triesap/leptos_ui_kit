@@ -7,6 +7,18 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- Add a typed `shared-library-crate` project target that omits Trunk HTML
+  mutation while preserving source-contained component and stylesheet output.
+- Upgrade primitive-backed generated components and dependency plans to
+  `web_ui_primitives` `0.2.0`.
+- Freeze Presence ABI 2, cascade-layer ABI 1, and portal ABI 1 in the typed
+  registry compatibility contract.
+- Bind `transitioncancel` and `animationcancel` for generated menu and dialog
+  presence, and place generated CSS in explicit kit token/component layers.
+- Make installer writes advisory-locked, no-follow, no-clobber, journaled, and
+  recoverable, with independent backups and finish-only committed cleanup.
+- Publish every generated public file with deterministic POSIX mode `0644`
+  while keeping transaction stages and recovery state private.
 - Embed the complete built-in registry, Rust and CSS sources, theme contract,
   and package-local public schemas in one deterministic runtime catalog.
 - Resolve package provenance from Cargo VCS metadata as a complete Git
@@ -19,6 +31,8 @@ Semantic Versioning.
   variants.
 - Add isolated archive acceptance proving both installed binaries keep working
   after package source, build targets, and Cargo caches are deleted.
+- Pin the extracted package-only dependency graph independently from
+  source-only ABI tests that consume unpublished upstream revisions.
 - Add the packaged v1 semantic theme contract and CSS-only `tokens` foundation
   item, installed before every styled built-in component.
 - Replace component `:root` aliases with property-local semantic and structural

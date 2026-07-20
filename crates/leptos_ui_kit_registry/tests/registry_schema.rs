@@ -111,6 +111,41 @@ fn all_package_schemas_are_valid_draft_2020_12() {
 }
 
 #[test]
+fn kit_schema_accepts_trunk_and_shared_library_targets() {
+    let (_, validator) = compile_draft_2020_12_schema(&schema_root().join("kit.schema.json"));
+    let trunk = serde_json::to_value(canonical_kit_config().expect("canonical kit config"))
+        .expect("serialize canonical kit config");
+    assert_valid(&validator, &trunk, "Trunk application config");
+
+    let mut shared = trunk.clone();
+    shared["project"]["kind"] = json!("shared-library-crate");
+    shared["project"]
+        .as_object_mut()
+        .expect("project object")
+        .remove("indexHtml");
+    assert_valid(&validator, &shared, "shared-library config");
+
+    let mut shared_with_html = shared.clone();
+    shared_with_html["project"]["indexHtml"] = json!("index.html");
+    assert_invalid(
+        &validator,
+        &shared_with_html,
+        "shared-library config with indexHtml",
+    );
+
+    let mut trunk_without_html = trunk;
+    trunk_without_html["project"]
+        .as_object_mut()
+        .expect("project object")
+        .remove("indexHtml");
+    assert_invalid(
+        &validator,
+        &trunk_without_html,
+        "Trunk config without indexHtml",
+    );
+}
+
+#[test]
 fn schemas_and_public_parsers_accept_every_canonical_document() {
     let (_, kit_validator) = compile_draft_2020_12_schema(&schema_root().join("kit.schema.json"));
     let kit = serde_json::to_value(canonical_kit_config().expect("canonical kit config"))

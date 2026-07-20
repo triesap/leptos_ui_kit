@@ -21,14 +21,14 @@ pub use config::{
     desired_builtin_collapsible_item, desired_builtin_dialog_item, desired_builtin_field_item,
     desired_builtin_menu_item, desired_builtin_router_link_item, desired_builtin_spinner_item,
     desired_builtin_status_item, desired_builtin_tabs_item, desired_builtin_tokens_item,
-    kit_config_for_write, kit_config_to_json, kit_config_with_desired_item,
+    kit_config_for_write, kit_config_to_json, kit_config_with_desired_item, normalize_project,
     normalize_project_with_workspace_mode, normalize_single_crate_project, parse_kit_json_str,
 };
 pub use detect::{
     DependencyDeclarationKind, DependencyIncompatibility, DependencyPlan, DependencyRequirement,
     DependencyStatus, DetectedDependencySource, DetectedProject, DetectionError, InfoOutput,
     build_info_output, dependency_requirement_for_cargo_plan, detect_cargo_plan_requirements,
-    detect_single_crate_project,
+    detect_project, detect_single_crate_project,
 };
 #[allow(
     deprecated,
@@ -37,12 +37,15 @@ pub use detect::{
 pub use item::registry_item_content_hash;
 pub use item::{
     BuiltInAssetError, BuiltInAssetKind, CargoPlanEntry, CargoPlanSource, CargoPlanSourceKind,
+    LAYER_ABI_VERSION, LAYER_ORDER, PORTAL_ABI_VERSION, PORTAL_MOUNT_TYPE, PRESENCE_ABI_VERSION,
     REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryAccessibility,
-    RegistryAccessibilityBehavior, RegistryError, RegistryFileTarget, RegistryFileTargetKind,
-    RegistryItem, RegistryItemFile, RegistryItemKind, RegistryItemStyle, RegistryLeptos,
-    RegistryRoot, RegistryRootItem, RegistrySourceKind, RegistryStyleTarget,
-    RegistryStyleTargetKind, ResolvedRegistryItem, ResolvedRegistryTargets,
-    ResolvedStyleBlockTarget, ResolvedUiTarget, WEB_UI_PRIMITIVES_VERSION,
+    RegistryAccessibilityBehavior, RegistryCompatibility, RegistryError, RegistryFileTarget,
+    RegistryFileTargetKind, RegistryItem, RegistryItemFile, RegistryItemKind, RegistryItemStyle,
+    RegistryLayerCompatibility, RegistryLeptos, RegistryLeptosCompatibility,
+    RegistryPortalCompatibility, RegistryPrimitivesCompatibility, RegistryRoot, RegistryRootItem,
+    RegistrySourceKind, RegistryStyleTarget, RegistryStyleTargetKind, ResolvedRegistryItem,
+    ResolvedRegistryTargets, ResolvedStyleBlockTarget, ResolvedUiTarget, WEB_UI_PRIMITIVES_GIT_REV,
+    WEB_UI_PRIMITIVES_GIT_URL, WEB_UI_PRIMITIVES_REQUIREMENT, WEB_UI_PRIMITIVES_VERSION,
     load_built_in_registry_item, load_built_in_registry_root, load_registry_item,
     normalize_cargo_plan, parse_registry_item_str, parse_registry_root_str,
     read_built_in_registry_source, resolve_built_in_registry_items, resolve_registry_targets,

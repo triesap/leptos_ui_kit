@@ -1,0 +1,24 @@
+name: Transaction platforms
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  transaction:
+    name: Transaction safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install supported Rust toolchain
+        run: rustup toolchain install 1.92.0 --profile minimal
+      - name: Run portable transaction suite
+        run: cargo +1.92.0 test -p leptos_ui_kit_codegen --all-targets --locked

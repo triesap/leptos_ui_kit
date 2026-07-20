@@ -21,7 +21,19 @@ use crate::{
     embedded_assets::{AssetProviderError, EmbeddedAssetKind},
 };
 
-pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
+pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.2.0";
+pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
+pub const WEB_UI_PRIMITIVES_GIT_REV: &str = "a7ad19e203c08be19040154fa6bce909701d402f";
+pub const WEB_UI_PRIMITIVES_REQUIREMENT: &str = ">=0.2.0,<0.3.0";
+pub const PRESENCE_ABI_VERSION: u32 = 2;
+pub const LAYER_ABI_VERSION: u32 = 1;
+pub const PORTAL_ABI_VERSION: u32 = 1;
+pub const PORTAL_MOUNT_TYPE: &str = "web_ui_primitives::leptos::PortalMount";
+pub const LAYER_ORDER: [&str; 3] = [
+    "leptos-ui-kit.tokens",
+    "leptos-ui-kit.themes",
+    "leptos-ui-kit.components",
+];
 
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
@@ -374,6 +386,7 @@ pub struct RegistryRoot {
     pub schema: String,
     pub schema_version: String,
     pub name: String,
+    pub compatibility: RegistryCompatibility,
     pub items: Vec<RegistryRootItem>,
 }
 
@@ -382,6 +395,7 @@ impl RegistryRoot {
         expect_string("$schema", REGISTRY_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
         expect_string("name", "leptos-ui-kit", &self.name)?;
+        self.compatibility.validate()?;
 
         let mut names = BTreeSet::new();
         let mut paths = BTreeSet::new();
@@ -405,6 +419,83 @@ impl RegistryRoot {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryCompatibility {
+    pub leptos: RegistryLeptosCompatibility,
+    pub primitives: RegistryPrimitivesCompatibility,
+    pub layer_abi: RegistryLayerCompatibility,
+    pub portal_abi: RegistryPortalCompatibility,
+}
+
+impl RegistryCompatibility {
+    pub fn canonical() -> Self {
+        Self {
+            leptos: RegistryLeptosCompatibility {
+                version: LEPTOS_VERSION.to_owned(),
+            },
+            primitives: RegistryPrimitivesCompatibility {
+                package: "web_ui_primitives".to_owned(),
+                requirement: WEB_UI_PRIMITIVES_REQUIREMENT.to_owned(),
+                version: WEB_UI_PRIMITIVES_VERSION.to_owned(),
+                presence_abi: PRESENCE_ABI_VERSION,
+            },
+            layer_abi: RegistryLayerCompatibility {
+                version: LAYER_ABI_VERSION,
+                order: LAYER_ORDER.map(str::to_owned).to_vec(),
+            },
+            portal_abi: RegistryPortalCompatibility {
+                version: PORTAL_ABI_VERSION,
+                mount_type: PORTAL_MOUNT_TYPE.to_owned(),
+                body_host: true,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), RegistryError> {
+        let expected = Self::canonical();
+        if self == &expected {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "compatibility",
+                expected: format!("{expected:?}"),
+                actual: format!("{self:?}"),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryLeptosCompatibility {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryPrimitivesCompatibility {
+    pub package: String,
+    pub requirement: String,
+    pub version: String,
+    pub presence_abi: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryLayerCompatibility {
+    pub version: u32,
+    pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryPortalCompatibility {
+    pub version: u32,
+    pub mount_type: String,
+    pub body_host: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -706,9 +797,11 @@ impl CargoPlanEntry {
             "leptos_router" => self
                 .source
                 .expect_current_version_if_version(LEPTOS_ROUTER_VERSION),
-            "web_ui_primitives" => self
-                .source
-                .expect_current_version_if_version(WEB_UI_PRIMITIVES_VERSION),
+            "web_ui_primitives" => self.source.expect_git(
+                "cargoPlan[].source",
+                WEB_UI_PRIMITIVES_GIT_URL,
+                WEB_UI_PRIMITIVES_GIT_REV,
+            ),
             value => Err(RegistryError::InvalidValue {
                 field: "cargoPlan[].crate",
                 expected: "leptos, leptos_router, or web_ui_primitives".to_owned(),
@@ -807,6 +900,26 @@ impl CargoPlanSource {
                 self.version.as_deref().unwrap_or_default(),
             ),
             CargoPlanSourceKind::Git => Ok(()),
+        }
+    }
+
+    fn expect_git(
+        &self,
+        field: &'static str,
+        expected_url: &str,
+        expected_rev: &str,
+    ) -> Result<(), RegistryError> {
+        match (self.kind, self.url.as_deref(), self.rev.as_deref()) {
+            (CargoPlanSourceKind::Git, Some(url), Some(rev))
+                if url == expected_url && rev == expected_rev =>
+            {
+                Ok(())
+            }
+            _ => Err(RegistryError::InvalidValue {
+                field,
+                expected: format!("git source {expected_url} at revision {expected_rev}"),
+                actual: format!("{self:?}"),
+            }),
         }
     }
 }
@@ -3409,6 +3522,7 @@ mod tests {
             schema: REGISTRY_SCHEMA_URL.to_owned(),
             schema_version: SCHEMA_VERSION.to_owned(),
             name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
             items: vec![RegistryRootItem {
                 name: "button".to_owned(),
                 path: "ui/button.json".to_owned(),
@@ -3431,6 +3545,7 @@ mod tests {
             schema: REGISTRY_SCHEMA_URL.to_owned(),
             schema_version: SCHEMA_VERSION.to_owned(),
             name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
             items: vec![RegistryRootItem {
                 name: "button".to_owned(),
                 path: "ui/button.json".to_owned(),
@@ -3911,6 +4026,7 @@ mod tests {
             schema: REGISTRY_SCHEMA_URL.to_owned(),
             schema_version: SCHEMA_VERSION.to_owned(),
             name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
             items,
         }
     }

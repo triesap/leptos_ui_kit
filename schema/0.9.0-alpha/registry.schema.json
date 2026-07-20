@@ -8,6 +8,7 @@
     "$schema",
     "schemaVersion",
     "name",
+    "compatibility",
     "items"
   ],
   "properties": {
@@ -19,6 +20,94 @@
     },
     "name": {
       "const": "leptos-ui-kit"
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leptos",
+        "primitives",
+        "layerAbi",
+        "portalAbi"
+      ],
+      "properties": {
+        "leptos": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version"
+          ],
+          "properties": {
+            "version": {
+              "const": "0.9.0-alpha"
+            }
+          }
+        },
+        "primitives": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "package",
+            "requirement",
+            "version",
+            "presenceAbi"
+          ],
+          "properties": {
+            "package": {
+              "const": "web_ui_primitives"
+            },
+            "requirement": {
+              "const": ">=0.2.0,<0.3.0"
+            },
+            "version": {
+              "const": "0.2.0"
+            },
+            "presenceAbi": {
+              "const": 2
+            }
+          }
+        },
+        "layerAbi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "order"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "order": {
+              "const": [
+                "leptos-ui-kit.tokens",
+                "leptos-ui-kit.themes",
+                "leptos-ui-kit.components"
+              ]
+            }
+          }
+        },
+        "portalAbi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "mountType",
+            "bodyHost"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "mountType": {
+              "const": "web_ui_primitives::leptos::PortalMount"
+            },
+            "bodyHost": {
+              "const": true
+            }
+          }
+        }
+      }
     },
     "items": {
       "type": "array",

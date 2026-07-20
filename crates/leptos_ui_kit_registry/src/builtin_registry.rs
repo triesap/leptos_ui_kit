@@ -60,7 +60,8 @@ const REGISTRY_ITEM_SCHEMA_REQUIRED: &[&str] = &[
     "styles",
     "cargoPlan",
 ];
-const REGISTRY_SCHEMA_REQUIRED: &[&str] = &["$schema", "schemaVersion", "name", "items"];
+const REGISTRY_SCHEMA_REQUIRED: &[&str] =
+    &["$schema", "schemaVersion", "name", "compatibility", "items"];
 const THEME_CONTRACT_SCHEMA_REQUIRED: &[&str] = &[
     "$schema",
     "schemaVersion",
@@ -150,6 +151,7 @@ impl BuiltInRegistrySnapshot {
         let root = parse_root(&assets)?;
         let (items, parsed_items) = parse_items(&assets, &root)?;
         validate_exact_asset_ownership(&assets, &root, &parsed_items)?;
+        validate_runtime_compatibility_sources(&assets, &parsed_items)?;
         let theme_contract = parse_theme_contract(&assets)?;
         validate_theme_contract_version(&root, &parsed_items, &theme_contract)?;
         validate_theme_css_contract(&assets, &root, &parsed_items, &theme_contract)?;
@@ -797,6 +799,76 @@ fn validate_exact_asset_ownership(
         }
     }
     Ok(())
+}
+
+fn validate_runtime_compatibility_sources(
+    assets: &BTreeMap<String, OwnedAsset>,
+    items: &[RegistryItem],
+) -> Result<(), SnapshotError> {
+    for logical_path in [
+        "registry/ui/dialog/content.rs",
+        "registry/ui/menu/content.rs",
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        for required in [
+            "transition_cancel_handler()",
+            "animation_cancel_handler()",
+            "on:transitioncancel=",
+            "on:animationcancel=",
+        ] {
+            if !source.contains(required) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("Presence ABI 2 binding {required:?}"),
+                ));
+            }
+        }
+    }
+
+    let dialog = asset_text(
+        assets,
+        "registry/ui/dialog/content.rs",
+        EmbeddedAssetKind::Rust,
+    )?;
+    for required in ["PortalMount", "<Portal", "portal_mount"] {
+        if !dialog.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/dialog/content.rs",
+                format!("portal ABI 1 binding {required:?}"),
+            ));
+        }
+    }
+
+    for item in items {
+        for style in &item.styles {
+            let logical_path = format!("registry/{}", style.source);
+            let source = asset_text(assets, &logical_path, EmbeddedAssetKind::Css)?;
+            let required = if item.name == "tokens" {
+                "@layer leptos-ui-kit.tokens, leptos-ui-kit.themes, leptos-ui-kit.components;"
+            } else {
+                "@layer leptos-ui-kit.components {"
+            };
+            if source.matches(required).count() != 1 {
+                return Err(invalid_runtime_compatibility(
+                    &logical_path,
+                    format!("exactly one layer ABI 1 declaration {required:?}"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn invalid_runtime_compatibility(logical_path: &str, expected: String) -> SnapshotError {
+    SnapshotError::InvalidRegistryCatalog {
+        logical_path: logical_path.to_owned(),
+        source: RegistryError::InvalidValue {
+            field: "compatibility",
+            expected,
+            actual: "required runtime source binding is missing or duplicated".to_owned(),
+        },
+    }
 }
 
 fn item_content_hash(

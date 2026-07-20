@@ -982,7 +982,7 @@ fn windows_coordination_lock_and_temporary_reparse_points_cannot_capture_writes(
 
 #[cfg(unix)]
 #[test]
-fn root_aliases_are_bound_and_existing_posix_modes_survive_replacement() {
+fn root_aliases_are_bound_and_published_files_use_canonical_mode() {
     use std::os::unix::fs::PermissionsExt;
 
     let parent = tempdir().expect("tempdir");
@@ -1006,9 +1006,39 @@ fn root_aliases_are_bound_and_existing_posix_modes_survive_replacement() {
             .permissions()
             .mode()
             & 0o7777,
-        0o751
+        0o644
     );
     assert_exact_coordination_residual(&real_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn new_and_replaced_public_files_use_mode_0644() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().expect("tempdir");
+    fs::create_dir_all(directory.path().join("styles")).expect("create styles");
+    let existing = directory.path().join("styles/existing.css");
+    fs::write(&existing, b"before\n").expect("seed target");
+    fs::set_permissions(&existing, fs::Permissions::from_mode(0o751))
+        .expect("set noncanonical mode");
+
+    write_file_atomic(directory.path(), "styles/existing.css", b"replacement\n")
+        .expect("replace public file");
+    write_file_atomic(directory.path(), "styles/new.css", b"new\n").expect("create public file");
+
+    for path in [existing, directory.path().join("styles/new.css")] {
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("public file metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644,
+            "public file mode for {}",
+            path.display()
+        );
+    }
 }
 
 fn seed_coordination(root: &Path, marker: &[u8]) {

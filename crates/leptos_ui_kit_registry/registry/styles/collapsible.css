@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start collapsible */
+@layer leptos-ui-kit.components {
 .kit-collapsible {
   display: grid;
   gap: var(--kit-collapsible-gap, 0.5rem);
@@ -44,5 +45,6 @@
   padding:
     var(--kit-collapsible-content-padding-block, 0.5rem)
     var(--kit-collapsible-content-padding-inline, 0);
+}
 }
 /* leptos-ui-kit:end collapsible */

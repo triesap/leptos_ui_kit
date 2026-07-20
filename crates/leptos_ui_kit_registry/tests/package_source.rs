@@ -164,8 +164,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
     let archive_target = temporary.path().join("archive-target");
     let archives = package_workspace(&source_root, &archive_target);
     let approved_rev = source_head(&source_root);
-    let approved_lock = fs::read(source_root.join("Cargo.lock"))
-        .expect("read the tracked package-source dependency lock");
+    let approved_lock = package_workspace_support::PACKAGE_WORKSPACE_LOCK;
 
     let clean_workspace = temporary.path().join("clean/workspace");
     let clean_revisions = extract_workspace(&archives, &clean_workspace, &source_root);
@@ -182,8 +181,8 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
 
     let cargo_home = temporary.path().join("isolated-cargo-home");
     fs::create_dir_all(&cargo_home).expect("create isolated Cargo home");
-    seed_extracted_lock(&clean_workspace, &approved_lock);
-    seed_extracted_lock(&hostile_workspace, &approved_lock);
+    seed_extracted_lock(&clean_workspace, approved_lock);
+    seed_extracted_lock(&hostile_workspace, approved_lock);
     run_extracted_suite(
         "clean extracted workspace",
         &clean_workspace,
@@ -469,7 +468,8 @@ fn run_extracted_suite(
 
 fn seed_extracted_lock(workspace: &Path, approved_lock: &[u8]) {
     // Cargo packages carry closure-specific locks. The combined extracted
-    // workspace must use the tracked all-package graph validated by --locked.
+    // workspace uses its own tracked package-only graph, excluding
+    // source-workspace tests and their unpublished development dependencies.
     fs::write(workspace.join("Cargo.lock"), approved_lock)
         .unwrap_or_else(|error| panic!("seed {} workspace lock: {error}", workspace.display()));
 }
