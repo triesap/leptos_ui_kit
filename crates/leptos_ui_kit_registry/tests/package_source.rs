@@ -159,8 +159,8 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
 
     let cargo_home = temporary.path().join("isolated-cargo-home");
     fs::create_dir_all(&cargo_home).expect("create isolated Cargo home");
-    seed_extracted_lock(&clean_workspace, &approved_lock);
-    seed_extracted_lock(&hostile_workspace, &approved_lock);
+    seed_extracted_lock(&clean_workspace, approved_lock);
+    seed_extracted_lock(&hostile_workspace, approved_lock);
     run_extracted_suite(
         "clean extracted workspace",
         &clean_workspace,
