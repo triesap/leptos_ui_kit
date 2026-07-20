@@ -115,19 +115,19 @@ pub fn MenuContent(
                 return ().into_any();
             }
 
-            menu_surface(
+            menu_surface(MenuSurfaceProps {
                 node_ref,
                 content_id,
                 trigger_id,
                 content_class,
                 data_state,
-                placement.clone(),
-                transition_end.clone(),
-                transition_cancel.clone(),
-                animation_end.clone(),
-                animation_cancel.clone(),
+                placement: placement.clone(),
+                transition_end,
+                transition_cancel,
+                animation_end,
+                animation_cancel,
                 children,
-            )
+            })
             .into_any()
         }}
     }
@@ -158,7 +158,7 @@ fn target_is_trigger(
     false
 }
 
-fn menu_surface(
+struct MenuSurfaceProps {
     node_ref: NodeRef<html::Div>,
     content_id: Signal<String>,
     trigger_id: Signal<String>,
@@ -170,7 +170,22 @@ fn menu_surface(
     animation_end: Callback<leptos::ev::AnimationEvent>,
     animation_cancel: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
-) -> impl IntoView {
+}
+
+fn menu_surface(props: MenuSurfaceProps) -> impl IntoView {
+    let MenuSurfaceProps {
+        node_ref,
+        content_id,
+        trigger_id,
+        content_class,
+        data_state,
+        placement,
+        transition_end,
+        transition_cancel,
+        animation_end,
+        animation_cancel,
+        children,
+    } = props;
     let style_placement = placement.clone();
     let side_placement = placement.clone();
     let align_placement = placement.clone();

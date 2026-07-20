@@ -103,10 +103,10 @@ impl MenuContext {
         let node_ref = self
             .item_refs
             .with(|refs| refs.get(index).cloned().flatten());
-        if let Some(node_ref) = node_ref {
-            if let Some(element) = node_ref.get() {
-                let _ = element.focus();
-            }
+        if let Some(node_ref) = node_ref
+            && let Some(element) = node_ref.get()
+        {
+            let _ = element.focus();
         }
     }
 
