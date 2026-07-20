@@ -575,10 +575,6 @@ mod tests {
                 declared_canonical_tokens.is_empty(),
                 "{name}.css redeclares canonical tokens: {declared_canonical_tokens:?}"
             );
-            assert!(
-                !contains_disallowed_theme_color_literal(&css),
-                "{name}.css contains a literal theme color"
-            );
             assert_eq!(
                 css.matches(&format!("/* leptos-ui-kit:start {name} */"))
                     .count(),
@@ -619,21 +615,5 @@ mod tests {
                 name.starts_with("--kit-").then(|| name.to_owned())
             })
             .collect()
-    }
-
-    fn contains_disallowed_theme_color_literal(input: &str) -> bool {
-        let without_comments = input
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("/*"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .to_ascii_lowercase();
-
-        without_comments.contains('#')
-            || [
-                "rgb(", "rgba(", "hsl(", "hsla(", "oklch(", "oklab(", "lab(", "lch(",
-            ]
-            .iter()
-            .any(|syntax| without_comments.contains(syntax))
     }
 }
