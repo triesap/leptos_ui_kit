@@ -24,7 +24,7 @@ use crate::{
 
 pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.2.0";
 pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
-pub const WEB_UI_PRIMITIVES_GIT_REV: &str = "a7ad19e203c08be19040154fa6bce909701d402f";
+pub const WEB_UI_PRIMITIVES_GIT_REV: &str = "b9eac0c1f393e43b015c0353930dca96fae2f5c4";
 pub const WEB_UI_PRIMITIVES_REQUIREMENT: &str = ">=0.2.0,<0.3.0";
 pub const PRESENCE_ABI_VERSION: u32 = 2;
 pub const LAYER_ABI_VERSION: u32 = 1;
@@ -2254,7 +2254,7 @@ mod tests {
                   "source": {
                     "kind": "git",
                     "url": "https://github.com/triesap/web_ui_primitives",
-                    "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
+                    "rev": "b9eac0c1f393e43b015c0353930dca96fae2f5c4"
                   },
                   "features": ["leptos"],
                   "required": true

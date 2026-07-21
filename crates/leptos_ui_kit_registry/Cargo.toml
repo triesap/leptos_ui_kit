@@ -123,7 +123,7 @@ flate2 = "1"
 jsonschema.workspace = true
 tar = "0.4"
 tempfile.workspace = true
-web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "a7ad19e203c08be19040154fa6bce909701d402f", features = ["leptos"] }
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "b9eac0c1f393e43b015c0353930dca96fae2f5c4", features = ["leptos"] }
 
 [lints]
 workspace = true

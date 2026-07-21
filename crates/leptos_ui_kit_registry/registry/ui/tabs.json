@@ -131,7 +131,7 @@
       "source": {
         "kind": "git",
         "url": "https://github.com/triesap/web_ui_primitives",
-        "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
+        "rev": "b9eac0c1f393e43b015c0353930dca96fae2f5c4"
       },
       "features": [
         "core",

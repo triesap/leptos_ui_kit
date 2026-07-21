@@ -9,7 +9,7 @@ use std::{
 use sha2::{Digest, Sha256};
 
 const HOMEPAGE_FIXTURE_HASH: &str =
-    "sha256:2a9cef901aaa9b3eb80eeb871fa6f4bc3d2f3de829061f6f07b7e41d0dfc8a3b";
+    "sha256:c697e9bbef09d504f4f005e3f1758d05fe7395370c9d5a0254790fee4d3504fd";
 const LEGACY_CSS_FIXTURE_HASH: &str =
     "sha256:c8f6e65600002ab6348bade77b9f2029c101ff9ec7468bca775a57ff2de604ae";
 
