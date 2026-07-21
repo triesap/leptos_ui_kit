@@ -6827,15 +6827,9 @@ fn add_tokens_updates_only_css_config_and_lock() {
 }
 
 #[test]
-fn packaged_css_fixtures_match_workspace_canonical_copies_when_present() {
-    let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/theme_pre_refactor_06124efa");
-    if !canonical
-        .try_exists()
-        .expect("inspect canonical fixture root")
-    {
-        return;
-    }
+fn packaged_css_fixtures_match_package_local_copies() {
+    let canonical =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/theme_pre_refactor_06124efa");
     assert!(
         canonical.is_dir(),
         "canonical fixture root must be a directory"
