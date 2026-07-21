@@ -130,7 +130,7 @@ const PACKAGES: [PackageSpec; 6] = [
         name: "leptos_ui_kit_codegen",
         path_in_vcs: "crates/leptos_ui_kit_codegen",
         files: &CODEGEN_FILES,
-        expected_file_count: 40,
+        expected_file_count: 43,
     },
     PackageSpec {
         name: "leptos_ui_kit_codegen_platform",
