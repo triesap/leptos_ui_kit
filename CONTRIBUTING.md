@@ -19,7 +19,7 @@ cargo test --workspace --all-targets
 ```
 
 Transaction changes must also keep the codegen all-target suite green on
-Linux, macOS, and Windows. The repository workflow runs that portable matrix.
+Linux, macOS, and Windows.
 
 ## Packaging validation
 
