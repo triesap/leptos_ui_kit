@@ -111,8 +111,6 @@ Use these root files for public project documentation:
 
 - `README.md`
 - `CONTRIBUTING.md`
-- `CHANGELOG.md`
-- `SECURITY.md`
 - `AGENTS.md`
 
 Do not add repo-local coordination database state.
