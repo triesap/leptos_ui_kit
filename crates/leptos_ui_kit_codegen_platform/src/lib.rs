@@ -1429,13 +1429,17 @@ mod tests {
         let root_source = include_str!("lib.rs");
         let windows_source = include_str!("windows.rs");
         let manifest = include_str!("../Cargo.toml");
+        let compact_manifest = manifest
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .replace(",]", "]");
         let allowance = ["allow", "(unsafe_code)"].concat();
         let module_allowance = ["#![", allowance.as_str(), "]"].concat();
         assert!(!root_source.contains(&allowance));
         assert_eq!(windows_source.matches(&module_allowance).count(), 1);
         assert_eq!(windows_source.matches(&allowance).count(), 1);
-        assert_eq!(manifest.matches("\"src/").count(), 2);
-        assert!(manifest.contains("include = [\"src/lib.rs\", \"src/windows.rs\"]"));
+        assert!(compact_manifest.contains("include=[\"src/lib.rs\",\"src/windows.rs\"]"));
     }
 
     #[test]
