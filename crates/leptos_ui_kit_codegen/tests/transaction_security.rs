@@ -8,7 +8,7 @@ use std::{
 
 use leptos_ui_kit_codegen::{
     CodegenError, DEFAULT_KIT_WRITE_LOCK_PATH, PathPreimage, WriteLock, apply_add, apply_init,
-    apply_sync, plan_add, plan_init, plan_sync, write_file_atomic,
+    apply_sync, parse_install_lock_str, plan_add, plan_init, plan_sync, write_file_atomic,
 };
 use tempfile::tempdir;
 
@@ -38,8 +38,13 @@ fn init_snapshot_is_exact_sorted_and_dry_run_is_write_free() {
     assert_eq!(tree_snapshot(directory.path()), before);
     assert!(!directory.path().join(KIT_GITIGNORE_PATH).exists());
     assert!(!directory.path().join(DEFAULT_KIT_WRITE_LOCK_PATH).exists());
-    assert_eq!(observation_paths(&plan.snapshot), expected_init_paths());
-    assert_eq!(plan.snapshot.len(), INIT_OBSERVATIONS.len());
+    let expected = expected_init_paths(
+        plan.files
+            .iter()
+            .any(|file| file.path == "src/components/ui/_kit/theme-integration.json"),
+    );
+    assert_eq!(observation_paths(&plan.snapshot), expected);
+    assert_eq!(plan.snapshot.len(), expected.len());
     assert!(matches!(
         plan.snapshot.preimage("index.html"),
         Some(PathPreimage::RegularFile { .. })
@@ -94,15 +99,40 @@ fn unchanged_init_and_sync_inputs_still_have_exact_preimages() {
 
     let init = plan_init(directory.path()).expect("plan unchanged init");
     let sync = plan_sync(directory.path()).expect("plan unchanged sync");
+    let installed_lock = parse_install_lock_str(
+        &fs::read_to_string(
+            directory
+                .path()
+                .join("src/components/ui/_kit/kit.lock.json"),
+        )
+        .expect("read install lock"),
+    )
+    .expect("parse install lock");
+    let has_theme_integration = installed_lock.theme_integration.is_some();
 
     assert!(init.files.is_empty());
-    assert_eq!(observation_paths(&init.snapshot), expected_init_paths());
-    assert_eq!(observation_paths(&sync.snapshot), expected_init_paths());
+    assert_eq!(
+        observation_paths(&init.snapshot),
+        expected_init_paths(has_theme_integration)
+    );
+    let expected_sync = expected_init_paths(true);
+    assert_eq!(observation_paths(&sync.snapshot), expected_sync);
     for path in INIT_OBSERVATIONS {
         assert!(matches!(
             sync.snapshot.preimage(path),
             Some(PathPreimage::RegularFile { .. })
         ));
+    }
+    for path in [
+        "src/components/ui/_kit/theme-integration.json",
+        "src/components/ui/_kit/token-contract.json",
+    ] {
+        let preimage = sync.snapshot.preimage(path);
+        if has_theme_integration {
+            assert!(matches!(preimage, Some(PathPreimage::RegularFile { .. })));
+        } else {
+            assert_eq!(preimage, Some(&PathPreimage::Absent));
+        }
     }
 }
 
@@ -484,7 +514,7 @@ fn add_snapshot_covers_dependency_sources_and_every_planned_target() {
     let paths = observation_paths(&plan.snapshot);
 
     assert_strictly_sorted(&paths);
-    for path in expected_init_paths() {
+    for path in expected_init_paths(plan.lock.theme_integration.is_some()) {
         assert!(paths.contains(&path), "missing common observation {path}");
     }
     assert!(paths.contains(&"src/components/ui/button.rs"));
@@ -544,7 +574,7 @@ fn sync_snapshot_covers_installed_items_nested_targets_and_dependency_closure() 
     assert!(paths.contains(&"src/components/ui/dialog/root.rs"));
     assert!(paths.contains(&"src/components/ui/dialog/description.rs"));
 
-    let mut expected = INIT_OBSERVATIONS
+    let mut expected = expected_init_paths(plan.lock.theme_integration.is_some())
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -1121,10 +1151,16 @@ fn assert_exact_coordination_residual(root: &Path) {
         })
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(
-        names,
-        vec![".gitignore", ".write.lock", "kit.json", "kit.lock.json",]
-    );
+    let lock = parse_install_lock_str(
+        &fs::read_to_string(root.join("src/components/ui/_kit/kit.lock.json"))
+            .expect("read install lock"),
+    )
+    .expect("parse install lock");
+    let mut expected_names = vec![".gitignore", ".write.lock", "kit.json", "kit.lock.json"];
+    if lock.theme_integration.is_some() {
+        expected_names.extend(["theme-integration.json", "token-contract.json"]);
+    }
+    assert_eq!(names, expected_names);
     let transactions = coordination_dir.join(".transactions");
     assert!(
         !transactions.exists(),
@@ -1239,8 +1275,16 @@ fn setup_project(root: &Path) {
     .expect("write index");
 }
 
-fn expected_init_paths() -> Vec<&'static str> {
-    INIT_OBSERVATIONS.to_vec()
+fn expected_init_paths(has_theme_integration: bool) -> Vec<&'static str> {
+    let mut paths = INIT_OBSERVATIONS.to_vec();
+    if has_theme_integration {
+        paths.extend([
+            "src/components/ui/_kit/theme-integration.json",
+            "src/components/ui/_kit/token-contract.json",
+        ]);
+        paths.sort_unstable();
+    }
+    paths
 }
 
 fn observation_paths(snapshot: &leptos_ui_kit_codegen::PlanSnapshot) -> Vec<&str> {
