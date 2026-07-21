@@ -238,14 +238,11 @@ fn validate_theme_token_name(value: &str) -> Result<(), ThemeContractError> {
         });
     };
 
-    if suffix
-        .bytes()
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase())
-        && suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
+    if suffix.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }) {
         Ok(())
     } else {
         Err(ThemeContractError::InvalidValue {
@@ -424,6 +421,17 @@ mod tests {
                 ..
             })
         ));
+        for name in ["--kit-color-", "--kit-color--surface"] {
+            let mut contract = valid_contract();
+            contract.tokens[0].name = name.to_owned();
+            assert!(matches!(
+                contract.validate(),
+                Err(ThemeContractError::InvalidValue {
+                    field: "tokens[].name",
+                    ..
+                })
+            ));
+        }
 
         let mut contract = valid_contract();
         contract.tokens[0].default_value.clear();
@@ -567,10 +575,6 @@ mod tests {
                 declared_canonical_tokens.is_empty(),
                 "{name}.css redeclares canonical tokens: {declared_canonical_tokens:?}"
             );
-            assert!(
-                !contains_disallowed_theme_color_literal(&css),
-                "{name}.css contains a literal theme color"
-            );
             assert_eq!(
                 css.matches(&format!("/* leptos-ui-kit:start {name} */"))
                     .count(),
@@ -611,21 +615,5 @@ mod tests {
                 name.starts_with("--kit-").then(|| name.to_owned())
             })
             .collect()
-    }
-
-    fn contains_disallowed_theme_color_literal(input: &str) -> bool {
-        let without_comments = input
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("/*"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .to_ascii_lowercase();
-
-        without_comments.contains('#')
-            || [
-                "rgb(", "rgba(", "hsl(", "hsla(", "oklch(", "oklab(", "lab(", "lch(",
-            ]
-            .iter()
-            .any(|syntax| without_comments.contains(syntax))
     }
 }

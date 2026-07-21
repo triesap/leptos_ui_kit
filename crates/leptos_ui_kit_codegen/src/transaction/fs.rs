@@ -196,6 +196,48 @@ pub(crate) const fn exact_identity_support() -> ExactIdentitySupport {
     ExactIdentitySupport::Complete
 }
 
+pub(crate) fn opened_directory_identity(directory: &Dir) -> io::Result<ObjectIdentity> {
+    let metadata = directory.dir_metadata()?;
+    ensure_directory_metadata(&metadata, Path::new("directory capability"))?;
+    #[cfg(windows)]
+    {
+        let capability = leptos_ui_kit_codegen_platform::adopt_root_directory(
+            directory.try_clone()?.into_std_file(),
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        Ok(ObjectIdentity::from_windows(capability.identity()))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ObjectIdentity::from_unix(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ))
+    }
+}
+
+pub(crate) fn opened_regular_file_identity(file: &File) -> io::Result<ObjectIdentity> {
+    let metadata = file.metadata()?;
+    ensure_regular_metadata(&metadata, Path::new("controlled file"))?;
+    #[cfg(windows)]
+    {
+        let capability = leptos_ui_kit_codegen_platform::adopt_object(
+            file.try_clone()?.into_std(),
+            leptos_ui_kit_codegen_platform::ObjectKind::RegularFile,
+            leptos_ui_kit_codegen_platform::CapabilityAccess::Inspect,
+        )
+        .map_err(leptos_ui_kit_codegen_platform::AdoptionError::into_error)?;
+        Ok(ObjectIdentity::from_windows(capability.identity()))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(ObjectIdentity::from_unix(
+            MetadataExt::dev(&metadata),
+            MetadataExt::ino(&metadata),
+        ))
+    }
+}
+
 #[cfg(windows)]
 fn windows_adopt_directory(
     directory: &Dir,

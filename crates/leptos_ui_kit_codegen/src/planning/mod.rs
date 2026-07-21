@@ -9,6 +9,7 @@ pub use add::plan_add;
 pub(crate) use add::plan_add_with_config_writer;
 pub(crate) use add::plan_add_with_context;
 pub(crate) use files::*;
+pub(crate) use init::plan_add_prerequisites_with_context;
 pub use init::plan_init;
 #[cfg(test)]
 pub(crate) use init::plan_init_with_config_provider;
@@ -16,7 +17,11 @@ pub(crate) use init::plan_init_with_context;
 pub use sync::plan_sync;
 pub(crate) use sync::plan_sync_with_context;
 #[cfg(test)]
-pub(crate) use sync::{plan_built_in_item, plan_sync_with_config_writer};
+pub(crate) use sync::{
+    ItemLockTransition, ManagedStylesheetProjection, plan_built_in_item,
+    plan_desired_ownership_cohort, plan_managed_stylesheet_batch_with_retirements,
+    plan_sync_with_config_writer, project_desired_state,
+};
 pub(crate) use sync::{plan_sync_from_config, prepare_kit_config_write};
 
 use std::path::PathBuf;

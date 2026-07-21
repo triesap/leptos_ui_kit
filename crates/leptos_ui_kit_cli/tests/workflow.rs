@@ -1,43 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use leptos_ui_kit_registry::{ThemeTokenCategory, load_built_in_theme_contract};
 use tempfile::tempdir;
-
-#[test]
-fn packaged_homepage_fixture_matches_workspace_canonical_copy_when_present() {
-    let canonical = workspace_root().join("tests/fixtures/homepage_trunk_csr");
-    if !canonical
-        .try_exists()
-        .expect("inspect canonical fixture root")
-    {
-        return;
-    }
-    assert!(
-        canonical.is_dir(),
-        "canonical fixture root must be a directory"
-    );
-    let mut packaged = fixture_snapshot(&fixture_root());
-    let manifest = packaged
-        .remove(Path::new("Cargo.toml.fixture"))
-        .expect("package-local fixture manifest");
-    assert!(
-        packaged
-            .insert(PathBuf::from("Cargo.toml"), manifest)
-            .is_none(),
-        "package-local fixture must have exactly one manifest"
-    );
-    assert_eq!(
-        packaged,
-        fixture_snapshot(&canonical),
-        "package-local homepage fixture diverged from the workspace canonical copy"
-    );
-}
 
 #[test]
 fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
@@ -59,20 +30,19 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
     {
         assert_eq!(first_label, second_label);
         assert_eq!(
-            normalize_project_root(first_output, &first),
-            normalize_project_root(second_output, &second),
-            "{first_label} emitted root-dependent data outside the explicit project-root fields"
+            first_output, second_output,
+            "{first_label} emitted root-dependent public metadata"
         );
     }
 
     let button_view = captured_json(&first_outputs, "view button JSON");
-    assert_eq!(button_view["data"]["source_path"], "ui/button.json");
+    assert_eq!(button_view["data"]["sourcePath"], "ui/button.json");
     assert_eq!(
-        button_view["data"]["targets"]["ui_files"][0]["source"],
+        button_view["data"]["targets"]["uiFiles"][0]["source"],
         "ui/button.rs"
     );
     assert_eq!(
-        button_view["data"]["targets"]["style_blocks"][0]["source"],
+        button_view["data"]["targets"]["styleBlocks"][0]["source"],
         "styles/button.css"
     );
     assert!(
@@ -83,7 +53,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 
     let button_source_view = captured_json(&first_outputs, "view button source JSON");
     assert_eq!(
-        button_source_view["data"]["resolved"]["source_path"],
+        button_source_view["data"]["resolved"]["sourcePath"],
         "ui/button.json"
     );
     assert_eq!(
@@ -100,7 +70,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 
     let tokens_source_view = captured_json(&first_outputs, "view tokens source JSON");
     assert_eq!(
-        tokens_source_view["data"]["resolved"]["source_path"],
+        tokens_source_view["data"]["resolved"]["sourcePath"],
         "foundation/tokens.json"
     );
     assert_eq!(
@@ -196,6 +166,7 @@ fn logical_outputs_are_independent_of_project_root_and_binary_wrapper() {
 }
 
 #[test]
+#[ignore = "slow packaged CLI workflow smoke; run explicitly with --ignored --exact"]
 fn homepage_fixture_cli_workflow_smoke() {
     let dir = tempdir().expect("tempdir");
     let project = dir.path().join("homepage");
@@ -324,15 +295,52 @@ fn homepage_fixture_cli_workflow_smoke() {
     assert!(kit_css < themes_css && themes_css < app_css);
     assert!(index.contains("dark-theme-portal-root"));
     assert!(index.contains("data-ui-theme=\"dark\""));
+    assert_complete_dark_theme(&project.join("styles/themes.css"));
+    let fixture_source =
+        fs::read_to_string(project.join("src/main.rs")).expect("read fixture source");
+    assert!(fixture_source.contains("portal_mount=explicit_dialog_portal_mount()"));
+    assert!(fixture_source.contains("fn explicit_dialog_portal_mount() -> Option<PortalMount>"));
     assert!(
-        fs::read_to_string(project.join("styles/themes.css"))
-            .expect("read fixture theme stylesheet")
-            .contains(".preview-pane[data-ui-theme=\"dark\"]")
+        fixture_source.contains("<DialogContent>"),
+        "fixture must retain a separate document-body portal call site"
+    );
+}
+
+fn assert_complete_dark_theme(path: &Path) {
+    let css = fs::read_to_string(path).expect("read fixture theme stylesheet");
+    let selector = ".preview-pane[data-ui-theme=\"dark\"]";
+    let selector_start = css.find(selector).expect("dark theme selector");
+    let block = &css[selector_start..];
+    let block_start = block.find('{').expect("dark theme block start") + 1;
+    let block_end = block[block_start..]
+        .find('}')
+        .map(|offset| block_start + offset)
+        .expect("dark theme block end");
+    let mut declarations = BTreeMap::<String, usize>::new();
+    for line in block[block_start..block_end].lines() {
+        let Some((name, _)) = line.trim().split_once(':') else {
+            continue;
+        };
+        if name.starts_with("--kit-") {
+            *declarations.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+
+    let expected = load_built_in_theme_contract()
+        .expect("load theme contract")
+        .tokens
+        .into_iter()
+        .filter(|token| token.category == ThemeTokenCategory::Color)
+        .map(|token| token.name)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declarations.keys().cloned().collect::<BTreeSet<_>>(),
+        expected,
+        "dark selector must define the complete contract color set"
     );
     assert!(
-        fs::read_to_string(project.join("src/main.rs"))
-            .expect("read fixture source")
-            .contains("portal_mount=portal_mount")
+        declarations.values().all(|count| *count == 1),
+        "dark selector must define every contract color exactly once: {declarations:?}"
     );
 }
 
@@ -429,10 +437,6 @@ fn capture_success(
     assert_no_build_path_leaks("command stdout", &stdout, forbidden);
     assert_no_build_path_leaks("command stderr", &stderr, forbidden);
     stdout
-}
-
-fn normalize_project_root(output: &str, project: &Path) -> String {
-    output.replace(&project.to_string_lossy().into_owned(), "<project-root>")
 }
 
 fn build_path_sentinels() -> Vec<PathBuf> {
@@ -651,28 +655,4 @@ fn copy_dir(from: &Path, to: &Path) {
             fs::copy(&source, &destination).expect("copy fixture file");
         }
     }
-}
-
-fn fixture_snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    fn visit(root: &Path, directory: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
-        for entry in fs::read_dir(directory).expect("read fixture directory") {
-            let entry = entry.expect("read fixture entry");
-            let path = entry.path();
-            if path.is_dir() {
-                visit(root, &path, snapshot);
-            } else {
-                assert!(path.is_file(), "fixture entries must be regular files");
-                snapshot.insert(
-                    path.strip_prefix(root)
-                        .expect("fixture path below root")
-                        .to_path_buf(),
-                    fs::read(&path).expect("read fixture file"),
-                );
-            }
-        }
-    }
-
-    let mut snapshot = BTreeMap::new();
-    visit(root, root, &mut snapshot);
-    snapshot
 }

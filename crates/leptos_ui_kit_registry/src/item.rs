@@ -4,11 +4,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::Error as _,
+    ser::{Error as _, SerializeMap},
+};
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::{
-    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, SCHEMA_VERSION, THEME_CONTRACT_VERSION,
+    LEPTOS_ROUTER_VERSION, LEPTOS_VERSION, RenderMode, RenderModeContract, SCHEMA_VERSION,
+    THEME_CONTRACT_VERSION,
     builtin_registry::{
         BuiltInRegistryItemSnapshot, BuiltInRegistrySnapshot, SnapshotError,
         built_in_registry_snapshot,
@@ -16,7 +22,22 @@ use crate::{
     embedded_assets::{AssetProviderError, EmbeddedAssetKind},
 };
 
-pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.1.0";
+pub const WEB_UI_PRIMITIVES_VERSION: &str = "0.2.0";
+pub const WEB_UI_PRIMITIVES_GIT_URL: &str = "https://github.com/triesap/web_ui_primitives";
+pub const WEB_UI_PRIMITIVES_GIT_REV: &str = "a7ad19e203c08be19040154fa6bce909701d402f";
+pub const WEB_UI_PRIMITIVES_REQUIREMENT: &str = ">=0.2.0,<0.3.0";
+pub const PRESENCE_ABI_VERSION: u32 = 2;
+pub const LAYER_ABI_VERSION: u32 = 1;
+pub const PORTAL_ABI_VERSION: u32 = 1;
+pub const PORTAL_MOUNT_TYPE: &str = "web_ui_primitives::leptos::PortalMount";
+pub const PORTAL_PROPS_TYPE: &str = "web_ui_primitives::leptos::PortalProps";
+pub const IDENTITY_ABI_VERSION: u32 = 1;
+pub const IDENTITY_PROVIDER_TYPE: &str = "KitIdProvider";
+pub const LAYER_ORDER: [&str; 3] = [
+    "leptos-ui-kit.tokens",
+    "leptos-ui-kit.themes",
+    "leptos-ui-kit.components",
+];
 
 pub const REGISTRY_SCHEMA_URL: &str =
     "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry.schema.json";
@@ -369,6 +390,7 @@ pub struct RegistryRoot {
     pub schema: String,
     pub schema_version: String,
     pub name: String,
+    pub compatibility: RegistryCompatibility,
     pub items: Vec<RegistryRootItem>,
 }
 
@@ -377,11 +399,12 @@ impl RegistryRoot {
         expect_string("$schema", REGISTRY_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
         expect_string("name", "leptos-ui-kit", &self.name)?;
+        self.compatibility.validate()?;
 
         let mut names = BTreeSet::new();
         let mut paths = BTreeSet::new();
         for item in &self.items {
-            validate_item_name(&item.name)?;
+            validate_registry_item_name(&item.name)?;
             validate_registry_source_path_with_extension("items[].path", &item.path, "json")?;
             if !names.insert(item.name.clone()) {
                 return Err(RegistryError::DuplicateTarget(format!(
@@ -400,6 +423,99 @@ impl RegistryRoot {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryCompatibility {
+    pub leptos: RegistryLeptosCompatibility,
+    pub primitives: RegistryPrimitivesCompatibility,
+    pub identity_abi: RegistryIdentityCompatibility,
+    pub layer_abi: RegistryLayerCompatibility,
+    pub portal_abi: RegistryPortalCompatibility,
+}
+
+impl RegistryCompatibility {
+    pub fn canonical() -> Self {
+        Self {
+            leptos: RegistryLeptosCompatibility {
+                version: LEPTOS_VERSION.to_owned(),
+            },
+            primitives: RegistryPrimitivesCompatibility {
+                package: "web_ui_primitives".to_owned(),
+                requirement: WEB_UI_PRIMITIVES_REQUIREMENT.to_owned(),
+                version: WEB_UI_PRIMITIVES_VERSION.to_owned(),
+                presence_abi: PRESENCE_ABI_VERSION,
+            },
+            identity_abi: RegistryIdentityCompatibility {
+                version: IDENTITY_ABI_VERSION,
+                provider_type: IDENTITY_PROVIDER_TYPE.to_owned(),
+                owner_scoped_fallback: true,
+            },
+            layer_abi: RegistryLayerCompatibility {
+                version: LAYER_ABI_VERSION,
+                order: LAYER_ORDER.map(str::to_owned).to_vec(),
+            },
+            portal_abi: RegistryPortalCompatibility {
+                version: PORTAL_ABI_VERSION,
+                mount_type: PORTAL_MOUNT_TYPE.to_owned(),
+                props_type: PORTAL_PROPS_TYPE.to_owned(),
+                body_host: true,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), RegistryError> {
+        let expected = Self::canonical();
+        if self == &expected {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "compatibility",
+                expected: format!("{expected:?}"),
+                actual: format!("{self:?}"),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryLeptosCompatibility {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryPrimitivesCompatibility {
+    pub package: String,
+    pub requirement: String,
+    pub version: String,
+    pub presence_abi: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryIdentityCompatibility {
+    pub version: u32,
+    pub provider_type: String,
+    pub owner_scoped_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryLayerCompatibility {
+    pub version: u32,
+    pub order: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistryPortalCompatibility {
+    pub version: u32,
+    pub mount_type: String,
+    pub props_type: String,
+    pub body_host: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,7 +552,7 @@ impl RegistryItem {
     pub fn validate(&self) -> Result<(), RegistryError> {
         expect_string("$schema", REGISTRY_ITEM_SCHEMA_URL, &self.schema)?;
         expect_string("schemaVersion", SCHEMA_VERSION, &self.schema_version)?;
-        validate_item_name(&self.name)?;
+        validate_registry_item_name(&self.name)?;
         expect_string("version", SCHEMA_VERSION, &self.version)?;
         validate_non_empty_string("title", &self.title)?;
         validate_non_empty_string("description", &self.description)?;
@@ -452,7 +568,7 @@ impl RegistryItem {
         }
 
         for style in &self.styles {
-            style.validate(&self.name)?;
+            style.validate()?;
             if !targets.insert(format!("css-block:{}", style.target.id)) {
                 return Err(RegistryError::DuplicateTarget(style.target.id.clone()));
             }
@@ -460,7 +576,7 @@ impl RegistryItem {
 
         let mut dependencies = BTreeSet::new();
         for dependency in &self.registry_dependencies {
-            validate_item_name(dependency)?;
+            validate_registry_item_name(dependency)?;
             if !dependencies.insert(dependency) {
                 return Err(RegistryError::InvalidValue {
                     field: "registryDependencies",
@@ -470,12 +586,32 @@ impl RegistryItem {
             }
         }
 
+        let mut cargo_crates = BTreeSet::new();
         for entry in &self.cargo_plan {
             entry.validate()?;
+            if !cargo_crates.insert(&entry.crate_name) {
+                return Err(RegistryError::InvalidValue {
+                    field: "cargoPlan[].crate",
+                    expected: "one entry per crate within a registry manifest".to_owned(),
+                    actual: entry.crate_name.clone(),
+                });
+            }
         }
 
         match self.kind {
-            RegistryItemKind::Ui => Ok(()),
+            RegistryItemKind::Ui => {
+                if self.styles.len() > 1 {
+                    return Err(RegistryError::InvalidValue {
+                        field: "styles",
+                        expected: "zero or one managed CSS style for a UI item".to_owned(),
+                        actual: format!("{} style targets", self.styles.len()),
+                    });
+                }
+                if let Some(style) = self.styles.first() {
+                    expect_string("styles[0].target.id", &self.name, &style.target.id)?;
+                }
+                Ok(())
+            }
             RegistryItemKind::Foundation => {
                 if !self.files.is_empty() {
                     return Err(RegistryError::InvalidValue {
@@ -490,6 +626,21 @@ impl RegistryItem {
                         expected: "at least one managed CSS style for a foundation item".to_owned(),
                         actual: "empty array".to_owned(),
                     });
+                }
+                expect_string("styles[0].target.id", &self.name, &self.styles[0].target.id)?;
+                let prefix = format!("{}-", self.name);
+                for style in self.styles.iter().skip(1) {
+                    let Some(suffix) = style.target.id.strip_prefix(&prefix) else {
+                        return Err(RegistryError::InvalidValue {
+                            field: "styles[].target.id",
+                            expected: format!(
+                                "{} followed by a nonempty kebab-case suffix",
+                                prefix
+                            ),
+                            actual: style.target.id.clone(),
+                        });
+                    };
+                    validate_kebab_name("styles[].target.id suffix", suffix)?;
                 }
                 Ok(())
             }
@@ -518,7 +669,14 @@ impl fmt::Display for RegistryItemKind {
 pub struct RegistryLeptos {
     pub version: String,
     pub router_version: String,
-    pub render_mode: RenderMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_modes: Vec<RenderMode>,
+    #[serde(
+        rename = "renderMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_render_mode: Option<RenderMode>,
 }
 
 impl RegistryLeptos {
@@ -528,7 +686,25 @@ impl RegistryLeptos {
             "leptos.routerVersion",
             LEPTOS_ROUTER_VERSION,
             &self.router_version,
-        )
+        )?;
+        let expected = vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr];
+        let canonical = self.render_modes == expected && self.legacy_render_mode.is_none();
+        let legacy =
+            self.render_modes.is_empty() && self.legacy_render_mode == Some(RenderMode::Csr);
+        if canonical || legacy {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "leptos render compatibility",
+                expected: format!(
+                    "renderModes {expected:?}, or the legacy renderMode Csr declaration"
+                ),
+                actual: format!(
+                    "renderModes {:?}, legacy renderMode {:?}",
+                    self.render_modes, self.legacy_render_mode
+                ),
+            })
+        }
     }
 }
 
@@ -618,9 +794,9 @@ pub struct RegistryItemStyle {
 }
 
 impl RegistryItemStyle {
-    fn validate(&self, item_name: &str) -> Result<(), RegistryError> {
+    fn validate(&self) -> Result<(), RegistryError> {
         validate_registry_source_path_with_extension("styles[].source", &self.source, "css")?;
-        self.target.validate(item_name)
+        self.target.validate()
     }
 }
 
@@ -632,8 +808,8 @@ pub struct RegistryStyleTarget {
 }
 
 impl RegistryStyleTarget {
-    fn validate(&self, item_name: &str) -> Result<(), RegistryError> {
-        expect_string("styles[].target.id", item_name, &self.id)
+    fn validate(&self) -> Result<(), RegistryError> {
+        validate_kebab_name("styles[].target.id", &self.id)
     }
 }
 
@@ -660,21 +836,17 @@ impl CargoPlanEntry {
         validate_features("cargoPlan[].features", &self.features)?;
 
         match self.crate_name.as_str() {
-            "leptos" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", LEPTOS_VERSION)?;
-                expect_features("cargoPlan[].features", &["csr"], &self.features)
-            }
-            "leptos_router" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", LEPTOS_ROUTER_VERSION)?;
-                expect_features("cargoPlan[].features", &[], &self.features)
-            }
-            "web_ui_primitives" => {
-                self.source
-                    .expect_version("cargoPlan[].source.version", WEB_UI_PRIMITIVES_VERSION)?;
-                expect_features("cargoPlan[].features", &["leptos"], &self.features)
-            }
+            "leptos" => self
+                .source
+                .expect_current_version_if_version(LEPTOS_VERSION),
+            "leptos_router" => self
+                .source
+                .expect_current_version_if_version(LEPTOS_ROUTER_VERSION),
+            "web_ui_primitives" => self.source.expect_git(
+                "cargoPlan[].source",
+                WEB_UI_PRIMITIVES_GIT_URL,
+                WEB_UI_PRIMITIVES_GIT_REV,
+            ),
             value => Err(RegistryError::InvalidValue {
                 field: "cargoPlan[].crate",
                 expected: "leptos, leptos_router, or web_ui_primitives".to_owned(),
@@ -684,15 +856,11 @@ impl CargoPlanEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CargoPlanSource {
     pub kind: CargoPlanSourceKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
 }
 
@@ -715,58 +883,318 @@ impl CargoPlanSource {
         }
     }
 
-    fn validate(&self) -> Result<(), RegistryError> {
+    pub fn normalized(&self) -> Result<Self, RegistryError> {
         match self.kind {
             CargoPlanSourceKind::Version => {
                 if self.url.is_some() || self.rev.is_some() {
-                    return Err(RegistryError::InvalidValue {
-                        field: "cargoPlan[].source",
-                        expected: "version source without url or rev".to_owned(),
-                        actual: format!("{self:?}"),
-                    });
+                    return Err(invalid_cargo_source(
+                        "version source without url or rev",
+                        self,
+                    ));
                 }
-                if self.version.as_deref().is_none_or(str::is_empty) {
+                let Some(version) = self.version.as_deref() else {
                     return Err(RegistryError::InvalidValue {
                         field: "cargoPlan[].source.version",
-                        expected: "non-empty version".to_owned(),
-                        actual: String::new(),
+                        expected: "nonblank version".to_owned(),
+                        actual: "missing".to_owned(),
                     });
-                }
-                Ok(())
+                };
+                validate_non_empty_string("cargoPlan[].source.version", version)?;
+                Ok(Self::version(version))
             }
             CargoPlanSourceKind::Git => {
                 if self.version.is_some() {
-                    return Err(RegistryError::InvalidValue {
-                        field: "cargoPlan[].source",
-                        expected: "git source without version".to_owned(),
-                        actual: format!("{self:?}"),
-                    });
+                    return Err(invalid_cargo_source("git source without version", self));
                 }
-                if self.url.as_deref().is_none_or(str::is_empty) {
+                let Some(url) = self.url.as_deref() else {
                     return Err(RegistryError::InvalidValue {
                         field: "cargoPlan[].source.url",
-                        expected: "non-empty git url".to_owned(),
-                        actual: String::new(),
+                        expected: "canonical absolute HTTPS or SSH repository URL".to_owned(),
+                        actual: "missing".to_owned(),
                     });
-                }
-                let rev = self.rev.as_deref().unwrap_or_default();
-                validate_git_rev("cargoPlan[].source.rev", rev)
+                };
+                let Some(rev) = self.rev.as_deref() else {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source.rev",
+                        expected: "lowercase full 40-hex revision".to_owned(),
+                        actual: "missing".to_owned(),
+                    });
+                };
+                Ok(Self::git(normalize_git_url(url)?, normalize_git_rev(rev)?))
             }
         }
     }
 
-    fn expect_version(&self, field: &'static str, expected: &str) -> Result<(), RegistryError> {
-        match (self.kind, self.version.as_deref()) {
-            (CargoPlanSourceKind::Version, Some(version)) => {
-                expect_string(field, expected, version)
+    fn validate(&self) -> Result<(), RegistryError> {
+        if &self.normalized()? == self {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidValue {
+                field: "cargoPlan[].source",
+                expected: "canonical Cargo source".to_owned(),
+                actual: format!("{self:?}"),
+            })
+        }
+    }
+
+    fn expect_current_version_if_version(&self, expected: &str) -> Result<(), RegistryError> {
+        match self.kind {
+            CargoPlanSourceKind::Version => expect_string(
+                "cargoPlan[].source.version",
+                expected,
+                self.version.as_deref().unwrap_or_default(),
+            ),
+            CargoPlanSourceKind::Git => Ok(()),
+        }
+    }
+
+    fn expect_git(
+        &self,
+        field: &'static str,
+        expected_url: &str,
+        expected_rev: &str,
+    ) -> Result<(), RegistryError> {
+        match (self.kind, self.url.as_deref(), self.rev.as_deref()) {
+            (CargoPlanSourceKind::Git, Some(url), Some(rev))
+                if url == expected_url && rev == expected_rev =>
+            {
+                Ok(())
             }
             _ => Err(RegistryError::InvalidValue {
                 field,
-                expected: expected.to_owned(),
+                expected: format!("git source {expected_url} at revision {expected_rev}"),
                 actual: format!("{self:?}"),
             }),
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum StrictCargoPlanSource {
+    Version { version: String },
+    Git { url: String, rev: String },
+}
+
+impl Serialize for CargoPlanSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let normalized = self.normalized().map_err(S::Error::custom)?;
+        let mut map = serializer.serialize_map(Some(match normalized.kind {
+            CargoPlanSourceKind::Version => 2,
+            CargoPlanSourceKind::Git => 3,
+        }))?;
+        match normalized.kind {
+            CargoPlanSourceKind::Version => {
+                map.serialize_entry("kind", "version")?;
+                map.serialize_entry(
+                    "version",
+                    normalized
+                        .version
+                        .as_deref()
+                        .expect("normalized version source has a version"),
+                )?;
+            }
+            CargoPlanSourceKind::Git => {
+                map.serialize_entry("kind", "git")?;
+                map.serialize_entry(
+                    "url",
+                    normalized
+                        .url
+                        .as_deref()
+                        .expect("normalized git source has a URL"),
+                )?;
+                map.serialize_entry(
+                    "rev",
+                    normalized
+                        .rev
+                        .as_deref()
+                        .expect("normalized git source has a revision"),
+                )?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CargoPlanSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let strict = StrictCargoPlanSource::deserialize(deserializer)?;
+        let source = match strict {
+            StrictCargoPlanSource::Version { version } => Self::version(version),
+            StrictCargoPlanSource::Git { url, rev } => Self::git(url, rev),
+        };
+        source.normalized().map_err(D::Error::custom)
+    }
+}
+
+fn invalid_cargo_source(expected: &str, source: &CargoPlanSource) -> RegistryError {
+    RegistryError::InvalidValue {
+        field: "cargoPlan[].source",
+        expected: expected.to_owned(),
+        actual: format!("{source:?}"),
+    }
+}
+
+fn normalize_git_rev(rev: &str) -> Result<String, RegistryError> {
+    if rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(rev.to_ascii_lowercase())
+    } else {
+        Err(RegistryError::InvalidValue {
+            field: "cargoPlan[].source.rev",
+            expected: "lowercase full 40-hex revision".to_owned(),
+            actual: rev.to_owned(),
+        })
+    }
+}
+
+fn normalize_git_url(input: &str) -> Result<String, RegistryError> {
+    let invalid = || RegistryError::InvalidValue {
+        field: "cargoPlan[].source.url",
+        expected: "canonical absolute HTTPS or SSH repository URL".to_owned(),
+        actual: input.to_owned(),
+    };
+    if input.is_empty()
+        || !input.is_ascii()
+        || input
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || input.contains(['%', '\\', '?', '#'])
+    {
+        return Err(invalid());
+    }
+
+    let (raw_authority, raw_path) = input
+        .split_once("://")
+        .and_then(|(_, authority_and_path)| {
+            authority_and_path
+                .find('/')
+                .map(|at| (&authority_and_path[..at], &authority_and_path[at + 1..]))
+        })
+        .ok_or_else(invalid)?;
+    let raw_segments = raw_path.split('/').collect::<Vec<_>>();
+    if raw_segments.is_empty()
+        || raw_segments.iter().enumerate().any(|(index, segment)| {
+            segment.is_empty() && index + 1 != raw_segments.len() || matches!(*segment, "." | "..")
+        })
+        || raw_segments
+            .last()
+            .is_some_and(|segment| segment.is_empty())
+            && raw_segments.len() == 1
+    {
+        return Err(invalid());
+    }
+
+    let parsed = Url::parse(input).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "https" | "ssh")
+        || parsed.host_str().is_none_or(str::is_empty)
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || raw_authority.matches('@').count() > 1
+        || (parsed.scheme() == "https" && raw_authority.contains('@'))
+        || (parsed.scheme() == "ssh"
+            && raw_authority
+                .split_once('@')
+                .is_some_and(|(username, _)| username.is_empty()))
+    {
+        return Err(invalid());
+    }
+
+    let path = parsed.path();
+    if path == "/" || !path.starts_with('/') {
+        return Err(invalid());
+    }
+    let segments = path[1..].split('/').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments.iter().enumerate().any(|(index, segment)| {
+            segment.is_empty() && index + 1 != segments.len() || matches!(*segment, "." | "..")
+        })
+        || segments.last().is_some_and(|segment| segment.is_empty()) && segments.len() == 1
+    {
+        return Err(invalid());
+    }
+
+    let mut normalized = parsed;
+    let normalized_host = normalized
+        .host_str()
+        .expect("validated URL has a host")
+        .to_ascii_lowercase();
+    normalized
+        .set_host(Some(&normalized_host))
+        .map_err(|_| invalid())?;
+    if matches!(
+        (normalized.scheme(), normalized.port()),
+        ("https", Some(443)) | ("ssh", Some(22))
+    ) {
+        normalized.set_port(None).map_err(|()| invalid())?;
+    }
+    if normalized.path().ends_with('/') {
+        let path = normalized.path().trim_end_matches('/').to_owned();
+        normalized.set_path(&path);
+    }
+    Ok(normalized.to_string())
+}
+
+pub fn normalize_cargo_plan(
+    entries: &[CargoPlanEntry],
+) -> Result<Vec<CargoPlanEntry>, RegistryError> {
+    let mut normalized = BTreeMap::<String, CargoPlanEntry>::new();
+    for entry in entries {
+        let mut entry = entry.clone();
+        entry.source = entry.source.normalized()?;
+        entry.features.sort();
+        entry.features.dedup();
+        entry.validate()?;
+
+        match normalized.entry(entry.crate_name.clone()) {
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+            }
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let current = occupied.get_mut();
+                if current.source != entry.source {
+                    return Err(RegistryError::InvalidValue {
+                        field: "cargoPlan[].source",
+                        expected: format!(
+                            "one identical normalized source for crate {}",
+                            current.crate_name
+                        ),
+                        actual: format!("{:?} versus {:?}", current.source, entry.source),
+                    });
+                }
+                current.required |= entry.required;
+                current.features.extend(entry.features);
+                current.features.sort();
+                current.features.dedup();
+            }
+        }
+    }
+    Ok(normalized.into_values().collect())
+}
+
+pub fn normalize_cargo_plan_for_project(
+    entries: &[CargoPlanEntry],
+    contract: RenderModeContract,
+) -> Result<Vec<CargoPlanEntry>, RegistryError> {
+    let mut projected = entries.to_vec();
+    for entry in &mut projected {
+        if !matches!(entry.crate_name.as_str(), "leptos" | "web_ui_primitives") {
+            continue;
+        }
+        entry
+            .features
+            .retain(|feature| !matches!(feature.as_str(), "csr" | "hydrate" | "ssr" | "islands"));
+        if let RenderModeContract::Selected(mode) = contract {
+            entry.features.push(mode.as_str().to_owned());
+        }
+    }
+    normalize_cargo_plan(&projected)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -810,11 +1238,44 @@ pub struct ResolvedStyleBlockTarget {
 }
 
 pub fn parse_registry_root_str(input: &str) -> Result<RegistryRoot, serde_json::Error> {
-    serde_json::from_str(input)
+    let root = parse_registry_root_raw_str(input)?;
+    root.validate()
+        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
+    Ok(root)
 }
 
 pub fn parse_registry_item_str(input: &str) -> Result<RegistryItem, serde_json::Error> {
+    let item = parse_registry_item_raw_str(input)?;
+    item.validate()
+        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
+    Ok(item)
+}
+
+pub(crate) fn parse_registry_root_raw_str(input: &str) -> Result<RegistryRoot, serde_json::Error> {
     serde_json::from_str(input)
+}
+
+pub(crate) fn parse_registry_item_raw_str(input: &str) -> Result<RegistryItem, serde_json::Error> {
+    serde_json::from_str(input)
+}
+
+pub fn validate_registry_manifest_identity(
+    root: &RegistryRoot,
+    manifest_path: &str,
+    item: &RegistryItem,
+) -> Result<(), RegistryError> {
+    root.validate()?;
+    item.validate()?;
+    let entry = root
+        .items
+        .iter()
+        .find(|entry| entry.path == manifest_path)
+        .ok_or_else(|| RegistryError::InvalidValue {
+            field: "manifest.path",
+            expected: "a path declared by the registry root".to_owned(),
+            actual: manifest_path.to_owned(),
+        })?;
+    expect_string("manifest.name", &entry.name, &item.name)
 }
 
 pub fn load_registry_item(
@@ -844,6 +1305,17 @@ pub fn read_built_in_registry_source(source: &str) -> Result<String, RegistryErr
     validate_registry_source_path("source", source)?;
     registry_snapshot()?
         .registry_source(source)
+        .map(str::to_owned)
+        .map_err(snapshot_error)
+}
+
+/// Reads one immutable built-in asset by its stable catalog-logical path.
+///
+/// Unlike [`read_built_in_registry_source`], this accepts the complete logical
+/// namespace, including public schemas and registry metadata.
+pub fn read_built_in_asset(logical_path: &str) -> Result<String, RegistryError> {
+    registry_snapshot()?
+        .logical_asset(logical_path)
         .map(str::to_owned)
         .map_err(snapshot_error)
 }
@@ -1008,7 +1480,7 @@ fn parse_built_in_item_from_root(
     }
 
     let item = parse_registry_item_file(&path)?;
-    validate_registry_root_item_identity(entry, &item)?;
+    validate_registry_manifest_identity(root, &entry.path, &item)?;
 
     Ok((item, path))
 }
@@ -1080,7 +1552,8 @@ fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryErro
         leptos: RegistryLeptos {
             version: LEPTOS_VERSION.to_owned(),
             router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-            render_mode: RenderMode::Csr,
+            render_modes: vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr],
+            legacy_render_mode: None,
         },
         accessibility: RegistryAccessibility::default(),
         files: Vec::new(),
@@ -1110,6 +1583,8 @@ fn validate_built_in_tokens_item(item: &RegistryItem) -> Result<(), RegistryErro
 pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, RegistryError> {
     let mut by_name = BTreeMap::new();
     let mut targets = BTreeSet::new();
+    let mut sources = BTreeSet::new();
+    let mut exports = BTreeSet::new();
 
     for item in items {
         item.validate()?;
@@ -1121,68 +1596,82 @@ pub fn validate_registry_graph(items: &[RegistryItem]) -> Result<Vec<String>, Re
         }
 
         for file in &item.files {
+            if !sources.insert(file.source.clone()) {
+                return Err(RegistryError::DuplicateTarget(format!(
+                    "source:{}",
+                    file.source
+                )));
+            }
             if !targets.insert(format!("ui:{}", file.target.path)) {
                 return Err(RegistryError::DuplicateTarget(file.target.path.clone()));
+            }
+            for export in &file.target.exports {
+                if !exports.insert(export.clone()) {
+                    return Err(RegistryError::DuplicateTarget(format!("export:{export}")));
+                }
             }
         }
 
         for style in &item.styles {
+            if !sources.insert(style.source.clone()) {
+                return Err(RegistryError::DuplicateTarget(format!(
+                    "source:{}",
+                    style.source
+                )));
+            }
             if !targets.insert(format!("css-block:{}", style.target.id)) {
                 return Err(RegistryError::DuplicateTarget(style.target.id.clone()));
             }
         }
     }
 
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut order = Vec::new();
+    let mut dependent_names = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut remaining_dependencies = BTreeMap::<String, usize>::new();
+    for (name, item) in &by_name {
+        remaining_dependencies.insert(name.clone(), item.registry_dependencies.len());
+        for dependency in &item.registry_dependencies {
+            if !by_name.contains_key(dependency) {
+                return Err(RegistryError::UnknownDependency {
+                    item: item.name.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+            dependent_names
+                .entry(dependency.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+    }
 
-    for item in items {
-        visit_item(
-            item.name.as_str(),
-            &by_name,
-            &mut visiting,
-            &mut visited,
-            &mut order,
-        )?;
+    let mut ready = remaining_dependencies
+        .iter()
+        .filter_map(|(name, count)| (*count == 0).then_some(name.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(items.len());
+    while let Some(name) = ready.pop_first() {
+        order.push(name.clone());
+        if let Some(dependents) = dependent_names.get(&name) {
+            for dependent in dependents {
+                let remaining = remaining_dependencies
+                    .get_mut(dependent)
+                    .expect("every dependent has an indegree");
+                *remaining -= 1;
+                if *remaining == 0 {
+                    ready.insert(dependent.clone());
+                }
+            }
+        }
+    }
+
+    if order.len() != items.len() {
+        let unresolved = remaining_dependencies
+            .iter()
+            .find_map(|(name, count)| (*count != 0).then_some(name.clone()))
+            .expect("an incomplete graph has an unresolved item");
+        return Err(RegistryError::DependencyCycle(unresolved));
     }
 
     Ok(order)
-}
-
-fn visit_item(
-    name: &str,
-    by_name: &BTreeMap<String, &RegistryItem>,
-    visiting: &mut BTreeSet<String>,
-    visited: &mut BTreeSet<String>,
-    order: &mut Vec<String>,
-) -> Result<(), RegistryError> {
-    if visited.contains(name) {
-        return Ok(());
-    }
-
-    if !visiting.insert(name.to_owned()) {
-        return Err(RegistryError::DependencyCycle(name.to_owned()));
-    }
-
-    let Some(item) = by_name.get(name) else {
-        return Err(RegistryError::BuiltInNotFound(name.to_owned()));
-    };
-
-    for dependency in &item.registry_dependencies {
-        if !by_name.contains_key(dependency) {
-            return Err(RegistryError::UnknownDependency {
-                item: item.name.clone(),
-                dependency: dependency.clone(),
-            });
-        }
-        visit_item(dependency, by_name, visiting, visited, order)?;
-    }
-
-    visiting.remove(name);
-    visited.insert(name.to_owned());
-    order.push(name.to_owned());
-    Ok(())
 }
 
 pub fn resolve_registry_targets(
@@ -1300,14 +1789,24 @@ fn expect_string(field: &'static str, expected: &str, actual: &str) -> Result<()
     }
 }
 
-fn validate_item_name(value: &str) -> Result<(), RegistryError> {
-    validate_kebab_name("name", value)
+pub fn validate_registry_item_name(value: &str) -> Result<(), RegistryError> {
+    validate_kebab_name("name", value)?;
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field: "name",
+            expected: "item name that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_kebab_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    let mut bytes = value.bytes();
-    let valid = bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    let valid = value.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    });
 
     if valid {
         Ok(())
@@ -1362,14 +1861,6 @@ fn validate_registry_source_path_with_extension(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-fn validate_registry_root_item_identity(
-    entry: &RegistryRootItem,
-    item: &RegistryItem,
-) -> Result<(), RegistryError> {
-    expect_string("items[].name", &entry.name, &item.name)
 }
 
 fn validate_ui_target_path(field: &'static str, value: &str) -> Result<(), RegistryError> {
@@ -1450,6 +1941,13 @@ fn validate_rust_identifier(field: &'static str, value: &str) -> Result<(), Regi
             actual: value.to_owned(),
         });
     }
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII Rust identifier that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
 
     Ok(())
 }
@@ -1467,8 +1965,77 @@ fn validate_rust_module_segment(field: &'static str, value: &str) -> Result<(), 
             actual: value.to_owned(),
         });
     }
+    if is_rust_2024_keyword(value) {
+        return Err(RegistryError::InvalidValue {
+            field,
+            expected: "ASCII lowercase module segment that is not a Rust 2024 keyword".to_owned(),
+            actual: value.to_owned(),
+        });
+    }
 
     Ok(())
+}
+
+pub(crate) fn is_rust_2024_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "Self"
+            | "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "box"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "macro_rules"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "raw"
+            | "ref"
+            | "return"
+            | "safe"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "union"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
 }
 
 fn validate_non_empty_string(field: &'static str, value: &str) -> Result<(), RegistryError> {
@@ -1510,37 +2077,6 @@ fn validate_features(field: &'static str, features: &[String]) -> Result<(), Reg
     Ok(())
 }
 
-fn expect_features(
-    field: &'static str,
-    expected: &[&str],
-    actual: &[String],
-) -> Result<(), RegistryError> {
-    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
-    let actual = actual.iter().map(String::as_str).collect::<BTreeSet<_>>();
-
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(RegistryError::InvalidValue {
-            field,
-            expected: expected.into_iter().collect::<Vec<_>>().join(", "),
-            actual: actual.into_iter().collect::<Vec<_>>().join(", "),
-        })
-    }
-}
-
-fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), RegistryError> {
-    if (7..=40).contains(&rev.len()) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(RegistryError::InvalidValue {
-            field,
-            expected: "7 to 40 hex characters".to_owned(),
-            actual: rev.to_owned(),
-        })
-    }
-}
-
 fn looks_like_local_path(source: &str) -> bool {
     source.ends_with(".json")
         || source.contains(std::path::MAIN_SEPARATOR)
@@ -1559,16 +2095,6 @@ mod tests {
 
     use super::*;
     use crate::embedded_assets::InMemoryAssetProvider;
-    use web_ui_primitives::{
-        core::{Direction, MenuLoop, MenuModel},
-        leptos::{
-            DomAttribute, DomAttributeValue,
-            attrs::{
-                MenuItemAttrs, MenuItemKind as AttrsMenuItemKind, MenuTriggerAttrs,
-                menu_item_attrs, menu_item_indicator_attrs, menu_trigger_attrs,
-            },
-        },
-    };
 
     #[test]
     fn loads_built_in_registry_root() {
@@ -1588,6 +2114,7 @@ mod tests {
                 ("collapsible", "ui/collapsible.json"),
                 ("dialog", "ui/dialog.json"),
                 ("field", "ui/field.json"),
+                ("identity", "ui/identity.json"),
                 ("menu", "ui/menu.json"),
                 ("router-link", "ui/router-link.json"),
                 ("spinner", "ui/spinner.json"),
@@ -1618,6 +2145,20 @@ mod tests {
         let source = read_built_in_registry_source("ui/button.rs").expect("read source");
 
         assert!(source.contains("pub fn Button"));
+    }
+
+    #[test]
+    fn reads_built_in_assets_by_catalog_logical_path() {
+        let registry =
+            read_built_in_asset("registry/registry.json").expect("read registry root asset");
+        assert!(registry.contains("\"name\": \"leptos-ui-kit\""));
+        let schema = read_built_in_asset("schema/0.9.0-alpha/registry.schema.json")
+            .expect("read registry schema asset");
+        assert!(schema.contains(REGISTRY_SCHEMA_URL));
+        assert!(matches!(
+            read_built_in_asset("../registry/registry.json"),
+            Err(RegistryError::UnsafePath { .. })
+        ));
     }
 
     #[test]
@@ -1674,7 +2215,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -1689,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_web_ui_primitives_version_cargo_plan_entry() {
+    fn accepts_canonical_web_ui_primitives_git_cargo_plan_entry() {
         let item = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
@@ -1702,7 +2243,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -1711,8 +2252,9 @@ mod tests {
                 {
                   "crate": "web_ui_primitives",
                   "source": {
-                    "kind": "version",
-                    "version": "0.1.0"
+                    "kind": "git",
+                    "url": "https://github.com/triesap/web_ui_primitives",
+                    "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
                   },
                   "features": ["leptos"],
                   "required": true
@@ -1724,6 +2266,290 @@ mod tests {
         .expect("parse item");
 
         item.validate().expect("validate item");
+    }
+
+    #[test]
+    fn accepts_legacy_csr_registry_render_mode_deterministically() {
+        let item = parse_registry_item_str(
+            r#"{
+              "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+              "schemaVersion": "0.9.0-alpha",
+              "name": "legacy",
+              "kind": "ui",
+              "version": "0.9.0-alpha",
+              "title": "Legacy",
+              "description": "A legacy CSR compatibility fixture.",
+              "leptos": {
+                "version": "0.9.0-alpha",
+                "routerVersion": "0.9.0-alpha",
+                "renderMode": "csr"
+              },
+              "files": [],
+              "styles": [],
+              "registryDependencies": [],
+              "cargoPlan": [],
+              "extra": {}
+            }"#,
+        )
+        .expect("parse legacy CSR item");
+
+        assert!(item.leptos.render_modes.is_empty());
+        assert_eq!(item.leptos.legacy_render_mode, Some(RenderMode::Csr));
+    }
+
+    #[test]
+    fn cargo_sources_round_trip_through_one_strict_normalizer() {
+        let version: CargoPlanSource = serde_json::from_value(serde_json::json!({
+            "kind": "version",
+            "version": "0.9.0-alpha"
+        }))
+        .expect("version source");
+        assert_eq!(version, CargoPlanSource::version("0.9.0-alpha"));
+        assert_eq!(
+            serde_json::to_value(&version).expect("serialize version"),
+            serde_json::json!({"kind": "version", "version": "0.9.0-alpha"})
+        );
+
+        let git: CargoPlanSource = serde_json::from_value(serde_json::json!({
+            "kind": "git",
+            "url": "HTTPS://GitHub.COM:443/Org/Repo.git/",
+            "rev": "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+        }))
+        .expect("git source");
+        assert_eq!(
+            git,
+            CargoPlanSource::git(
+                "https://github.com/Org/Repo.git",
+                "abcdef0123456789abcdef0123456789abcdef01"
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(&git).expect("serialize git"),
+            serde_json::json!({
+                "kind": "git",
+                "url": "https://github.com/Org/Repo.git",
+                "rev": "abcdef0123456789abcdef0123456789abcdef01"
+            })
+        );
+
+        let ssh = CargoPlanSource::git(
+            "ssh://git@EXAMPLE.COM:22/Org/Repo",
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .normalized()
+        .expect("normalize SSH");
+        assert_eq!(ssh.url.as_deref(), Some("ssh://git@example.com/Org/Repo"));
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://git@example.com:2222/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("nondefault port")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "https://example.com/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different transport")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://example.com/Org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different username")
+        );
+        assert_ne!(
+            ssh,
+            CargoPlanSource::git(
+                "ssh://git@example.com/org/Repo",
+                "0123456789abcdef0123456789abcdef01234567"
+            )
+            .normalized()
+            .expect("different path case")
+        );
+        assert_ne!(
+            git,
+            CargoPlanSource::git(
+                "https://github.com/Org/Repo",
+                "abcdef0123456789abcdef0123456789abcdef01"
+            )
+        );
+    }
+
+    #[test]
+    fn cargo_source_deserialization_rejects_null_cross_fields_and_unsafe_urls() {
+        for source in [
+            serde_json::json!({"kind": "version"}),
+            serde_json::json!({"kind": "version", "version": null}),
+            serde_json::json!({"kind": "version", "version": " "}),
+            serde_json::json!({"kind": "version", "version": "1", "url": "https://x/y"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y"}),
+            serde_json::json!({"kind": "git", "url": null, "rev": "0123456789abcdef0123456789abcdef01234567"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": null}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456789abcdef0123456789abcdef01234567", "version": "1"}),
+            serde_json::json!({"kind": "git", "url": "https://x/y", "rev": "0123456789abcdef0123456789abcdef01234567", "branch": "main"}),
+        ] {
+            assert!(
+                serde_json::from_value::<CargoPlanSource>(source.clone()).is_err(),
+                "{source}"
+            );
+        }
+
+        for url in [
+            "http://example.com/org/repo",
+            "git://example.com/org/repo",
+            "file:///tmp/repo",
+            "git@example.com:org/repo",
+            "./repo",
+            "https://example.com",
+            "https://@example.com/org/repo",
+            "https://user@example.com/org/repo",
+            "https://user:pass@example.com/org/repo",
+            "ssh://@example.com/org/repo",
+            "ssh://user:pass@example.com/org/repo",
+            "https://example.com/org//repo",
+            "https://example.com/org/./repo",
+            "https://example.com/org/../repo",
+            "https://example.com/org/%72epo",
+            "https://example.com/org/repo?branch=main",
+            "https://example.com/org/repo#main",
+            "https://example.com/org\\repo",
+            "https://example.com/org/répô",
+        ] {
+            let source = serde_json::json!({
+                "kind": "git",
+                "url": url,
+                "rev": "0123456789abcdef0123456789abcdef01234567"
+            });
+            assert!(
+                serde_json::from_value::<CargoPlanSource>(source).is_err(),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_plan_normalization_merges_features_required_and_rejects_conflicts() {
+        let first = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["csr".to_owned()],
+            required: false,
+        };
+        let second = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["nightly".to_owned(), "csr".to_owned()],
+            required: true,
+        };
+        let router = CargoPlanEntry {
+            crate_name: "leptos_router".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_ROUTER_VERSION),
+            features: Vec::new(),
+            required: false,
+        };
+        let normalized =
+            normalize_cargo_plan(&[router.clone(), second, first]).expect("normalize plan");
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|entry| entry.crate_name.as_str())
+                .collect::<Vec<_>>(),
+            ["leptos", "leptos_router"]
+        );
+        assert_eq!(normalized[0].features, ["csr", "nightly"]);
+        assert!(normalized[0].required);
+
+        let mut conflict = router;
+        conflict.source = CargoPlanSource::git(
+            "https://github.com/leptos-rs/leptos",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+        assert!(normalize_cargo_plan(&[normalized[1].clone(), conflict]).is_err());
+    }
+
+    #[test]
+    fn project_cargo_plan_projection_selects_exactly_one_or_no_delivery_mode() {
+        let entries = [
+            CargoPlanEntry {
+                crate_name: "leptos".to_owned(),
+                source: CargoPlanSource::version(LEPTOS_VERSION),
+                features: vec!["nightly".to_owned()],
+                required: true,
+            },
+            CargoPlanEntry {
+                crate_name: "web_ui_primitives".to_owned(),
+                source: CargoPlanSource::git(WEB_UI_PRIMITIVES_GIT_URL, WEB_UI_PRIMITIVES_GIT_REV),
+                features: vec!["core".to_owned(), "leptos".to_owned()],
+                required: true,
+            },
+        ];
+
+        for (contract, expected) in [
+            (
+                RenderModeContract::Selected(RenderMode::Csr),
+                (
+                    vec!["csr".to_owned(), "nightly".to_owned()],
+                    vec!["core".to_owned(), "csr".to_owned(), "leptos".to_owned()],
+                ),
+            ),
+            (
+                RenderModeContract::Selected(RenderMode::Hydrate),
+                (
+                    vec!["hydrate".to_owned(), "nightly".to_owned()],
+                    vec!["core".to_owned(), "hydrate".to_owned(), "leptos".to_owned()],
+                ),
+            ),
+            (
+                RenderModeContract::Selected(RenderMode::Ssr),
+                (
+                    vec!["nightly".to_owned(), "ssr".to_owned()],
+                    vec!["core".to_owned(), "leptos".to_owned(), "ssr".to_owned()],
+                ),
+            ),
+            (
+                RenderModeContract::Neutral,
+                (
+                    vec!["nightly".to_owned()],
+                    vec!["core".to_owned(), "leptos".to_owned()],
+                ),
+            ),
+        ] {
+            let normalized =
+                normalize_cargo_plan_for_project(&entries, contract).expect("project plan");
+            assert_eq!(normalized[0].features, expected.0);
+            assert_eq!(normalized[1].features, expected.1);
+        }
+    }
+
+    #[test]
+    fn registry_item_rejects_duplicate_cargo_crates_before_resolution() {
+        let mut item = item_with_name_and_target("button", "button.rs", "button", &[]);
+        let entry = CargoPlanEntry {
+            crate_name: "leptos".to_owned(),
+            source: CargoPlanSource::version(LEPTOS_VERSION),
+            features: vec!["csr".to_owned()],
+            required: true,
+        };
+        item.cargo_plan = vec![entry.clone(), entry];
+
+        assert!(matches!(
+            item.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "cargoPlan[].crate",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1740,7 +2566,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [],
               "styles": [],
@@ -1768,7 +2594,7 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_target_path() {
-        let item = parse_registry_item_str(
+        let error = parse_registry_item_str(
             r#"{
               "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
               "schemaVersion": "0.9.0-alpha",
@@ -1780,7 +2606,7 @@ mod tests {
               "leptos": {
                 "version": "0.9.0-alpha",
                 "routerVersion": "0.9.0-alpha",
-                "renderMode": "csr"
+                "renderModes": ["csr", "hydrate", "ssr"]
               },
               "files": [
                 {
@@ -1797,11 +2623,10 @@ mod tests {
               "extra": {}
             }"#,
         )
-        .expect("parse raw item");
+        .expect_err("semantic public parser must reject unsafe path");
 
-        let error = item.validate().expect_err("unsafe path should fail");
-
-        assert!(matches!(error, RegistryError::UnsafePath { .. }));
+        assert!(error.is_data());
+        assert!(error.to_string().contains("files[].target.path"));
     }
 
     #[test]
@@ -2094,11 +2919,23 @@ mod tests {
     }
 
     #[test]
-    fn collapsible_css_uses_property_local_theme_fallbacks() {
+    fn collapsible_source_projects_ssr_attributes_and_uses_theme_fallbacks() {
         let root = built_in_registry_root();
+        let trigger = fs::read_to_string(root.join("ui/collapsible/trigger.rs"))
+            .expect("read collapsible trigger");
+        let content = fs::read_to_string(root.join("ui/collapsible/content.rs"))
+            .expect("read collapsible content");
         let css =
             fs::read_to_string(root.join("styles/collapsible.css")).expect("read collapsible css");
 
+        assert!(trigger.contains("aria-expanded=move ||"));
+        assert!(trigger.contains("aria-controls=move ||"));
+        assert!(trigger.contains("data-state=move ||"));
+        assert!(content.contains("id=move ||"));
+        assert!(content.contains("hidden=move ||"));
+        assert!(content.contains("data-state=move ||"));
+        assert!(!trigger.contains("use_dom_bindings"));
+        assert!(!content.contains("use_dom_bindings"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-collapsible-trigger-background, transparent)"));
@@ -2351,7 +3188,12 @@ mod tests {
         assert!(content_source.contains("target_is_trigger"));
         assert!(content_source.contains("use_menu_placement_with_node_refs"));
         assert!(content_source.contains("MenuPlacementOptions::new"));
-        assert!(content_source.contains("style=move || style_placement.style()"));
+        assert!(content_source.contains("style=move || {"));
+        assert!(content_source.contains("style_placement"));
+        assert!(content_source.contains(".strict_id()"));
+        assert!(content_source.contains(".is_none()"));
+        assert!(content_source.contains("then(|| style_placement.style())"));
+        assert!(content_source.contains("data-web-ui-placement-id=move ||"));
         assert!(content_source.contains("data-side=move || side_placement.data_side()"));
         assert!(content_source.contains("data-align=move || align_placement.data_align()"));
         assert!(item_source.contains("MenuItemKind::Radio"));
@@ -2422,85 +3264,6 @@ mod tests {
                 "MenuTrigger"
             ]
         );
-    }
-
-    #[test]
-    fn menu_attrs_expose_checked_indicator_state() {
-        let mut model = MenuModel::with_loop(2, MenuLoop::Wrap);
-        model.set_checked(Some(0));
-
-        let active_attrs = menu_item_indicator_attrs(&model, 0);
-        let inactive_attrs = menu_item_indicator_attrs(&model, 1);
-
-        assert_eq!(bool_attr(&active_attrs, "hidden"), Some(false));
-        assert_eq!(string_attr(&active_attrs, "data-state"), Some("checked"));
-        assert_eq!(bool_attr(&inactive_attrs, "hidden"), Some(true));
-        assert_eq!(
-            string_attr(&inactive_attrs, "data-state"),
-            Some("unchecked")
-        );
-    }
-
-    #[test]
-    fn menu_attrs_expose_trigger_and_item_open_state() {
-        let mut model = MenuModel::with_loop(2, MenuLoop::Wrap);
-
-        let closed_attrs = menu_trigger_attrs(
-            &model,
-            MenuTriggerAttrs::new().controls_id("locale-menu-content"),
-        );
-        assert_eq!(string_attr(&closed_attrs, "aria-expanded"), Some("false"));
-        assert_eq!(string_attr(&closed_attrs, "data-state"), Some("closed"));
-        assert_eq!(
-            string_attr(&closed_attrs, "aria-controls"),
-            Some("locale-menu-content")
-        );
-
-        model.set_open(true);
-        model.focus_index(Some(1));
-        model.set_checked(Some(1));
-
-        let open_attrs = menu_trigger_attrs(
-            &model,
-            MenuTriggerAttrs::new().controls_id("locale-menu-content"),
-        );
-        let focused_item_attrs = menu_item_attrs(
-            &model,
-            1,
-            MenuItemAttrs::new().kind(AttrsMenuItemKind::Radio),
-        );
-
-        assert_eq!(string_attr(&open_attrs, "aria-expanded"), Some("true"));
-        assert_eq!(string_attr(&open_attrs, "data-state"), Some("open"));
-        assert_eq!(
-            string_attr(&focused_item_attrs, "role"),
-            Some("menuitemradio")
-        );
-        assert_eq!(string_attr(&focused_item_attrs, "tabindex"), Some("0"));
-        assert_eq!(
-            string_attr(&focused_item_attrs, "aria-checked"),
-            Some("true")
-        );
-        assert_eq!(
-            bool_attr(&focused_item_attrs, "data-highlighted"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn menu_model_keyboard_contract_closes_and_selects() {
-        let mut model = MenuModel::with_loop(3, MenuLoop::Wrap);
-        model.set_disabled(1, true);
-        model.set_open(true);
-
-        assert_eq!(model.focus_by_key("ArrowDown", Direction::Ltr), Some(2));
-        assert_eq!(model.activate_index(2), Some(2));
-        assert!(!model.open());
-        assert_eq!(model.focused(), None);
-
-        model.set_open(true);
-        assert!(model.close_by_key("Escape"));
-        assert!(!model.open());
     }
 
     #[test]
@@ -2579,8 +3342,13 @@ mod tests {
     #[test]
     fn tabs_source_declares_keyboard_accessibility_contract() {
         let root = built_in_registry_root();
+        let tabs_root =
+            fs::read_to_string(root.join("ui/tabs/root.rs")).expect("read tabs root source");
+        let list = fs::read_to_string(root.join("ui/tabs/list.rs")).expect("read tabs list source");
         let trigger =
             fs::read_to_string(root.join("ui/tabs/trigger.rs")).expect("read tabs trigger source");
+        let panel =
+            fs::read_to_string(root.join("ui/tabs/panel.rs")).expect("read tabs panel source");
         let css = fs::read_to_string(root.join("styles/tabs.css")).expect("read tabs css");
         let item = load_built_in_registry_item("tabs").expect("load tabs");
 
@@ -2588,6 +3356,17 @@ mod tests {
         assert!(trigger.contains("focus_by_key"));
         assert!(trigger.contains("activate_focused"));
         assert!(trigger.contains("focus_trigger"));
+        assert!(trigger.contains("on_cleanup"));
+        assert!(trigger.contains("unregister_trigger"));
+        assert!(list.contains("role=move ||"));
+        assert!(trigger.contains("aria-selected=move ||"));
+        assert!(trigger.contains("aria-controls=move ||"));
+        assert!(panel.contains("aria-labelledby=move ||"));
+        assert!(panel.contains("hidden=move ||"));
+        assert!(!list.contains("use_dom_bindings"));
+        assert!(!trigger.contains("use_dom_bindings"));
+        assert!(!panel.contains("use_dom_bindings"));
+        assert!(tabs_root.contains("id.unwrap_or_else(|| use_kit_id(\"kit-tabs\"))"));
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-tabs-panel-background, transparent)"));
@@ -2628,9 +3407,11 @@ mod tests {
         assert!(content.contains("DialogLayerOptions"));
         assert!(content.contains("PortalMount"));
         assert!(content.contains("#[prop(optional)] portal_mount: Option<PortalMount>"));
-        assert!(content.contains("if let Some(portal_mount) = portal_mount.clone()"));
-        assert!(content.contains("<Portal mount=portal_mount>"));
-        assert!(content.contains("<Portal>"));
+        assert!(content.contains("#[prop(default = true)] portal_reparent: bool"));
+        assert!(content.contains("Portal(PortalProps {"));
+        assert!(content.contains("mount: portal_mount.clone()"));
+        assert!(content.contains("reparent: portal_reparent"));
+        assert_eq!(content.matches("Portal(PortalProps {").count(), 1);
         assert!(!css.contains(":root"));
         assert!(!css.contains('#'));
         assert!(css.contains("var(--kit-dialog-background, var(--kit-color-surface-raised))"));
@@ -2657,6 +3438,98 @@ mod tests {
                 "DialogTitle",
                 "DialogTrigger"
             ]
+        );
+    }
+
+    #[test]
+    fn hydration_identity_and_dynamic_registration_contracts_are_closed() {
+        let root = built_in_registry_root();
+        let identity =
+            fs::read_to_string(root.join("ui/identity.rs")).expect("read identity source");
+
+        assert!(identity.contains("pub fn KitIdProvider"));
+        assert!(identity.contains("provide_context(KitIdScope::new())"));
+        assert!(identity.contains("pub(crate) fn use_kit_id"));
+        assert!(!identity.contains("Atomic"));
+        assert!(!identity.contains("fetch_add"));
+
+        for (item, source, override_binding) in [
+            (
+                "collapsible",
+                "ui/collapsible/root.rs",
+                "content_id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "dialog",
+                "ui/dialog/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "field",
+                "ui/field/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "menu",
+                "ui/menu/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+            (
+                "tabs",
+                "ui/tabs/root.rs",
+                "id.unwrap_or_else(|| use_kit_id(",
+            ),
+        ] {
+            let source = fs::read_to_string(root.join(source)).expect("read component root");
+            let manifest = load_built_in_registry_item(item).expect("load component manifest");
+
+            assert!(source.contains(override_binding), "{item}");
+            assert!(!source.contains("Atomic"), "{item}");
+            assert!(!source.contains("fetch_add"), "{item}");
+            assert_eq!(manifest.item.registry_dependencies[0], "identity", "{item}");
+            assert!(
+                manifest
+                    .item
+                    .accessibility
+                    .behaviors
+                    .iter()
+                    .any(|behavior| {
+                        behavior.name == "stable-hydration-identity" && behavior.required
+                    }),
+                "{item}"
+            );
+        }
+
+        for (source, cleanup) in [
+            ("ui/field/message.rs", "unregister_message_id"),
+            ("ui/menu/item.rs", "unregister_item"),
+            ("ui/tabs/trigger.rs", "unregister_trigger"),
+        ] {
+            let source = fs::read_to_string(root.join(source)).expect("read registration source");
+            assert!(source.contains("on_cleanup"));
+            assert!(source.contains(cleanup));
+        }
+    }
+
+    #[test]
+    fn menu_source_selects_inline_or_strict_placement_without_mixing_sinks() {
+        let root = built_in_registry_root();
+        let content =
+            fs::read_to_string(root.join("ui/menu/content.rs")).expect("read menu content");
+        let item = load_built_in_registry_item("menu").expect("load menu");
+
+        assert!(content.contains("#[prop(optional)] placement_sink: PlacementSink"));
+        assert!(content.contains(".sink(placement_sink)"));
+        assert!(content.contains(".strict_id()"));
+        assert!(content.contains("data-web-ui-placement-id="));
+        assert!(content.contains(".strict_id()"));
+        assert!(content.contains(".is_none()"));
+        assert!(
+            item.item
+                .accessibility
+                .behaviors
+                .iter()
+                .any(|behavior| behavior.name == "strict-csp-placement" && behavior.required)
         );
     }
 
@@ -2858,16 +3731,45 @@ mod tests {
 
     #[test]
     fn rejects_registry_root_entry_name_that_differs_from_manifest_name() {
-        let entry = RegistryRootItem {
-            name: "button".to_owned(),
-            path: "ui/button.json".to_owned(),
+        let root = RegistryRoot {
+            schema: REGISTRY_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
+            items: vec![RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/button.json".to_owned(),
+            }],
         };
         let item = item_with_name_and_target("spinner", "spinner.rs", "spinner", &[]);
 
         assert!(matches!(
-            validate_registry_root_item_identity(&entry, &item),
+            validate_registry_manifest_identity(&root, "ui/button.json", &item),
             Err(RegistryError::InvalidValue {
-                field: "items[].name",
+                field: "manifest.name",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_manifest_path_that_is_not_declared_by_the_root() {
+        let root = RegistryRoot {
+            schema: REGISTRY_SCHEMA_URL.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
+            items: vec![RegistryRootItem {
+                name: "button".to_owned(),
+                path: "ui/button.json".to_owned(),
+            }],
+        };
+        let item = item_with_name_and_target("button", "button.rs", "button", &[]);
+
+        assert!(matches!(
+            validate_registry_manifest_identity(&root, "ui/spinner.json", &item),
+            Err(RegistryError::InvalidValue {
+                field: "manifest.path",
                 ..
             })
         ));
@@ -2940,7 +3842,7 @@ mod tests {
         );
         assert_eq!(
             root_schema["properties"]["items"]["items"]["properties"]["name"]["pattern"],
-            serde_json::json!("^[a-z][a-z0-9-]*$")
+            serde_json::json!("^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
         );
         assert!(
             root_schema["properties"]["items"]["items"]["properties"]["path"]["pattern"]
@@ -3096,6 +3998,149 @@ mod tests {
     }
 
     #[test]
+    fn resolution_uses_stable_lexically_ready_topological_order() {
+        let first = resolve_built_in_registry_items(&["button".to_owned(), "dialog".to_owned()])
+            .expect("resolve independent families");
+        let second = resolve_built_in_registry_items(&["dialog".to_owned(), "button".to_owned()])
+            .expect("resolve reversed independent families");
+        let names = |items: &[ResolvedRegistryItem]| {
+            items
+                .iter()
+                .map(|item| item.item.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(&first),
+            ["identity", "tokens", "dialog", "spinner", "button"]
+        );
+        assert_eq!(names(&second), names(&first));
+    }
+
+    #[test]
+    fn graph_order_uses_canonical_ready_tie_break_independent_of_input_order() {
+        let alpha = item_with_name_and_target("alpha", "alpha.rs", "alpha", &[]);
+        let beta = item_with_name_and_target("beta", "beta.rs", "beta", &[]);
+        let dependent =
+            item_with_name_and_target("dependent", "dependent.rs", "dependent", &["alpha"]);
+
+        let first = validate_registry_graph(&[dependent.clone(), beta.clone(), alpha.clone()])
+            .expect("first graph");
+        let second = validate_registry_graph(&[beta, alpha, dependent]).expect("permuted graph");
+
+        assert_eq!(first, vec!["alpha", "beta", "dependent"]);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn style_cardinality_and_foundation_suffixes_follow_the_item_contract() {
+        let mut foundation = foundation_item();
+        foundation.styles.push(RegistryItemStyle {
+            source: "styles/foundation-motion.css".to_owned(),
+            target: RegistryStyleTarget {
+                kind: RegistryStyleTargetKind::ManagedCssBlock,
+                id: "foundation-motion".to_owned(),
+            },
+        });
+        foundation
+            .validate()
+            .expect("ordered multi-style foundation");
+
+        for invalid_id in [
+            "motion",
+            "foundation-",
+            "foundation--motion",
+            "foundation-motion-",
+            "foundation-Motion",
+        ] {
+            let mut invalid = foundation.clone();
+            invalid.styles[1].target.id = invalid_id.to_owned();
+            assert!(
+                matches!(
+                    invalid.validate(),
+                    Err(RegistryError::InvalidValue {
+                        field: "styles[].target.id" | "styles[].target.id suffix",
+                        ..
+                    })
+                ),
+                "{invalid_id}"
+            );
+        }
+
+        let mut ui = item_with_name_and_target("button", "button.rs", "button", &[]);
+        ui.styles.push(RegistryItemStyle {
+            source: "styles/button-motion.css".to_owned(),
+            target: RegistryStyleTarget {
+                kind: RegistryStyleTargetKind::ManagedCssBlock,
+                id: "button-motion".to_owned(),
+            },
+        });
+        assert!(matches!(
+            ui.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "styles",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rust_2024_keywords_are_rejected_for_emitted_identifiers() {
+        for keyword in ["type", "async", "gen", "macro_rules", "safe", "union"] {
+            let item = item_with_name_and_target(keyword, "widget.rs", keyword, &[]);
+            assert!(
+                matches!(
+                    item.validate(),
+                    Err(RegistryError::InvalidValue { field: "name", .. })
+                ),
+                "{keyword}"
+            );
+        }
+
+        let module = item_with_name_and_target("widget", "type.rs", "widget", &[]);
+        assert!(matches!(
+            module.validate(),
+            Err(RegistryError::UnsafePath {
+                field: "files[].target.path",
+                ..
+            })
+        ));
+
+        let mut export = item_with_name_and_target("widget", "widget.rs", "widget", &[]);
+        export.files[0].target.exports = vec!["Self".to_owned()];
+        assert!(matches!(
+            export.validate(),
+            Err(RegistryError::InvalidValue {
+                field: "files[].target.exports",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn graph_rejects_global_source_and_export_collisions() {
+        let first = item_with_name_and_target("first", "first.rs", "first", &[]);
+        let mut duplicate_source = item_with_name_and_target("second", "second.rs", "second", &[]);
+        duplicate_source.files[0].source = first.files[0].source.clone();
+        let error = validate_registry_graph(&[first.clone(), duplicate_source])
+            .expect_err("source collision must fail");
+        assert!(
+            matches!(error, RegistryError::DuplicateTarget(target) if target.starts_with("source:"))
+        );
+
+        let mut first_export = first;
+        first_export.files[0].target.exports = vec!["SharedExport".to_owned()];
+        let mut second_export = item_with_name_and_target("second", "second.rs", "second", &[]);
+        second_export.files[0].target.exports = vec!["SharedExport".to_owned()];
+        let error = validate_registry_graph(&[first_export, second_export])
+            .expect_err("export collision must fail");
+        assert_eq!(
+            error.to_string(),
+            "duplicate registry target: export:SharedExport"
+        );
+    }
+
+    #[test]
     fn graph_rejects_unknown_registry_dependencies() {
         let item = item_with_name_and_target("button", "button.rs", "button", &["missing"]);
 
@@ -3124,30 +4169,6 @@ mod tests {
         assert!(matches!(error, RegistryError::DuplicateTarget(_)));
     }
 
-    fn string_attr<'a>(attrs: &'a [DomAttribute], name: &str) -> Option<&'a str> {
-        attrs.iter().find_map(|attr| {
-            if attr.name() != name {
-                return None;
-            }
-            match attr.value() {
-                DomAttributeValue::String(value) => Some(value.as_str()),
-                DomAttributeValue::Bool(_) => None,
-            }
-        })
-    }
-
-    fn bool_attr(attrs: &[DomAttribute], name: &str) -> Option<bool> {
-        attrs.iter().find_map(|attr| {
-            if attr.name() != name {
-                return None;
-            }
-            match attr.value() {
-                DomAttributeValue::String(_) => None,
-                DomAttributeValue::Bool(value) => Some(*value),
-            }
-        })
-    }
-
     fn item_with_name_and_target(
         name: &str,
         file_target: &str,
@@ -3165,7 +4186,8 @@ mod tests {
             leptos: RegistryLeptos {
                 version: LEPTOS_VERSION.to_owned(),
                 router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-                render_mode: RenderMode::Csr,
+                render_modes: vec![RenderMode::Csr, RenderMode::Hydrate, RenderMode::Ssr],
+                legacy_render_mode: None,
             },
             accessibility: RegistryAccessibility::default(),
             files: vec![RegistryItemFile {
@@ -3197,6 +4219,7 @@ mod tests {
             schema: REGISTRY_SCHEMA_URL.to_owned(),
             schema_version: SCHEMA_VERSION.to_owned(),
             name: "leptos-ui-kit".to_owned(),
+            compatibility: RegistryCompatibility::canonical(),
             items,
         }
     }

@@ -1,13 +1,12 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use leptos::prelude::*;
 
-static NEXT_FIELD_ID: AtomicUsize = AtomicUsize::new(1);
+use super::super::identity::use_kit_id;
 
 #[derive(Clone)]
 pub(crate) struct FieldContext {
     control_id: String,
     message_id: String,
+    next_message_ordinal: RwSignal<usize>,
     pub(crate) required: Signal<bool>,
     pub(crate) invalid: Signal<bool>,
     pub(crate) disabled: Signal<bool>,
@@ -20,7 +19,12 @@ impl FieldContext {
     }
 
     pub(crate) fn next_message_id(&self) -> String {
-        next_owned_id(&self.message_id)
+        let mut ordinal = 0;
+        self.next_message_ordinal.update(|next| {
+            ordinal = *next;
+            *next += 1;
+        });
+        format!("{}-{ordinal}", self.message_id)
     }
 
     pub(crate) fn register_message_id(&self, message_id: String) {
@@ -66,10 +70,11 @@ pub fn FieldRoot(
     #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
-    let base_id = id.unwrap_or_else(|| next_id("kit-field"));
+    let base_id = id.unwrap_or_else(|| use_kit_id("kit-field"));
     provide_context(FieldContext {
         control_id: format!("{base_id}-control"),
         message_id: format!("{base_id}-message"),
+        next_message_ordinal: RwSignal::new(1),
         required,
         invalid,
         disabled,
@@ -134,10 +139,5 @@ pub(crate) fn resolved_bool_signal(
 }
 
 fn next_id(prefix: &'static str) -> String {
-    next_owned_id(prefix)
-}
-
-fn next_owned_id(prefix: &str) -> String {
-    let id = NEXT_FIELD_ID.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{id}")
+    use_kit_id(prefix)
 }

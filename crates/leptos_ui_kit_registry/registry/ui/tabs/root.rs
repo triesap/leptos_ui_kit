@@ -1,12 +1,10 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::core::{TabsActivation, TabsLoop, TabsModel};
+use web_ui_primitives::leptos::{DomAttribute, DomAttributeValue};
 
+use super::super::identity::use_kit_id;
 use super::{TabsDirection, TabsOrientation};
-
-static NEXT_TABS_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 pub(crate) struct TabsContext {
@@ -32,6 +30,26 @@ impl TabsContext {
                 refs.resize_with(index + 1, || None);
             }
             refs[index] = Some(node_ref);
+        });
+    }
+
+    pub(crate) fn unregister_trigger(&self, index: usize) {
+        let mut retained_len = 0;
+        self.trigger_refs.update(|refs| {
+            if let Some(trigger_ref) = refs.get_mut(index) {
+                *trigger_ref = None;
+            }
+            retained_len = refs
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |last| last + 1);
+            refs.truncate(retained_len);
+        });
+        self.model.update(|model| {
+            if index < retained_len {
+                model.set_disabled(index, true);
+            }
+            model.set_len(retained_len);
         });
     }
 
@@ -77,7 +95,7 @@ pub fn TabsRoot(
         activation,
         loop_policy,
     ));
-    let base_id = id.unwrap_or_else(next_tabs_id);
+    let base_id = id.unwrap_or_else(|| use_kit_id("kit-tabs"));
     provide_context(TabsContext {
         model,
         orientation,
@@ -101,7 +119,25 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
     }
 }
 
-fn next_tabs_id() -> String {
-    let id = NEXT_TABS_ID.fetch_add(1, Ordering::Relaxed);
-    format!("kit-tabs-{id}")
+pub(crate) fn attr_string(attrs: &[DomAttribute], name: &str) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if attr.name() != name {
+            return None;
+        }
+        match attr.value() {
+            DomAttributeValue::String(value) => Some(value.clone()),
+            DomAttributeValue::Bool(true) => Some(String::new()),
+            DomAttributeValue::Bool(false) => None,
+        }
+    })
+}
+
+pub(crate) fn attr_bool(attrs: &[DomAttribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.name() == name && matches!(attr.value(), DomAttributeValue::Bool(true)))
+}
+
+pub(crate) fn data_attr(active: bool) -> Option<&'static str> {
+    active.then_some("")
 }

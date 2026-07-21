@@ -58,6 +58,8 @@ include = [
     "registry/ui/field/text_area_field.rs",
     "registry/ui/field/text_field.rs",
     "registry/ui/field/text_input.rs",
+    "registry/ui/identity.json",
+    "registry/ui/identity.rs",
     "registry/ui/menu.json",
     "registry/ui/menu/content.rs",
     "registry/ui/menu/item.rs",
@@ -82,6 +84,8 @@ include = [
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
     "schema/0.9.0-alpha/theme-contract.schema.json",
+    "schema/0.2.0/theme-integration.schema.json",
+    "schema/0.2.0/token-contract.schema.json",
     "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
@@ -90,6 +94,7 @@ include = [
     "src/lib.rs",
     "src/registry_health.rs",
     "src/theme_contract.rs",
+    "src/token_abi.rs",
     "tests/asset_catalog.rs",
     "tests/fixtures/theme_refactor_compatibility.json",
     "tests/fixtures/theme_refactor_mapping.json",
@@ -102,19 +107,23 @@ include = [
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+semver.workspace = true
 sha2.workspace = true
 toml.workspace = true
+url.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+cssparser = "0.37.0"
 flate2 = "1"
 jsonschema.workspace = true
 tar = "0.4"
 tempfile.workspace = true
-web_ui_primitives = { version = "0.1.0", features = ["leptos"] }
+web_ui_primitives = { git = "https://github.com/triesap/web_ui_primitives", rev = "a7ad19e203c08be19040154fa6bce909701d402f", features = ["leptos"] }
 
 [lints]
 workspace = true

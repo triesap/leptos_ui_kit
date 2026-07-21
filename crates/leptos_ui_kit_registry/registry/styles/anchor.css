@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start anchor */
+@layer leptos-ui-kit.components {
 .kit-anchor {
   color: var(--kit-anchor-color, var(--kit-color-link));
   text-decoration-color: var(--kit-anchor-text-decoration-color, currentColor);
@@ -15,5 +16,6 @@
   outline: var(--kit-anchor-focus-outline-width, 0.125rem) solid
     var(--kit-anchor-focus-outline-color, var(--kit-focus-ring));
   outline-offset: var(--kit-anchor-focus-outline-offset, 0.125rem);
+}
 }
 /* leptos-ui-kit:end anchor */

@@ -18,6 +18,7 @@ pub(crate) use engine::apply_planned_files_locked;
 pub use engine::write_file_atomic;
 #[cfg(test)]
 pub(crate) use fs::{FaultFs, FsEvent, FsOperation};
+pub(crate) use fs::{opened_directory_identity, opened_regular_file_identity};
 pub(crate) use journal::JournalOperationV2;
 pub(crate) use lock::DEFAULT_KIT_COORDINATION_IGNORE_PATH;
 pub use lock::{DEFAULT_KIT_WRITE_LOCK_PATH, WriteLock};

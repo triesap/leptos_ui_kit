@@ -11,13 +11,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError, RegistryItem,
     RegistryRoot, ResolvedRegistryTargets, SCHEMA_VERSION, THEME_CONTRACT_SCHEMA_URL,
-    ThemeContract, ThemeContractError,
+    THEME_INTEGRATION_SCHEMA_URL, TOKEN_CONTRACT_SCHEMA_URL, ThemeContract, ThemeContractError,
     embedded_assets::{
         AssetProvider, AssetProviderError, EmbeddedAssetKind, embedded_asset_inventory,
-        embedded_asset_provider,
+        embedded_asset_provider, validate_logical_path,
     },
     item::{
-        parse_registry_item_str, parse_registry_root_str, resolve_registry_targets,
+        parse_registry_item_raw_str, parse_registry_root_raw_str, resolve_registry_targets,
         validate_built_in_registry_items,
     },
     registry_health::{RegistryHealthError, validate_theme_contract_schema_shape},
@@ -26,13 +26,17 @@ use crate::{
 
 const REGISTRY_ROOT_PATH: &str = "registry/registry.json";
 const THEME_CONTRACT_PATH: &str = "registry/contracts/theme-v1.json";
+const TOKENS_MANIFEST_PATH: &str = "registry/foundation/tokens.json";
+const TOKENS_CSS_PATH: &str = "registry/styles/tokens.css";
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
 const THEME_CONTRACT_SCHEMA_PATH: &str = "schema/0.9.0-alpha/theme-contract.schema.json";
-const SCHEMA_PATHS: [&str; 4] = [
+const SCHEMA_PATHS: [&str; 6] = [
     "schema/0.9.0-alpha/kit.schema.json",
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
     THEME_CONTRACT_SCHEMA_PATH,
+    "schema/0.2.0/theme-integration.schema.json",
+    "schema/0.2.0/token-contract.schema.json",
 ];
 const KIT_SCHEMA_REQUIRED: &[&str] = &[
     "$schema",
@@ -58,7 +62,8 @@ const REGISTRY_ITEM_SCHEMA_REQUIRED: &[&str] = &[
     "styles",
     "cargoPlan",
 ];
-const REGISTRY_SCHEMA_REQUIRED: &[&str] = &["$schema", "schemaVersion", "name", "items"];
+const REGISTRY_SCHEMA_REQUIRED: &[&str] =
+    &["$schema", "schemaVersion", "name", "compatibility", "items"];
 const THEME_CONTRACT_SCHEMA_REQUIRED: &[&str] = &[
     "$schema",
     "schemaVersion",
@@ -66,33 +71,73 @@ const THEME_CONTRACT_SCHEMA_REQUIRED: &[&str] = &[
     "name",
     "tokens",
 ];
+const THEME_INTEGRATION_SCHEMA_REQUIRED: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "producer",
+    "primitives",
+    "contract",
+    "stylesheet",
+    "layerAbi",
+    "portalAbi",
+];
+const TOKEN_ABI_SCHEMA_REQUIRED: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "contractId",
+    "abiVersion",
+    "revision",
+    "dtcgVersion",
+    "dtcgProfile",
+    "canonicalDigest",
+    "tokens",
+    "contrastChecks",
+    "extensions",
+];
 
 struct SchemaContract {
     logical_path: &'static str,
     schema_id: &'static str,
+    schema_version: &'static str,
     required: &'static [&'static str],
 }
 
-const SCHEMA_CONTRACTS: [SchemaContract; 4] = [
+const SCHEMA_CONTRACTS: [SchemaContract; 6] = [
     SchemaContract {
         logical_path: SCHEMA_PATHS[0],
         schema_id: KIT_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: KIT_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: SCHEMA_PATHS[1],
         schema_id: REGISTRY_ITEM_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: REGISTRY_ITEM_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: SCHEMA_PATHS[2],
         schema_id: REGISTRY_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: REGISTRY_SCHEMA_REQUIRED,
     },
     SchemaContract {
         logical_path: THEME_CONTRACT_SCHEMA_PATH,
         schema_id: THEME_CONTRACT_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
         required: THEME_CONTRACT_SCHEMA_REQUIRED,
+    },
+    SchemaContract {
+        logical_path: "schema/0.2.0/theme-integration.schema.json",
+        schema_id: THEME_INTEGRATION_SCHEMA_URL,
+        schema_version: "1.0.0",
+        required: THEME_INTEGRATION_SCHEMA_REQUIRED,
+    },
+    SchemaContract {
+        logical_path: "schema/0.2.0/token-contract.schema.json",
+        schema_id: TOKEN_CONTRACT_SCHEMA_URL,
+        schema_version: "1.0.0",
+        required: TOKEN_ABI_SCHEMA_REQUIRED,
     },
 ];
 
@@ -148,8 +193,10 @@ impl BuiltInRegistrySnapshot {
         let root = parse_root(&assets)?;
         let (items, parsed_items) = parse_items(&assets, &root)?;
         validate_exact_asset_ownership(&assets, &root, &parsed_items)?;
+        validate_runtime_compatibility_sources(&assets, &parsed_items)?;
         let theme_contract = parse_theme_contract(&assets)?;
         validate_theme_contract_version(&root, &parsed_items, &theme_contract)?;
+        validate_theme_css_contract(&assets, &root, &parsed_items, &theme_contract)?;
         validate_built_in_registry_items(&parsed_items).map_err(|source| {
             SnapshotError::InvalidRegistryCatalog {
                 logical_path: REGISTRY_ROOT_PATH.to_owned(),
@@ -179,17 +226,48 @@ impl BuiltInRegistrySnapshot {
         &self,
         names: &[String],
     ) -> Result<Vec<&BuiltInRegistryItemSnapshot>, SnapshotError> {
-        let mut seen = BTreeSet::new();
-        let mut resolved = Vec::new();
+        let mut closure = BTreeSet::new();
         for name in names {
-            self.collect_item_closure(name, &mut seen, &mut resolved)?;
+            self.collect_item_closure(name, &mut closure)?;
         }
+
+        let mut resolved_names = BTreeSet::new();
+        let mut resolved = Vec::with_capacity(closure.len());
+        while resolved.len() < closure.len() {
+            let next = closure.iter().find(|name| {
+                !resolved_names.contains(*name)
+                    && self.items[*name]
+                        .item
+                        .registry_dependencies
+                        .iter()
+                        .all(|dependency| resolved_names.contains(dependency))
+            });
+            let Some(next) = next else {
+                let unresolved = closure
+                    .iter()
+                    .find(|name| !resolved_names.contains(*name))
+                    .expect("an incomplete closure has an unresolved item");
+                return Err(SnapshotError::InvalidRegistryCatalog {
+                    logical_path: REGISTRY_ROOT_PATH.to_owned(),
+                    source: RegistryError::DependencyCycle(unresolved.clone()),
+                });
+            };
+            let next = next.clone();
+            resolved_names.insert(next.clone());
+            resolved.push(&self.items[&next]);
+        }
+
         Ok(resolved)
     }
 
     pub(crate) fn registry_source(&self, source: &str) -> Result<&str, SnapshotError> {
         let logical_path = format!("registry/{source}");
         self.asset_text(&logical_path, None)
+    }
+
+    pub(crate) fn logical_asset(&self, logical_path: &str) -> Result<&str, SnapshotError> {
+        validate_logical_path(logical_path).map_err(SnapshotError::Provider)?;
+        self.asset_text(logical_path, None)
     }
 
     pub(crate) fn theme_contract(&self) -> &ThemeContract {
@@ -205,11 +283,10 @@ impl BuiltInRegistrySnapshot {
         self.schemas.get(logical_path)
     }
 
-    fn collect_item_closure<'a>(
-        &'a self,
+    fn collect_item_closure(
+        &self,
         name: &str,
         seen: &mut BTreeSet<String>,
-        resolved: &mut Vec<&'a BuiltInRegistryItemSnapshot>,
     ) -> Result<(), SnapshotError> {
         if !seen.insert(name.to_owned()) {
             return Ok(());
@@ -219,9 +296,8 @@ impl BuiltInRegistrySnapshot {
             .get(name)
             .ok_or_else(|| SnapshotError::ItemNotFound(name.to_owned()))?;
         for dependency in &item.item.registry_dependencies {
-            self.collect_item_closure(dependency, seen, resolved)?;
+            self.collect_item_closure(dependency, seen)?;
         }
-        resolved.push(item);
         Ok(())
     }
 
@@ -308,6 +384,10 @@ pub(crate) enum SnapshotError {
         contract_version: String,
         expected: String,
     },
+    InvalidThemeCss {
+        logical_path: String,
+        reason: String,
+    },
     UnownedRuntimeAsset {
         logical_path: String,
     },
@@ -338,6 +418,7 @@ impl SnapshotError {
             | Self::InvalidRegistryCatalog { logical_path, .. }
             | Self::InvalidThemeContract { logical_path, .. }
             | Self::InvalidThemeContractSchema { logical_path, .. }
+            | Self::InvalidThemeCss { logical_path, .. }
             | Self::UnownedRuntimeAsset { logical_path }
             | Self::DuplicateRuntimeAssetReference { logical_path, .. }
             | Self::SerializeItem { logical_path, .. } => Some(logical_path),
@@ -438,6 +519,13 @@ impl fmt::Display for SnapshotError {
                 formatter,
                 "theme contract version mismatch: {manifest_path} declares {manifest_version}, {contract_path} declares {contract_version}, runtime expects {expected}"
             ),
+            Self::InvalidThemeCss {
+                logical_path,
+                reason,
+            } => write!(
+                formatter,
+                "invalid built-in theme CSS {logical_path}: {reason}"
+            ),
             Self::UnownedRuntimeAsset { logical_path } => write!(
                 formatter,
                 "built-in runtime asset has no manifest owner: {logical_path}"
@@ -481,6 +569,7 @@ impl std::error::Error for SnapshotError {
             | Self::RegistryItemIdentity { .. }
             | Self::InvalidThemeContractSchema { .. }
             | Self::ThemeContractVersionMismatch { .. }
+            | Self::InvalidThemeCss { .. }
             | Self::UnownedRuntimeAsset { .. }
             | Self::DuplicateRuntimeAssetReference { .. }
             | Self::ItemNotFound(_) => None,
@@ -604,7 +693,7 @@ fn own_exact_catalog(
 
 fn parse_root(assets: &BTreeMap<String, OwnedAsset>) -> Result<RegistryRoot, SnapshotError> {
     let input = asset_text(assets, REGISTRY_ROOT_PATH, EmbeddedAssetKind::Json)?;
-    let root = parse_registry_root_str(input).map_err(|source| SnapshotError::ParseJson {
+    let root = parse_registry_root_raw_str(input).map_err(|source| SnapshotError::ParseJson {
         logical_path: REGISTRY_ROOT_PATH.to_owned(),
         source,
     })?;
@@ -631,10 +720,11 @@ fn parse_items(
     for entry in &root.items {
         let logical_path = format!("registry/{}", entry.path);
         let input = asset_text(assets, &logical_path, EmbeddedAssetKind::Json)?;
-        let item = parse_registry_item_str(input).map_err(|source| SnapshotError::ParseJson {
-            logical_path: logical_path.clone(),
-            source,
-        })?;
+        let item =
+            parse_registry_item_raw_str(input).map_err(|source| SnapshotError::ParseJson {
+                logical_path: logical_path.clone(),
+                source,
+            })?;
         item.validate()
             .map_err(|source| SnapshotError::InvalidRegistryItem {
                 logical_path: logical_path.clone(),
@@ -758,6 +848,190 @@ fn validate_exact_asset_ownership(
     Ok(())
 }
 
+fn validate_runtime_compatibility_sources(
+    assets: &BTreeMap<String, OwnedAsset>,
+    items: &[RegistryItem],
+) -> Result<(), SnapshotError> {
+    let identity = asset_text(assets, "registry/ui/identity.rs", EmbeddedAssetKind::Rust)?;
+    for required in [
+        "pub fn KitIdProvider",
+        "provide_context(KitIdScope::new())",
+        "pub(crate) fn use_kit_id",
+        "use_context::<KitIdScope>()",
+    ] {
+        if !identity.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/identity.rs",
+                format!("identity ABI 1 binding {required:?}"),
+            ));
+        }
+    }
+    for forbidden in ["Atomic", "fetch_add", "static NEXT"] {
+        if identity.contains(forbidden) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/identity.rs",
+                format!("identity ABI 1 without process-global counter {forbidden:?}"),
+            ));
+        }
+    }
+
+    for logical_path in [
+        "registry/ui/collapsible/root.rs",
+        "registry/ui/dialog/root.rs",
+        "registry/ui/field/root.rs",
+        "registry/ui/menu/root.rs",
+        "registry/ui/tabs/root.rs",
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        if !source.contains("use_kit_id(") {
+            return Err(invalid_runtime_compatibility(
+                logical_path,
+                "identity ABI 1 scoped fallback".to_owned(),
+            ));
+        }
+        for forbidden in ["Atomic", "fetch_add", "static NEXT"] {
+            if source.contains(forbidden) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("identity ABI 1 without process-global counter {forbidden:?}"),
+                ));
+            }
+        }
+    }
+
+    for logical_path in [
+        "registry/ui/dialog/content.rs",
+        "registry/ui/menu/content.rs",
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        for required in [
+            "transition_cancel_handler()",
+            "animation_cancel_handler()",
+            "on:transitioncancel=",
+            "on:animationcancel=",
+        ] {
+            if !source.contains(required) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("Presence ABI 2 binding {required:?}"),
+                ));
+            }
+        }
+    }
+
+    let dialog = asset_text(
+        assets,
+        "registry/ui/dialog/content.rs",
+        EmbeddedAssetKind::Rust,
+    )?;
+    for required in [
+        "web_ui_primitives::leptos::{",
+        "Portal, PortalMount, PortalProps",
+        "#[prop(optional)] portal_mount: Option<PortalMount>",
+        "#[prop(default = true)] portal_reparent: bool",
+        "Portal(PortalProps {",
+    ] {
+        if !dialog.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/dialog/content.rs",
+                format!("portal ABI 1 binding {required:?}"),
+            ));
+        }
+    }
+    if dialog.matches("Portal(PortalProps {").count() != 1 {
+        return Err(invalid_runtime_compatibility(
+            "registry/ui/dialog/content.rs",
+            "exactly one qualified portal ABI 1 construction".to_owned(),
+        ));
+    }
+
+    let menu = asset_text(
+        assets,
+        "registry/ui/menu/content.rs",
+        EmbeddedAssetKind::Rust,
+    )?;
+    for required in [
+        "PlacementSink",
+        "#[prop(optional)] placement_sink: PlacementSink",
+        ".sink(placement_sink)",
+        ".strict_id()",
+        "data-web-ui-placement-id=",
+    ] {
+        if !menu.contains(required) {
+            return Err(invalid_runtime_compatibility(
+                "registry/ui/menu/content.rs",
+                format!("strict placement binding {required:?}"),
+            ));
+        }
+    }
+
+    for (logical_path, required) in [
+        ("registry/ui/field/message.rs", "unregister_message_id"),
+        ("registry/ui/menu/item.rs", "unregister_item"),
+        ("registry/ui/tabs/trigger.rs", "unregister_trigger"),
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        for binding in ["on_cleanup", required] {
+            if !source.contains(binding) {
+                return Err(invalid_runtime_compatibility(
+                    logical_path,
+                    format!("dynamic registration cleanup binding {binding:?}"),
+                ));
+            }
+        }
+    }
+
+    for (logical_path, required) in [
+        ("registry/ui/collapsible/content.rs", "hidden=move ||"),
+        (
+            "registry/ui/collapsible/trigger.rs",
+            "aria-expanded=move ||",
+        ),
+        ("registry/ui/tabs/list.rs", "role=move ||"),
+        ("registry/ui/tabs/panel.rs", "aria-labelledby=move ||"),
+        ("registry/ui/tabs/trigger.rs", "aria-selected=move ||"),
+    ] {
+        let source = asset_text(assets, logical_path, EmbeddedAssetKind::Rust)?;
+        if !source.contains(required) || source.contains("use_dom_bindings") {
+            return Err(invalid_runtime_compatibility(
+                logical_path,
+                format!("SSR attribute projection binding {required:?}"),
+            ));
+        }
+    }
+
+    for item in items {
+        for style in &item.styles {
+            let logical_path = format!("registry/{}", style.source);
+            let source = asset_text(assets, &logical_path, EmbeddedAssetKind::Css)?;
+            let required = if item.name == "tokens" {
+                "@layer leptos-ui-kit.tokens, leptos-ui-kit.themes, leptos-ui-kit.components;"
+            } else {
+                "@layer leptos-ui-kit.components {"
+            };
+            if source.matches(required).count() != 1 {
+                return Err(invalid_runtime_compatibility(
+                    &logical_path,
+                    format!("exactly one layer ABI 1 declaration {required:?}"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn invalid_runtime_compatibility(logical_path: &str, expected: String) -> SnapshotError {
+    SnapshotError::InvalidRegistryCatalog {
+        logical_path: logical_path.to_owned(),
+        source: RegistryError::InvalidValue {
+            field: "compatibility",
+            expected,
+            actual: "required runtime source binding is missing or duplicated".to_owned(),
+        },
+    }
+}
+
 fn item_content_hash(
     assets: &BTreeMap<String, OwnedAsset>,
     logical_path: &str,
@@ -851,6 +1125,406 @@ fn validate_theme_contract_version(
         contract_version: contract.contract_version.clone(),
         expected: crate::THEME_CONTRACT_VERSION.to_owned(),
     })
+}
+
+fn validate_theme_css_contract(
+    assets: &BTreeMap<String, OwnedAsset>,
+    root: &RegistryRoot,
+    items: &[RegistryItem],
+    contract: &ThemeContract,
+) -> Result<(), SnapshotError> {
+    let tokens_entry = root
+        .items
+        .iter()
+        .find(|entry| entry.name == "tokens")
+        .ok_or_else(|| invalid_theme_css(REGISTRY_ROOT_PATH, "missing tokens registry entry"))?;
+    if format!("registry/{}", tokens_entry.path) != TOKENS_MANIFEST_PATH {
+        return Err(invalid_theme_css(
+            REGISTRY_ROOT_PATH,
+            format!(
+                "tokens registry entry must reference {}, got registry/{}",
+                TOKENS_MANIFEST_PATH
+                    .strip_prefix("registry/")
+                    .expect("tokens manifest path has registry prefix"),
+                tokens_entry.path
+            ),
+        ));
+    }
+
+    let tokens = items
+        .iter()
+        .find(|item| item.name == "tokens")
+        .ok_or_else(|| invalid_theme_css(TOKENS_MANIFEST_PATH, "missing tokens manifest"))?;
+    if tokens.styles.len() != 1
+        || tokens.styles[0].source
+            != TOKENS_CSS_PATH
+                .strip_prefix("registry/")
+                .expect("tokens CSS path has registry prefix")
+        || tokens.styles[0].target.id != "tokens"
+    {
+        return Err(invalid_theme_css(
+            TOKENS_MANIFEST_PATH,
+            "tokens manifest must own exactly styles/tokens.css as managed block \"tokens\"",
+        ));
+    }
+
+    let mut all_declarations = Vec::new();
+    for (logical_path, asset) in assets {
+        if asset.kind != EmbeddedAssetKind::Css {
+            continue;
+        }
+        let masked = mask_css_comments_and_strings(logical_path, &asset.content)?;
+        validate_balanced_css_blocks(logical_path, &masked)?;
+        let root_occurrences = root_selector_occurrences(&masked);
+        let expected_roots = usize::from(logical_path == TOKENS_CSS_PATH);
+        if root_occurrences != expected_roots {
+            return Err(invalid_theme_css(
+                logical_path,
+                format!(
+                    "expected {expected_roots} built-in :root selector occurrences, found {root_occurrences}"
+                ),
+            ));
+        }
+        let exact_root_rules = root_rule_bodies(&masked).len();
+        if exact_root_rules != expected_roots {
+            return Err(invalid_theme_css(
+                logical_path,
+                format!(
+                    "expected {expected_roots} exact kit-layer :root rules, found {exact_root_rules}"
+                ),
+            ));
+        }
+        all_declarations.extend(
+            custom_property_declaration_names(&masked)
+                .into_iter()
+                .map(|name| (logical_path.as_str(), name)),
+        );
+    }
+
+    let tokens_css = asset_text(assets, TOKENS_CSS_PATH, EmbeddedAssetKind::Css)?;
+    let masked_tokens_css = mask_css_comments_and_strings(TOKENS_CSS_PATH, tokens_css)?;
+    let root_body = root_rule_bodies(&masked_tokens_css)
+        .into_iter()
+        .next()
+        .expect("the sole root block was established above");
+    let declarations =
+        parse_root_declarations(TOKENS_CSS_PATH, tokens_css, &masked_tokens_css, root_body)?;
+
+    let color_scheme = declarations
+        .iter()
+        .filter(|(name, _)| name == "color-scheme")
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    if color_scheme != ["light"] {
+        return Err(invalid_theme_css(
+            TOKENS_CSS_PATH,
+            format!(
+                "the sole :root must declare color-scheme: light exactly once, got {color_scheme:?}"
+            ),
+        ));
+    }
+
+    let contract_defaults = contract
+        .tokens
+        .iter()
+        .map(|token| (token.name.as_str(), token.default_value.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut css_defaults = BTreeMap::<&str, &str>::new();
+    for (name, value) in &declarations {
+        if !name.starts_with("--kit-") {
+            continue;
+        }
+        if css_defaults.insert(name, value).is_some() {
+            return Err(invalid_theme_css(
+                TOKENS_CSS_PATH,
+                format!("duplicate theme token declaration {name}"),
+            ));
+        }
+    }
+
+    if css_defaults != contract_defaults {
+        let missing = contract_defaults
+            .keys()
+            .filter(|name| !css_defaults.contains_key(**name))
+            .copied()
+            .collect::<Vec<_>>();
+        let extra = css_defaults
+            .keys()
+            .filter(|name| !contract_defaults.contains_key(**name))
+            .copied()
+            .collect::<Vec<_>>();
+        let changed = contract_defaults
+            .iter()
+            .filter_map(|(name, expected)| {
+                css_defaults
+                    .get(name)
+                    .filter(|actual| *actual != expected)
+                    .map(|actual| format!("{name}: expected {expected:?}, got {actual:?}"))
+            })
+            .collect::<Vec<_>>();
+        return Err(invalid_theme_css(
+            TOKENS_CSS_PATH,
+            format!(
+                "theme token defaults differ from the contract; missing={missing:?}, extra={extra:?}, changed={changed:?}"
+            ),
+        ));
+    }
+
+    let mut declared_inventory = all_declarations
+        .iter()
+        .filter(|(_, name)| contract_defaults.contains_key(name.as_str()))
+        .map(|(path, name)| (*path, name.as_str()))
+        .collect::<Vec<_>>();
+    declared_inventory.sort_unstable();
+    let expected_inventory = contract_defaults
+        .keys()
+        .map(|name| (TOKENS_CSS_PATH, *name))
+        .collect::<Vec<_>>();
+    if declared_inventory != expected_inventory {
+        return Err(invalid_theme_css(
+            TOKENS_CSS_PATH,
+            format!(
+                "theme token declarations must occur exactly once in the sole built-in :root; got {declared_inventory:?}"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn invalid_theme_css(logical_path: &str, reason: impl Into<String>) -> SnapshotError {
+    SnapshotError::InvalidThemeCss {
+        logical_path: logical_path.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn mask_css_comments_and_strings(
+    logical_path: &str,
+    input: &str,
+) -> Result<Vec<u8>, SnapshotError> {
+    let bytes = input.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"/*") {
+            let start = index;
+            index += 2;
+            while index + 1 < bytes.len() && !bytes[index..].starts_with(b"*/") {
+                index += 1;
+            }
+            if index + 1 == bytes.len() {
+                return Err(invalid_theme_css(logical_path, "unterminated CSS comment"));
+            }
+            index += 2;
+            masked[start..index].fill(b' ');
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"') {
+            let quote = bytes[index];
+            let start = index;
+            index += 1;
+            let mut closed = false;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[index] == quote {
+                    index += 1;
+                    closed = true;
+                    break;
+                }
+                index += 1;
+            }
+            if !closed {
+                return Err(invalid_theme_css(logical_path, "unterminated CSS string"));
+            }
+            masked[start..index].fill(b' ');
+            continue;
+        }
+        index += 1;
+    }
+    Ok(masked)
+}
+
+fn root_rule_bodies(masked: &[u8]) -> Vec<(usize, usize)> {
+    let mut bodies = Vec::new();
+    for (index, byte) in masked.iter().copied().enumerate() {
+        if byte != b'{' {
+            continue;
+        }
+        let prelude_start = masked[..index]
+            .iter()
+            .rposition(|byte| matches!(byte, b'{' | b'}' | b';'))
+            .map_or(0, |delimiter| delimiter + 1);
+        if trim_ascii(&masked[prelude_start..index]) != b":root" {
+            continue;
+        }
+        let mut body_depth = 1_usize;
+        let mut end = index + 1;
+        while end < masked.len() && body_depth != 0 {
+            match masked[end] {
+                b'{' => body_depth += 1,
+                b'}' => body_depth -= 1,
+                _ => {}
+            }
+            end += 1;
+        }
+        if body_depth == 0 {
+            bodies.push((index + 1, end - 1));
+        }
+    }
+    bodies
+}
+
+fn validate_balanced_css_blocks(logical_path: &str, masked: &[u8]) -> Result<(), SnapshotError> {
+    let mut depth = 0_usize;
+    for byte in masked {
+        match byte {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => {
+                return Err(invalid_theme_css(
+                    logical_path,
+                    "unexpected closing CSS block",
+                ));
+            }
+            b'}' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        Ok(())
+    } else {
+        Err(invalid_theme_css(
+            logical_path,
+            format!("{depth} unterminated CSS block(s)"),
+        ))
+    }
+}
+
+fn root_selector_occurrences(masked: &[u8]) -> usize {
+    const ROOT: &[u8] = b":root";
+
+    masked
+        .windows(ROOT.len())
+        .enumerate()
+        .filter(|(index, candidate)| {
+            candidate.eq_ignore_ascii_case(ROOT)
+                && masked.get(index + ROOT.len()).is_none_or(|next| {
+                    !next.is_ascii_alphanumeric() && !matches!(next, b'-' | b'_')
+                })
+        })
+        .count()
+}
+
+fn custom_property_declaration_names(masked: &[u8]) -> Vec<String> {
+    let mut declarations = Vec::new();
+    let mut index = 0;
+    while index + 6 <= masked.len() {
+        if !masked[index..].starts_with(b"--kit-") {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 6;
+        while index < masked.len()
+            && (masked[index].is_ascii_alphanumeric() || masked[index] == b'-')
+        {
+            index += 1;
+        }
+        let end = index;
+        while index < masked.len() && masked[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if masked.get(index) == Some(&b':') {
+            declarations.push(String::from_utf8_lossy(&masked[start..end]).into_owned());
+        }
+    }
+    declarations
+}
+
+fn parse_root_declarations(
+    logical_path: &str,
+    original: &str,
+    masked: &[u8],
+    (start, end): (usize, usize),
+) -> Result<Vec<(String, String)>, SnapshotError> {
+    let mut declarations = Vec::new();
+    let mut segment_start = start;
+    let mut parentheses = 0_usize;
+    for index in start..=end {
+        let byte = if index == end {
+            b';'
+        } else {
+            masked.get(index).copied().unwrap_or(b';')
+        };
+        match byte {
+            b'(' => parentheses += 1,
+            b')' if parentheses > 0 => parentheses -= 1,
+            b'{' | b'}' => {
+                return Err(invalid_theme_css(
+                    logical_path,
+                    "nested blocks are not allowed in the built-in :root rule",
+                ));
+            }
+            b';' if parentheses == 0 || index == end => {
+                let segment_end = if index == end && byte != b';' {
+                    index + 1
+                } else {
+                    index
+                };
+                let segment = trim_ascii(&masked[segment_start..segment_end]);
+                if !segment.is_empty() {
+                    let colon = segment
+                        .iter()
+                        .position(|byte| *byte == b':')
+                        .ok_or_else(|| {
+                            invalid_theme_css(
+                                logical_path,
+                                format!(
+                                    "malformed declaration {:?}",
+                                    String::from_utf8_lossy(segment)
+                                ),
+                            )
+                        })?;
+                    let absolute = segment.as_ptr() as usize - masked.as_ptr() as usize;
+                    let name = original[absolute..absolute + colon].trim().to_owned();
+                    let value = original[absolute + colon + 1..absolute + segment.len()]
+                        .trim()
+                        .to_owned();
+                    if name.is_empty() || value.is_empty() {
+                        return Err(invalid_theme_css(
+                            logical_path,
+                            format!("empty name or value in declaration {name:?}"),
+                        ));
+                    }
+                    declarations.push((name, value));
+                }
+                segment_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if parentheses != 0 {
+        return Err(invalid_theme_css(
+            logical_path,
+            "unbalanced parentheses in the built-in :root rule",
+        ));
+    }
+    Ok(declarations)
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &bytes[start..end]
 }
 
 fn parse_schemas(
@@ -957,7 +1631,7 @@ fn validate_schema_contract(
         contract.logical_path,
         schema,
         "/properties/schemaVersion/const",
-        &Value::String(SCHEMA_VERSION.to_owned()),
+        &Value::String(contract.schema_version.to_owned()),
     )
 }
 
@@ -1171,22 +1845,30 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_reads_the_provider_once_and_reuses_owned_models_and_sources() {
+    fn snapshot_cache_reads_the_provider_once_for_repeated_health_and_item_access() {
         let provider = CountingProvider::new();
         let expected_content_views = provider.inner.asset_count();
-        let snapshot = BuiltInRegistrySnapshot::from_provider(&provider).expect("snapshot");
-        assert_eq!(provider.enumerations.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.lookups.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            provider.content_views.load(Ordering::SeqCst),
-            expected_content_views
-        );
+        let snapshot_cell = BuiltInRegistrySnapshotCell::new();
 
         for _ in 0..4 {
+            let snapshot = snapshot_cell
+                .get_or_try_init(&provider)
+                .expect("cached snapshot");
             assert_eq!(snapshot.root().name, "leptos-ui-kit");
             assert_eq!(snapshot.item("button").unwrap().item().name, "button");
+            assert_eq!(
+                snapshot
+                    .resolve_items(&["button".to_owned()])
+                    .expect("resolve cached item")
+                    .last()
+                    .expect("button closure")
+                    .item()
+                    .name,
+                "button"
+            );
             assert!(snapshot.registry_source("ui/button.rs").is_ok());
             assert_eq!(snapshot.theme_contract().contract_version, "1");
+            assert_eq!(snapshot.schema_count(), 6);
         }
         assert_eq!(provider.enumerations.load(Ordering::SeqCst), 1);
         assert_eq!(provider.lookups.load(Ordering::SeqCst), 0);
@@ -1442,6 +2124,157 @@ mod tests {
             baseline.item("button").unwrap().content_hash(),
             changed.item("button").unwrap().content_hash()
         );
+    }
+
+    #[test]
+    fn snapshot_enforces_exact_theme_contract_css_defaults() {
+        for (case, mutate, expected_fragment) in [
+            (
+                "missing",
+                ("  --kit-color-canvas: #f8fafc;\n", ""),
+                "missing=[\"--kit-color-canvas\"]",
+            ),
+            (
+                "changed",
+                ("--kit-color-canvas: #f8fafc", "--kit-color-canvas: #000000"),
+                "changed=[\"--kit-color-canvas:",
+            ),
+            (
+                "extra",
+                (
+                    "  color-scheme: light;\n",
+                    "  color-scheme: light;\n  --kit-color-extra: currentColor;\n",
+                ),
+                "extra=[\"--kit-color-extra\"]",
+            ),
+            (
+                "duplicate",
+                (
+                    "  --kit-color-canvas: #f8fafc;\n",
+                    "  --kit-color-canvas: #f8fafc;\n  --kit-color-canvas: #f8fafc;\n",
+                ),
+                "duplicate theme token declaration --kit-color-canvas",
+            ),
+        ] {
+            let mut provider = InMemoryAssetProvider::from_embedded();
+            let css = provider
+                .utf8_asset(super::TOKENS_CSS_PATH, EmbeddedAssetKind::Css)
+                .expect("read tokens CSS");
+            let changed = css.replacen(mutate.0, mutate.1, 1);
+            assert_ne!(changed, css, "{case} mutation must change the fixture");
+            provider
+                .set_bytes(super::TOKENS_CSS_PATH, changed.into_bytes())
+                .expect("replace tokens CSS");
+
+            let error = BuiltInRegistrySnapshot::from_provider(&provider)
+                .expect_err("theme CSS drift must reject the snapshot");
+            assert!(
+                matches!(
+                    &error,
+                    SnapshotError::InvalidThemeCss { logical_path, .. }
+                        if logical_path == super::TOKENS_CSS_PATH
+                ),
+                "{case}: {error}"
+            );
+            assert!(
+                error.to_string().contains(expected_fragment),
+                "{case}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_requires_one_built_in_root_and_one_declaration_location() {
+        let mut duplicate_root = InMemoryAssetProvider::from_embedded();
+        let css = duplicate_root
+            .utf8_asset(super::TOKENS_CSS_PATH, EmbeddedAssetKind::Css)
+            .expect("read tokens CSS");
+        duplicate_root
+            .set_bytes(
+                super::TOKENS_CSS_PATH,
+                format!("{css}\n:root {{ color-scheme: light; }}\n").into_bytes(),
+            )
+            .expect("append duplicate root");
+        assert!(matches!(
+            BuiltInRegistrySnapshot::from_provider(&duplicate_root),
+            Err(SnapshotError::InvalidThemeCss { logical_path, reason })
+                if logical_path == super::TOKENS_CSS_PATH
+                    && reason.contains("expected 1 built-in :root selector occurrences")
+        ));
+
+        let mut component_root = InMemoryAssetProvider::from_embedded();
+        let path = "registry/styles/button.css";
+        let css = component_root
+            .utf8_asset(path, EmbeddedAssetKind::Css)
+            .expect("read component CSS");
+        component_root
+            .set_bytes(
+                path,
+                format!("{css}\n:root {{ --kit-color-canvas: #f8fafc; }}\n").into_bytes(),
+            )
+            .expect("append component root");
+        assert!(matches!(
+            BuiltInRegistrySnapshot::from_provider(&component_root),
+            Err(SnapshotError::InvalidThemeCss { logical_path, reason })
+                if logical_path == path
+                    && reason.contains("expected 0 built-in :root selector occurrences")
+        ));
+    }
+
+    #[test]
+    fn theme_css_scanner_rejects_nested_selector_list_and_unbalanced_roots() {
+        for (path, suffix, expected) in [
+            (
+                "registry/styles/button.css",
+                "\n@media (min-width: 1px) { :root { color-scheme: light; } }\n",
+                "expected 0 built-in :root selector occurrences",
+            ),
+            (
+                "registry/styles/button.css",
+                "\n:root, .application { color-scheme: light; }\n",
+                "expected 0 built-in :root selector occurrences",
+            ),
+            (
+                "registry/styles/button.css",
+                "\n.application {\n",
+                "unterminated CSS block",
+            ),
+        ] {
+            let mut provider = InMemoryAssetProvider::from_embedded();
+            let css = provider
+                .utf8_asset(path, EmbeddedAssetKind::Css)
+                .expect("read component CSS");
+            provider
+                .set_bytes(path, format!("{css}{suffix}").into_bytes())
+                .expect("append invalid CSS");
+
+            assert!(matches!(
+                BuiltInRegistrySnapshot::from_provider(&provider),
+                Err(SnapshotError::InvalidThemeCss { logical_path, reason })
+                    if logical_path == path && reason.contains(expected)
+            ));
+        }
+    }
+
+    #[test]
+    fn theme_css_scanner_ignores_comments_strings_and_variable_uses() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let path = "registry/styles/button.css";
+        let css = provider
+            .utf8_asset(path, EmbeddedAssetKind::Css)
+            .expect("read button CSS");
+        provider
+            .set_bytes(
+                path,
+                format!(
+                    "{css}\n/* :root {{ --kit-fake: red; }} */\n.fake::before {{ content: \":root {{ --kit-string: red; }}\"; color: var(--kit-color-text); }}\n"
+                )
+                .into_bytes(),
+            )
+            .expect("append ignored CSS syntax");
+
+        BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect("comments, strings, and var uses are not declarations");
     }
 
     fn mutate_json(

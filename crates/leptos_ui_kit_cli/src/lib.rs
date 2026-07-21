@@ -4,42 +4,265 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
     process::{self, Command},
 };
 
 use leptos_ui_kit_codegen::{
-    AddPlan, CommandEnvelope, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic, DiagnosticLevel,
-    InitPlan, InstallLock, InstalledFile, InstalledItem, InstalledStyleBlock, SyncPlan, apply_add,
-    apply_init, apply_sync, check_pending_recovery, hash_content_bytes,
-    inspect_managed_css_blocks_at_path, install_lock_path, parse_install_lock_str_at_path,
-    plan_add, plan_init, plan_sync,
+    AddPlan, ChangeRecord, CodegenError, CommandStatus, DEFAULT_KIT_LOCK_PATH, Diagnostic,
+    DiagnosticLevel, HtmlStylesheetState, InitPlan, InstallLock, InstalledFile, InstalledItem,
+    InstalledStyleBlock, SyncPlan, apply_add, apply_init, apply_sync, check_pending_recovery,
+    hash_content_bytes, inspect_html_stylesheet, inspect_managed_css_blocks_at_path,
+    install_lock_path, parse_install_lock_str_at_path, plan_add, plan_init, plan_sync,
 };
 use leptos_ui_kit_registry::{
     CargoPlanEntry, ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_UI_DIR,
-    DependencyRequirement, DependencyStatus, InfoOutput, KitConfig, ResolvedRegistryItem,
-    SCHEMA_VERSION, TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig,
-    build_info_output, canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json,
-    load_registry_item, read_built_in_registry_source, resolve_built_in_registry_items,
-    validate_built_in_registry_health,
+    DependencyRequirement, DependencyStatus, DetectionError, InfoOutput, KitConfig, ProjectKind,
+    RegistryError, RenderModeContract, RenderModeSelection, ResolvedRegistryItem, SCHEMA_VERSION,
+    TOOL_BINARY, TOOL_GIT_URL, TOOL_PACKAGE, ToolConfig, ToolSourceConfig, build_info_output,
+    canonical_tool_config, detect_cargo_plan_requirements, kit_config_to_json, load_registry_item,
+    normalize_cargo_plan_for_project, read_built_in_registry_source,
+    resolve_built_in_registry_items, validate_built_in_registry_health,
 };
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CliEnvelope<T>
+where
+    T: Serialize,
+{
+    schema_version: &'static str,
+    command: String,
+    status: &'static str,
+    diagnostics: Vec<CliDiagnosticOutput>,
+    changes: Vec<CliChangeOutput>,
+    data: T,
+}
+
+impl<T> CliEnvelope<T>
+where
+    T: Serialize,
+{
+    fn new(command: impl Into<String>, status: CommandStatus, data: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            command: command.into(),
+            status: command_status_name(status),
+            diagnostics: Vec::new(),
+            changes: Vec::new(),
+            data,
+        }
+    }
+
+    fn success(command: impl Into<String>, data: T) -> Self {
+        Self::new(command, CommandStatus::Success, data)
+    }
+
+    fn with_diagnostics(mut self, diagnostics: &[Diagnostic]) -> Self {
+        self.diagnostics = diagnostics.iter().map(CliDiagnosticOutput::from).collect();
+        self
+    }
+
+    fn with_changes(mut self, changes: &[ChangeRecord]) -> Self {
+        self.changes = changes.iter().map(CliChangeOutput::from).collect();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliDiagnosticOutput {
+    level: &'static str,
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestion: Option<String>,
+}
+
+impl From<&Diagnostic> for CliDiagnosticOutput {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            level: match diagnostic.level {
+                DiagnosticLevel::Info => "info",
+                DiagnosticLevel::Warning => "warning",
+                DiagnosticLevel::Error => "error",
+            },
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+            path: diagnostic.path.clone(),
+            suggestion: diagnostic.suggestion.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliChangeOutput {
+    kind: &'static str,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<String>,
+    tracked: bool,
+}
+
+impl From<&ChangeRecord> for CliChangeOutput {
+    fn from(change: &ChangeRecord) -> Self {
+        Self {
+            kind: match change.kind {
+                leptos_ui_kit_codegen::ChangeKind::CreateFile => "create_file",
+                leptos_ui_kit_codegen::ChangeKind::UpdateFile => "update_file",
+                leptos_ui_kit_codegen::ChangeKind::DeleteFile => "delete_file",
+                leptos_ui_kit_codegen::ChangeKind::CreateDir => "create_dir",
+                leptos_ui_kit_codegen::ChangeKind::UpdateCssBlock => "update_css_block",
+                leptos_ui_kit_codegen::ChangeKind::WriteLockFile => "write_lock_file",
+            },
+            path: change.path.clone(),
+            item: change.item.clone(),
+            tracked: change.tracked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoRequirementOutput {
+    #[serde(rename = "crate")]
+    crate_name: String,
+    source: CargoSourceOutput,
+    features: Vec<String>,
+    required: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CargoSourceOutput {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rev: Option<String>,
+}
+
+impl From<&CargoPlanEntry> for CargoRequirementOutput {
+    fn from(entry: &CargoPlanEntry) -> Self {
+        Self {
+            crate_name: entry.crate_name.clone(),
+            source: CargoSourceOutput {
+                kind: match entry.source.kind {
+                    leptos_ui_kit_registry::CargoPlanSourceKind::Version => "version",
+                    leptos_ui_kit_registry::CargoPlanSourceKind::Git => "git",
+                },
+                version: entry.source.version.clone(),
+                url: entry.source.url.clone(),
+                rev: entry.source.rev.clone(),
+            },
+            features: entry.features.clone(),
+            required: entry.required,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddCommandOutput {
+    item_id: String,
+    item_name: String,
+    content_hash: String,
+    dependencies: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCommandOutput {
+    item_ids: Vec<String>,
+    dependencies: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitCommandOutput {}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HelpCommandOutput {
+    usage: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InfoCommandOutput {
-    #[serde(flatten)]
-    info: InfoOutput,
+    project_root: &'static str,
+    project_kind: &'static str,
+    workspace_mode: &'static str,
+    cargo_manifest: String,
+    source_root: String,
+    index_html: String,
+    stylesheet: String,
+    render_mode_contract: RenderModeContract,
+    render_mode_selection: RenderModeSelection,
+    render_mode: Option<&'static str>,
+    config_path: Option<String>,
     registry_available: bool,
-    installed_lock: Option<InstallLock>,
+    installed: Option<InstalledSummaryOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledSummaryOutput {
+    lock_path: String,
+    item_ids: Vec<String>,
+    file_paths: Vec<String>,
+    style_block_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RegistryItemSourceOutput {
-    resolved: ResolvedRegistryItem,
+    resolved: RegistryItemOutput,
     sources: Vec<RegistrySourceContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryItemOutput {
+    source_kind: &'static str,
+    source_path: String,
+    content_hash: String,
+    name: String,
+    kind: String,
+    version: String,
+    title: String,
+    description: String,
+    registry_dependencies: Vec<String>,
+    targets: RegistryTargetsOutput,
+    cargo_plan: Vec<CargoRequirementOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryTargetsOutput {
+    ui_files: Vec<RegistryUiTargetOutput>,
+    style_blocks: Vec<RegistryStyleTargetOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryUiTargetOutput {
+    source: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryStyleTargetOutput {
+    source: String,
+    id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +290,26 @@ struct VersionSourceOutput {
     url: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCommandOutput {
+    project_root: &'static str,
+    strict: bool,
+    check: bool,
+    trunk_build: bool,
+    checks: Vec<DoctorCheckOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorCheckOutput {
+    name: String,
+    status: DoctorCheckStatus,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +388,18 @@ enum DoctorCheckStatus {
     Fail,
 }
 
+fn command_status_name(status: CommandStatus) -> &'static str {
+    match status {
+        CommandStatus::Success => "success",
+        CommandStatus::NoChange => "no_change",
+        CommandStatus::Planned => "planned",
+        CommandStatus::Warning => "warning",
+        CommandStatus::Error => "error",
+        CommandStatus::Conflict => "conflict",
+        CommandStatus::Unsupported => "unsupported",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DoctorRegistrySnapshot {
     requested_names: BTreeSet<String>,
@@ -172,7 +427,7 @@ enum DoctorLockState {
     Valid {
         logical_path: String,
         path: PathBuf,
-        lock: InstallLock,
+        lock: Box<InstallLock>,
     },
 }
 
@@ -195,18 +450,577 @@ impl DoctorLockState {
 
     fn lock(&self) -> Option<&InstallLock> {
         match self {
-            Self::Valid { lock, .. } => Some(lock),
+            Self::Valid { lock, .. } => Some(lock.as_ref()),
             Self::Missing { .. } | Self::Invalid { .. } => None,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitClass {
+    Operational = 1,
+    Usage = 2,
+    DoctorFailed = 3,
+    Conflict = 10,
+    UnsafePath = 11,
+    RegistryPackage = 12,
+}
+
+impl ExitClass {
+    const fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorCategory {
+    Operational,
+    Usage,
+    Doctor,
+    Conflict,
+    UnsafePath,
+    RegistryPackage,
+}
+
+#[derive(Debug)]
+struct CliError {
+    command: String,
+    status: CommandStatus,
+    category: ErrorCategory,
+    code: &'static str,
+    message: Box<str>,
+    logical_path: Option<String>,
+    suggestion: Option<&'static str>,
+    source: Option<Box<dyn std::error::Error>>,
+    exit_class: ExitClass,
+    json: bool,
+    output_emitted: bool,
+}
+
+impl CliError {
+    fn usage(
+        command: impl Into<String>,
+        json: bool,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            status: CommandStatus::Unsupported,
+            category: ErrorCategory::Usage,
+            code,
+            message: message.into().into_boxed_str(),
+            logical_path: None,
+            suggestion: Some("Run the command with --help to inspect supported arguments."),
+            source: None,
+            exit_class: ExitClass::Usage,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn operational(
+        command: impl Into<String>,
+        json: bool,
+        code: &'static str,
+        message: impl Into<String>,
+        logical_path: Option<String>,
+        source: Option<Box<dyn std::error::Error>>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::Operational,
+            code,
+            message: message.into().into_boxed_str(),
+            logical_path,
+            suggestion: Some("Resolve the reported project or filesystem error and retry."),
+            source,
+            exit_class: ExitClass::Operational,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn doctor_failed(json: bool) -> Self {
+        Self {
+            command: "doctor".to_owned(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::Doctor,
+            code: "doctor.checks_failed",
+            message: "doctor checks failed".into(),
+            logical_path: None,
+            suggestion: Some("Resolve the failing doctor checks and retry."),
+            source: None,
+            exit_class: ExitClass::DoctorFailed,
+            json,
+            output_emitted: true,
+        }
+    }
+
+    fn from_codegen(
+        command: &'static str,
+        json: bool,
+        project_root: &Path,
+        action: &str,
+        error: CodegenError,
+    ) -> Self {
+        let (category, status, code, exit_class, logical_path, suggestion) = match &error {
+            CodegenError::Registry(_) => (
+                ErrorCategory::RegistryPackage,
+                CommandStatus::Error,
+                "registry.package",
+                ExitClass::RegistryPackage,
+                None,
+                "Verify the built-in registry package and requested item, then retry.",
+            ),
+            CodegenError::UnsafePath { path, .. } => (
+                ErrorCategory::UnsafePath,
+                CommandStatus::Error,
+                "path.unsafe",
+                ExitClass::UnsafePath,
+                Some(path.clone()),
+                "Use a normalized project-relative path without traversal or symlink escapes.",
+            ),
+            CodegenError::Config(
+                ConfigError::PathMustBeRelative { .. }
+                | ConfigError::PathTraversal { .. }
+                | ConfigError::UnsafePathSegment { .. }
+                | ConfigError::PathOverlap { .. },
+            ) => (
+                ErrorCategory::UnsafePath,
+                CommandStatus::Error,
+                "config.unsafe_path",
+                ExitClass::UnsafePath,
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
+                "Use a normalized project-relative configuration path without overlap.",
+            ),
+            CodegenError::UnsafePatch { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.patch_conflict",
+                ExitClass::Conflict,
+                logical_path(project_root, path),
+                "Resolve the conflicting app-owned content and retry.",
+            ),
+            CodegenError::PreimageConflict { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.preimage_conflict",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Re-plan after resolving the concurrent project change.",
+            ),
+            CodegenError::ProjectRootChanged { .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "project.root_changed",
+                ExitClass::Conflict,
+                None,
+                "Retry from the unchanged project root.",
+            ),
+            CodegenError::WriteLockContended { path } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.lock_contended",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Wait for the active writer to finish and retry.",
+            ),
+            CodegenError::LegacyWriteLock { path } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.legacy_lock",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Verify no older writer is running, remove the legacy lock, and retry.",
+            ),
+            CodegenError::InvalidCoordinationState { path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.invalid_coordination_state",
+                ExitClass::Conflict,
+                Some(path.clone()),
+                "Verify no writer is running, repair the coordination state, and retry.",
+            ),
+            CodegenError::RecoveryRequired { journal_path, .. } => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.recovery_required",
+                ExitClass::Conflict,
+                logical_path(project_root, journal_path),
+                "Run the command again after making the project available for recovery.",
+            ),
+            CodegenError::LockExists(path) => (
+                ErrorCategory::Conflict,
+                CommandStatus::Conflict,
+                "transaction.lock_exists",
+                ExitClass::Conflict,
+                logical_path(project_root, path),
+                "Wait for the active writer to finish and retry.",
+            ),
+            CodegenError::FilesystemOperation {
+                logical_path: path, ..
+            } => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "filesystem.operation",
+                ExitClass::Operational,
+                Some(path.clone()),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            CodegenError::Io { path, .. }
+            | CodegenError::LockParse { path, .. }
+            | CodegenError::InvalidLock { path, .. } => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "project.io",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            CodegenError::DuplicatePath(path) => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "plan.duplicate_path",
+                ExitClass::Operational,
+                Some(path.clone()),
+                "Report the duplicate generated path and retry with a corrected package.",
+            ),
+            CodegenError::Config(_) | CodegenError::LockSerialize(_) => (
+                ErrorCategory::Operational,
+                CommandStatus::Error,
+                "project.operation",
+                ExitClass::Operational,
+                None,
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+        };
+        let error_message = match &error {
+            CodegenError::Registry(error) => registry_error_message(error),
+            CodegenError::Config(error) => config_error_message(error),
+            _ => error.to_string(),
+        };
+
+        Self {
+            command: command.to_owned(),
+            status,
+            category,
+            code,
+            message: redact_project_root(&format!("{action}: {error_message}"), project_root)
+                .into_boxed_str(),
+            logical_path,
+            suggestion: Some(suggestion),
+            source: Some(Box::new(error)),
+            exit_class,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn from_detection(
+        command: &'static str,
+        json: bool,
+        project_root: &Path,
+        error: DetectionError,
+    ) -> Self {
+        let (category, code, exit_class, logical_path, suggestion) = match &error {
+            DetectionError::Registry(_) => (
+                ErrorCategory::RegistryPackage,
+                "registry.package",
+                ExitClass::RegistryPackage,
+                None,
+                "Verify the built-in registry package and retry.",
+            ),
+            DetectionError::Config(
+                ConfigError::PathMustBeRelative { .. }
+                | ConfigError::PathTraversal { .. }
+                | ConfigError::UnsafePathSegment { .. }
+                | ConfigError::PathOverlap { .. },
+            ) => (
+                ErrorCategory::UnsafePath,
+                "config.unsafe_path",
+                ExitClass::UnsafePath,
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
+                "Use a normalized project-relative configuration path without overlap.",
+            ),
+            DetectionError::MissingCargoManifest(path) => (
+                ErrorCategory::Operational,
+                "project.missing_manifest",
+                ExitClass::Operational,
+                logical_path(project_root, path).or_else(|| Some("Cargo.toml".to_owned())),
+                "Run the command from a supported project root.",
+            ),
+            DetectionError::MissingIndexHtml(path) => (
+                ErrorCategory::Operational,
+                "project.missing_index",
+                ExitClass::Operational,
+                logical_path(project_root, path).or_else(|| Some("index.html".to_owned())),
+                "Add the required Trunk index.html and retry.",
+            ),
+            DetectionError::MissingSourceRoot(path) => (
+                ErrorCategory::Operational,
+                "project.missing_source_root",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Add the configured source root and retry.",
+            ),
+            DetectionError::Io { path, .. } => (
+                ErrorCategory::Operational,
+                "project.io",
+                ExitClass::Operational,
+                logical_path(project_root, path),
+                "Resolve the reported project or filesystem error and retry.",
+            ),
+            DetectionError::CargoTomlParse(_) => (
+                ErrorCategory::Operational,
+                "project.invalid_manifest",
+                ExitClass::Operational,
+                Some("Cargo.toml".to_owned()),
+                "Correct Cargo.toml and retry.",
+            ),
+            DetectionError::UnsupportedProject(_) => (
+                ErrorCategory::Operational,
+                "project.unsupported",
+                ExitClass::Operational,
+                Some("Cargo.toml".to_owned()),
+                "Run the command from a supported single-package Trunk CSR project.",
+            ),
+            DetectionError::Config(_) => (
+                ErrorCategory::Operational,
+                "config.invalid",
+                ExitClass::Operational,
+                Some(DEFAULT_KIT_CONFIG_PATH.to_owned()),
+                "Correct the project configuration and retry.",
+            ),
+        };
+
+        let error_message = match &error {
+            DetectionError::Config(error) => config_error_message(error),
+            _ => error.to_string(),
+        };
+        Self {
+            command: command.to_owned(),
+            status: CommandStatus::Error,
+            category,
+            code,
+            message: redact_project_root(
+                &format!("failed to inspect project: {error_message}"),
+                project_root,
+            )
+            .into_boxed_str(),
+            logical_path,
+            suggestion: Some(suggestion),
+            source: Some(Box::new(error)),
+            exit_class,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn from_registry(
+        command: &'static str,
+        json: bool,
+        selector: &str,
+        error: RegistryError,
+    ) -> Self {
+        let logical_path = match &error {
+            RegistryError::UnsafePath { path, .. } | RegistryError::DuplicateTarget(path) => {
+                safe_logical_locator(path)
+            }
+            RegistryError::MissingSource(path)
+            | RegistryError::Io { path, .. }
+            | RegistryError::Parse { path, .. } => path
+                .to_str()
+                .filter(|path| !Path::new(path).is_absolute())
+                .map(str::to_owned),
+            RegistryError::BuiltInNotFound(_)
+            | RegistryError::LocalRegistryUnsupported(_)
+            | RegistryError::InvalidValue { .. }
+            | RegistryError::UnknownDependency { .. }
+            | RegistryError::DependencyCycle(_)
+            | RegistryError::Serialize(_)
+            | RegistryError::BuiltInAsset(_) => None,
+        };
+
+        Self {
+            command: command.to_owned(),
+            status: CommandStatus::Error,
+            category: ErrorCategory::RegistryPackage,
+            code: "registry.load_failed",
+            message: format!(
+                "failed to load registry item {selector}: {}",
+                registry_error_message(&error)
+            )
+            .into_boxed_str(),
+            logical_path,
+            suggestion: Some(
+                "Verify the built-in registry package and requested item, then retry.",
+            ),
+            source: Some(Box::new(error)),
+            exit_class: ExitClass::RegistryPackage,
+            json,
+            output_emitted: false,
+        }
+    }
+
+    fn serialization(command: impl Into<String>, json: bool, message: String) -> Self {
+        Self::operational(command, json, "output.serialize", message, None, None)
+    }
+
+    fn exit_code(&self) -> i32 {
+        self.exit_class.code()
+    }
+
+    fn diagnostic(&self) -> Diagnostic {
+        let level = match self.category {
+            ErrorCategory::Operational
+            | ErrorCategory::Usage
+            | ErrorCategory::Doctor
+            | ErrorCategory::Conflict
+            | ErrorCategory::UnsafePath
+            | ErrorCategory::RegistryPackage => DiagnosticLevel::Error,
+        };
+        let mut diagnostic = Diagnostic::new(level, self.code, self.message.to_string());
+        if let Some(path) = &self.logical_path {
+            diagnostic = diagnostic.with_path(path);
+        }
+        if let Some(suggestion) = self.suggestion {
+            diagnostic = diagnostic.with_suggestion(suggestion);
+        }
+        diagnostic
+    }
+
+    fn render_json(&self) -> String {
+        let diagnostics = [self.diagnostic()];
+        serde_json::to_string_pretty(
+            &CliEnvelope::new(&self.command, self.status, Option::<()>::None)
+                .with_diagnostics(&diagnostics),
+        )
+        .expect("serializing the fixed CLI error envelope cannot fail")
+    }
+
+    fn report(&self) {
+        if self.output_emitted {
+            return;
+        }
+        if self.json {
+            println!("{}", self.render_json());
+        } else {
+            eprintln!("{self}");
+        }
+    }
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref()
+    }
+}
+
+fn logical_path(project_root: &Path, path: &Path) -> Option<String> {
+    if path.is_absolute() {
+        path.strip_prefix(project_root)
+            .ok()
+            .and_then(Path::to_str)
+            .and_then(safe_logical_locator)
+    } else {
+        path.to_str().and_then(safe_logical_locator)
+    }
+}
+
+fn registry_error_message(error: &RegistryError) -> String {
+    match error {
+        RegistryError::BuiltInNotFound(name) => {
+            format!("built-in registry item not found: {name}")
+        }
+        RegistryError::LocalRegistryUnsupported(source) => {
+            format!("local registry sources are not supported: {source}")
+        }
+        RegistryError::InvalidValue { .. } => "a packaged registry value is invalid".to_owned(),
+        RegistryError::UnknownDependency { .. } => {
+            "a packaged registry dependency is unknown".to_owned()
+        }
+        RegistryError::DependencyCycle(_) => {
+            "the packaged registry dependency graph contains a cycle".to_owned()
+        }
+        RegistryError::UnsafePath { .. } => "a packaged registry path is unsafe".to_owned(),
+        RegistryError::DuplicateTarget(_) => "a packaged registry target is duplicated".to_owned(),
+        RegistryError::Io { .. } => "failed to read a packaged registry asset".to_owned(),
+        RegistryError::Parse { .. } => "failed to parse a packaged registry asset".to_owned(),
+        RegistryError::MissingSource(_) => "a packaged registry source is missing".to_owned(),
+        RegistryError::Serialize(_) => "failed to serialize registry metadata".to_owned(),
+        RegistryError::BuiltInAsset(_) => "the packaged registry catalog is invalid".to_owned(),
+    }
+}
+
+fn config_error_message(error: &ConfigError) -> String {
+    match error {
+        ConfigError::PathMustBeRelative { .. }
+        | ConfigError::PathTraversal { .. }
+        | ConfigError::UnsafePathSegment { .. }
+        | ConfigError::PathOverlap { .. } => "kit.json contains an unsafe project path".to_owned(),
+        ConfigError::Parse(_) => "kit.json is malformed".to_owned(),
+        ConfigError::Serialize(_) => "kit.json could not be serialized".to_owned(),
+        ConfigError::InvalidValue { field, .. } => {
+            format!("kit.json contains an invalid value for {field}")
+        }
+        ConfigError::MissingToolProvenance { .. } => error.to_string(),
+    }
+}
+
 pub fn main_entry() {
     let args = normalize_args(env::args_os().skip(1).collect());
-    if let Err(error) = run(args, &current_dir()) {
-        eprintln!("{error}");
-        process::exit(exit_code_for_error(&error));
+    if let Err(error) = run_from_environment(args, env::current_dir) {
+        error.report();
+        process::exit(error.exit_code());
     }
+}
+
+fn run_from_environment(
+    args: Vec<OsString>,
+    current_dir: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<(), CliError> {
+    let command = command_hint(&args);
+    let json = json_requested(&args);
+    let cwd = if is_directory_independent_invocation(&args) {
+        PathBuf::new()
+    } else {
+        current_dir().map_err(|error| {
+            CliError::operational(
+                command,
+                json,
+                "cwd.unavailable",
+                format!("failed to acquire current directory: {error}"),
+                None,
+                Some(Box::new(error)),
+            )
+        })?
+    };
+    run(args, &cwd)
+}
+
+fn is_directory_independent_invocation(args: &[OsString]) -> bool {
+    if args.iter().any(is_help_arg) {
+        return true;
+    }
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--cwd") => index += 2,
+            Some("--quiet" | "--verbose") => index += 1,
+            Some("--version" | "-V") => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn normalize_args(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -221,55 +1035,55 @@ fn normalize_args(mut args: Vec<OsString>) -> Vec<OsString> {
     args
 }
 
-fn exit_code_for_error(error: &str) -> i32 {
-    if error == "doctor checks failed" {
-        return 3;
-    }
-    if error.starts_with("usage:")
-        || error.contains("unsupported flag")
-        || error.contains("does not accept")
-        || error.contains("requires")
-        || error.contains("accepts exactly")
-        || error.contains("accepts at most")
-        || error.contains("non-utf8")
-    {
-        return 2;
-    }
-    if error.contains("local edits")
-        || error.contains("not tracked")
-        || error.contains("already tracked")
-        || error.contains("already exists")
-    {
-        return 10;
-    }
-    if error.contains("unsafe write path") || error.contains("path escapes") {
-        return 11;
-    }
-    if error.contains("built-in registry")
-        || error.contains("registry")
-        || error.contains("package")
-        || error.contains("not found")
-    {
-        return 12;
-    }
-    1
+fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .any(|arg| arg.to_str().is_some_and(|arg| arg == "--json"))
 }
 
-fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
-    let (args, cwd, _quiet, _verbose) = parse_common_args(args, cwd)?;
+fn command_hint(args: &[OsString]) -> String {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--cwd") => {
+                iter.next();
+            }
+            Some("--quiet" | "--verbose" | "--json") => {}
+            Some("--version" | "-V") => return "version".to_owned(),
+            Some("--help" | "-h") => return "help".to_owned(),
+            Some(command) if !command.starts_with('-') => return command.to_owned(),
+            Some(_) | None => {}
+        }
+    }
+    "cli".to_owned()
+}
+
+fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), CliError> {
+    let command_hint = command_hint(&args);
+    let json = json_requested(&args);
+    let (args, cwd, _quiet, _verbose) = parse_common_args(args, cwd, &command_hint, json)?;
     let Some(command) = args.first().and_then(|value| value.to_str()) else {
-        return Err(usage());
+        return Err(CliError::usage(command_hint, json, "cli.usage", usage()));
     };
 
     if command == "--help" || command == "-h" {
-        println!("{}", help_text());
+        println!(
+            "{}",
+            render_help_output("help", &help_text(), json)
+                .map_err(|message| CliError::serialization("help", json, message))?
+        );
         return Ok(());
     }
     if command == "--version" || command == "-V" {
         return run_version(&args[1..]);
     }
     if args[1..].iter().any(is_help_arg) {
-        println!("{}", command_help(command)?);
+        let help = command_help(command)
+            .map_err(|message| CliError::usage(command, json, "cli.unknown_command", message))?;
+        println!(
+            "{}",
+            render_help_output(command, &help, json)
+                .map_err(|message| CliError::serialization(command, json, message))?
+        );
         return Ok(());
     }
 
@@ -280,7 +1094,12 @@ fn run(args: Vec<OsString>, cwd: &Path) -> Result<(), String> {
         "init" => run_init(&args[1..], &cwd),
         "sync" => run_sync(&args[1..], &cwd),
         "view" => run_view(&args[1..], &cwd),
-        _ => Err(usage()),
+        _ => Err(CliError::usage(
+            command,
+            json,
+            "cli.unknown_command",
+            usage(),
+        )),
     }
 }
 
@@ -292,18 +1111,26 @@ fn is_help_arg(arg: &OsString) -> bool {
 fn parse_common_args(
     args: Vec<OsString>,
     cwd: &Path,
-) -> Result<(Vec<OsString>, PathBuf, bool, bool), String> {
+    command: &str,
+    json: bool,
+) -> Result<(Vec<OsString>, PathBuf, bool, bool), CliError> {
     let mut filtered = Vec::new();
     let mut target_cwd = cwd.to_path_buf();
     let mut quiet = false;
     let mut verbose = false;
+    let mut json_flag = false;
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
         match arg.to_str() {
             Some("--cwd") => {
                 let Some(path) = iter.next() else {
-                    return Err("--cwd requires a path".to_owned());
+                    return Err(CliError::usage(
+                        command,
+                        json,
+                        "cli.missing_argument",
+                        "--cwd requires a path",
+                    ));
                 };
                 let path = PathBuf::from(path);
                 target_cwd = if path.is_absolute() {
@@ -314,53 +1141,93 @@ fn parse_common_args(
             }
             Some("--quiet") => quiet = true,
             Some("--verbose") => verbose = true,
+            Some("--json") => json_flag = true,
             _ => filtered.push(arg),
         }
+    }
+    if json_flag && !filtered.is_empty() {
+        filtered.push(OsString::from("--json"));
     }
 
     Ok((filtered, target_cwd, quiet, verbose))
 }
 
-fn run_version(args: &[OsString]) -> Result<(), String> {
-    let mut json = false;
+fn run_version(args: &[OsString]) -> Result<(), CliError> {
+    let json = json_requested(args);
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "version",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for version: {value}"));
+                return Err(CliError::usage(
+                    "version",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for version: {value}"),
+                ));
             }
-            _ => return Err("version does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "version",
+                    json,
+                    "cli.unexpected_argument",
+                    "version does not accept positional arguments",
+                ));
+            }
         }
     }
 
-    println!("{}", render_version_output(json)?);
+    println!(
+        "{}",
+        render_version_output(json)
+            .map_err(|message| CliError::serialization("version", json, message))?
+    );
     Ok(())
 }
 
-fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_add(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
     let mut item: Option<String> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "add",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for add: {value}"));
+                return Err(CliError::usage(
+                    "add",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for add: {value}"),
+                ));
             }
             value => {
                 if item.is_some() {
-                    return Err("add accepts exactly one item name".to_owned());
+                    return Err(CliError::usage(
+                        "add",
+                        json,
+                        "cli.unexpected_argument",
+                        "add accepts exactly one item name",
+                    ));
                 }
 
                 item = Some(value.to_owned());
@@ -368,13 +1235,28 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let item = item.ok_or_else(|| "add requires an item name".to_owned())?;
+    let item = item.ok_or_else(|| {
+        CliError::usage(
+            "add",
+            json,
+            "cli.missing_argument",
+            "add requires an item name",
+        )
+    })?;
     let plan = if dry_run {
-        plan_add(cwd, &item)
-            .map_err(|error| format!("failed to plan add {item} for {}: {error}", cwd.display()))?
+        plan_add(cwd, &item).map_err(|error| {
+            CliError::from_codegen(
+                "add",
+                json,
+                cwd,
+                &format!("failed to plan add {item}"),
+                error,
+            )
+        })?
     } else {
-        apply_add(cwd, &item)
-            .map_err(|error| format!("failed to add {item} to {}: {error}", cwd.display()))?
+        apply_add(cwd, &item).map_err(|error| {
+            CliError::from_codegen("add", json, cwd, &format!("failed to add {item}"), error)
+        })?
     };
     let status = if dry_run {
         CommandStatus::Planned
@@ -384,61 +1266,101 @@ fn run_add(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_add_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_add_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("add", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_doctor(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut strict = false;
     let mut check = false;
     let mut trunk_build = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "doctor",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--strict" => strict = true,
             "--check" => check = true,
             "--trunk-build" => trunk_build = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for doctor: {value}"));
+                return Err(CliError::usage(
+                    "doctor",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for doctor: {value}"),
+                ));
             }
-            _ => return Err("doctor does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "doctor",
+                    json,
+                    "cli.unexpected_argument",
+                    "doctor does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let output = build_doctor_output(cwd, strict, check, trunk_build);
     let status = doctor_status(&output);
-    println!("{}", render_doctor_output(&output, json, status)?);
+    println!(
+        "{}",
+        render_doctor_output(&output, json, status)
+            .map_err(|message| CliError::serialization("doctor", json, message))?
+    );
     if output.has_failures() {
-        return Err("doctor checks failed".to_owned());
+        return Err(CliError::doctor_failed(json));
     }
 
     Ok(())
 }
 
-fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_info(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut path: Option<PathBuf> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "info",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for info: {value}"));
+                return Err(CliError::usage(
+                    "info",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for info: {value}"),
+                ));
             }
             value => {
                 if path.is_some() {
-                    return Err("info accepts at most one path argument".to_owned());
+                    return Err(CliError::usage(
+                        "info",
+                        json,
+                        "cli.unexpected_argument",
+                        "info accepts at most one path argument",
+                    ));
                 }
 
                 path = Some(PathBuf::from(value));
@@ -446,40 +1368,67 @@ fn run_info(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let target = path.unwrap_or_else(|| cwd.to_path_buf());
+    let target = match path {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => cwd.join(path),
+        None => cwd.to_path_buf(),
+    };
     let output = build_info_output(&target)
-        .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
+        .map_err(|error| CliError::from_detection("info", json, &target, error))?;
 
-    println!("{}", render_info_output(&output, json)?);
+    println!(
+        "{}",
+        render_info_output(&output, json)
+            .map_err(|message| CliError::serialization("info", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_init(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "init",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for init: {value}"));
+                return Err(CliError::usage(
+                    "init",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for init: {value}"),
+                ));
             }
-            _ => return Err("init does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "init",
+                    json,
+                    "cli.unexpected_argument",
+                    "init does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let plan = if dry_run {
-        plan_init(cwd)
-            .map_err(|error| format!("failed to plan init for {}: {error}", cwd.display()))?
+        plan_init(cwd).map_err(|error| {
+            CliError::from_codegen("init", json, cwd, "failed to plan init", error)
+        })?
     } else {
-        apply_init(cwd)
-            .map_err(|error| format!("failed to initialize {}: {error}", cwd.display()))?
+        apply_init(cwd).map_err(|error| {
+            CliError::from_codegen("init", json, cwd, "failed to initialize project", error)
+        })?
     };
 
     let status = if dry_run {
@@ -490,30 +1439,49 @@ fn run_init(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_init_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_init_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("init", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_view(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut include_source = false;
     let mut registry_source: Option<String> = None;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "view",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--source" => include_source = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for view: {value}"));
+                return Err(CliError::usage(
+                    "view",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for view: {value}"),
+                ));
             }
             value => {
                 if registry_source.is_some() {
-                    return Err("view accepts exactly one registry source".to_owned());
+                    return Err(CliError::usage(
+                        "view",
+                        json,
+                        "cli.unexpected_argument",
+                        "view accepts exactly one registry source",
+                    ));
                 }
 
                 registry_source = Some(value.to_owned());
@@ -521,39 +1489,70 @@ fn run_view(args: &[OsString], cwd: &Path) -> Result<(), String> {
         }
     }
 
-    let source = registry_source.ok_or_else(|| "view requires a registry source".to_owned())?;
+    let source = registry_source.ok_or_else(|| {
+        CliError::usage(
+            "view",
+            json,
+            "cli.missing_argument",
+            "view requires a registry source",
+        )
+    })?;
     let item = load_registry_item(&source, cwd)
-        .map_err(|error| format!("failed to load registry item {source}: {error}"))?;
+        .map_err(|error| CliError::from_registry("view", json, &source, error))?;
 
-    println!("{}", render_registry_item(&item, json, include_source)?);
+    println!(
+        "{}",
+        render_registry_item(&item, json, include_source)
+            .map_err(|message| CliError::serialization("view", json, message))?
+    );
 
     Ok(())
 }
 
-fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), String> {
-    let mut json = false;
+fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), CliError> {
+    let json = json_requested(args);
     let mut dry_run = false;
 
     for arg in args {
         let Some(value) = arg.to_str() else {
-            return Err("non-utf8 arguments are not supported".to_owned());
+            return Err(CliError::usage(
+                "sync",
+                json,
+                "cli.non_utf8_argument",
+                "non-utf8 arguments are not supported",
+            ));
         };
 
         match value {
-            "--json" => json = true,
+            "--json" => {}
             "--dry-run" => dry_run = true,
             value if value.starts_with('-') => {
-                return Err(format!("unsupported flag for sync: {value}"));
+                return Err(CliError::usage(
+                    "sync",
+                    json,
+                    "cli.unsupported_flag",
+                    format!("unsupported flag for sync: {value}"),
+                ));
             }
-            _ => return Err("sync does not accept positional arguments".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "sync",
+                    json,
+                    "cli.unexpected_argument",
+                    "sync does not accept positional arguments",
+                ));
+            }
         }
     }
 
     let plan = if dry_run {
-        plan_sync(cwd)
-            .map_err(|error| format!("failed to plan sync for {}: {error}", cwd.display()))?
+        plan_sync(cwd).map_err(|error| {
+            CliError::from_codegen("sync", json, cwd, "failed to plan sync", error)
+        })?
     } else {
-        apply_sync(cwd).map_err(|error| format!("failed to sync {}: {error}", cwd.display()))?
+        apply_sync(cwd).map_err(|error| {
+            CliError::from_codegen("sync", json, cwd, "failed to sync project", error)
+        })?
     };
     let status = if dry_run {
         CommandStatus::Planned
@@ -563,26 +1562,44 @@ fn run_sync(args: &[OsString], cwd: &Path) -> Result<(), String> {
         CommandStatus::Success
     };
 
-    println!("{}", render_sync_plan(&plan, json, status)?);
+    println!(
+        "{}",
+        render_sync_plan(&plan, json, status)
+            .map_err(|message| CliError::serialization("sync", json, message))?
+    );
 
     Ok(())
 }
 
 fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
+        let output = AddCommandOutput {
+            item_id: plan.item_id.clone(),
+            item_name: plan.item_name.clone(),
+            content_hash: plan.content_hash.clone(),
+            dependencies: plan
+                .cargo_plan
+                .iter()
+                .map(CargoRequirementOutput::from)
+                .collect(),
+        };
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("add", status, plan)
-                .with_changes(plan.changes.clone())
-                .with_diagnostics(plan.diagnostics.clone()),
+            &CliEnvelope::new("add", status, output)
+                .with_changes(&plan.changes)
+                .with_diagnostics(&plan.diagnostics),
         )
         .map_err(|error| format!("failed to serialize add plan: {error}"));
     }
 
     if plan.is_empty() {
-        return Ok(format!("add {}: no changes planned", plan.item_name));
+        return Ok(format!(
+            "add {}: {}",
+            plan.item_name,
+            unchanged_label(status)
+        ));
     }
 
-    let mut output = format!("add {} planned changes:", plan.item_name);
+    let mut output = format!("add {} {} changes:", plan.item_name, change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -592,19 +1609,27 @@ fn render_add_plan(plan: &AddPlan, json: bool, status: CommandStatus) -> Result<
 
 fn render_sync_plan(plan: &SyncPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
+        let output = SyncCommandOutput {
+            item_ids: plan.item_ids.clone(),
+            dependencies: plan
+                .cargo_plan
+                .iter()
+                .map(CargoRequirementOutput::from)
+                .collect(),
+        };
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("sync", status, plan)
-                .with_changes(plan.changes.clone())
-                .with_diagnostics(plan.diagnostics.clone()),
+            &CliEnvelope::new("sync", status, output)
+                .with_changes(&plan.changes)
+                .with_diagnostics(&plan.diagnostics),
         )
         .map_err(|error| format!("failed to serialize sync plan: {error}"));
     }
 
     if plan.is_empty() {
-        return Ok("sync: no changes planned".to_owned());
+        return Ok(format!("sync: {}", unchanged_label(status)));
     }
 
-    let mut output = "sync planned changes:".to_owned();
+    let mut output = format!("sync {} changes:", change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
@@ -649,20 +1674,40 @@ fn cargo_plan_entry_label(entry: &CargoPlanEntry) -> String {
 fn render_init_plan(plan: &InitPlan, json: bool, status: CommandStatus) -> Result<String, String> {
     if json {
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("init", status, plan).with_changes(plan.changes.clone()),
+            &CliEnvelope::new("init", status, InitCommandOutput {}).with_changes(&plan.changes),
         )
         .map_err(|error| format!("failed to serialize init plan: {error}"));
     }
 
     if plan.is_empty() {
-        return Ok("init: no changes planned".to_owned());
+        return Ok(format!("init: {}", unchanged_label(status)));
     }
 
-    let mut output = String::from("init planned changes:");
+    let mut output = format!("init {} changes:", change_verb(status));
     for change in &plan.changes {
         output.push_str(&format!("\n- {:?} {}", change.kind, change.path));
     }
     Ok(output)
+}
+
+fn change_verb(status: CommandStatus) -> &'static str {
+    match status {
+        CommandStatus::Planned => "planned",
+        CommandStatus::Success => "applied",
+        CommandStatus::NoChange => "unchanged",
+        CommandStatus::Warning
+        | CommandStatus::Error
+        | CommandStatus::Conflict
+        | CommandStatus::Unsupported => "reported",
+    }
+}
+
+fn unchanged_label(status: CommandStatus) -> &'static str {
+    if status == CommandStatus::Planned {
+        "no changes planned"
+    } else {
+        "no changes"
+    }
 }
 
 fn render_version_output(json: bool) -> Result<String, String> {
@@ -676,11 +1721,24 @@ fn render_version_output_with_tool(
     let output = version_output_with_tool(tool)?;
 
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("version", output))
+        return serde_json::to_string_pretty(&CliEnvelope::success("version", output))
             .map_err(|error| format!("failed to serialize version output: {error}"));
     }
 
     Ok(format!("{} {}", output.binary, output.version))
+}
+
+fn render_help_output(command: &str, help: &str, json: bool) -> Result<String, String> {
+    if json {
+        return serde_json::to_string_pretty(&CliEnvelope::success(
+            command,
+            HelpCommandOutput {
+                usage: help.to_owned(),
+            },
+        ))
+        .map_err(|error| format!("failed to serialize help output: {error}"));
+    }
+    Ok(help.to_owned())
 }
 
 fn version_output_with_tool(
@@ -708,34 +1766,72 @@ fn version_output_with_tool(
 }
 
 fn render_info_output(output: &InfoOutput, json: bool) -> Result<String, String> {
+    let project_root = &output.detected.project_root;
+    let installed_lock = read_info_install_lock(project_root, output.kit_config.as_ref());
     let command_output = InfoCommandOutput {
-        info: output.clone(),
+        project_root: ".",
+        project_kind: output.detected.project_kind.as_str(),
+        workspace_mode: match output.detected.workspace_mode {
+            leptos_ui_kit_registry::WorkspaceMode::SingleCrate => "single-crate",
+            leptos_ui_kit_registry::WorkspaceMode::SinglePackageWorkspaceRoot => {
+                "single-package-workspace-root"
+            }
+        },
+        cargo_manifest: logical_path(project_root, &output.detected.cargo_manifest_path)
+            .unwrap_or_else(|| "Cargo.toml".to_owned()),
+        source_root: logical_path(project_root, &output.detected.source_root)
+            .unwrap_or_else(|| "src".to_owned()),
+        index_html: output
+            .detected
+            .index_html_path
+            .as_ref()
+            .and_then(|path| logical_path(project_root, path))
+            .unwrap_or_else(|| "not-applicable".to_owned()),
+        stylesheet: logical_path(project_root, &output.detected.css_file_path)
+            .unwrap_or_else(|| DEFAULT_CSS_PATH.to_owned()),
+        render_mode_contract: output.detected.render_mode_contract,
+        render_mode_selection: output.detected.render_mode_selection.clone(),
+        render_mode: output.detected.render_mode.map(|mode| mode.as_str()),
+        config_path: output
+            .detected
+            .kit_config_path
+            .as_ref()
+            .and_then(|path| logical_path(project_root, path)),
         registry_available: validate_built_in_registry_health().is_ok(),
-        installed_lock: read_info_install_lock(
-            &output.detected.project_root,
-            output.kit_config.as_ref(),
-        ),
+        installed: installed_lock.as_ref().map(|lock| InstalledSummaryOutput {
+            lock_path: output
+                .kit_config
+                .as_ref()
+                .map(install_lock_path)
+                .unwrap_or_else(|| DEFAULT_KIT_LOCK_PATH.to_owned()),
+            item_ids: lock.items.keys().cloned().collect(),
+            file_paths: lock.files_by_path.keys().cloned().collect(),
+            style_block_ids: lock.style_blocks_by_id.keys().cloned().collect(),
+        }),
     };
 
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("info", &command_output))
+        return serde_json::to_string_pretty(&CliEnvelope::success("info", &command_output))
             .map_err(|error| format!("failed to serialize info output: {error}"));
     }
 
     Ok(format!(
-        "project_root: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
-        output.detected.project_root.display(),
+        "project_root: {}\nproject_kind: {}\nworkspace_mode: {:?}\nsource_root: {}\nindex_html: {}\ncss_file: {}\nrender_mode_contract: {:?}\nrender_mode_selection: {:?}\nrender_mode: {}\nregistry_available: {}\ninstalled_lock: {}",
+        command_output.project_root,
+        command_output.project_kind,
         output.detected.workspace_mode,
-        output.detected.source_root.display(),
-        output.detected.index_html_path.display(),
-        output.detected.css_file_path.display(),
+        command_output.source_root,
+        command_output.index_html,
+        command_output.stylesheet,
+        command_output.render_mode_contract,
+        command_output.render_mode_selection,
         output
             .detected
             .render_mode
             .map(|value| format!("{value:?}"))
             .unwrap_or_else(|| "unknown".to_owned()),
         command_output.registry_available,
-        command_output.installed_lock.is_some()
+        command_output.installed.is_some()
     ))
 }
 
@@ -747,13 +1843,13 @@ fn render_registry_item(
     if include_source {
         let output = registry_item_source_output(item)?;
         if json {
-            return serde_json::to_string_pretty(&CommandEnvelope::success("view", output))
+            return serde_json::to_string_pretty(&CliEnvelope::success("view", output))
                 .map_err(|error| format!("failed to serialize registry item source: {error}"));
         }
 
         let mut rendered = format!(
             "name: {}\nkind: {}\ncontent_hash: {}",
-            output.resolved.item.name, output.resolved.item.kind, output.resolved.content_hash
+            output.resolved.name, output.resolved.kind, output.resolved.content_hash
         );
         for source in output.sources {
             rendered.push_str(&format!(
@@ -764,23 +1860,22 @@ fn render_registry_item(
         return Ok(rendered);
     }
 
+    let output = registry_item_output(item)?;
     if json {
-        return serde_json::to_string_pretty(&CommandEnvelope::success("view", item))
+        return serde_json::to_string_pretty(&CliEnvelope::success("view", &output))
             .map_err(|error| format!("failed to serialize registry item: {error}"));
     }
 
     Ok(format!(
-        "name: {}\nkind: {}\nsource_kind: {:?}\nsource_path: {}",
-        item.item.name,
-        item.item.kind,
-        item.source_kind,
-        item.source_path.display()
+        "name: {}\nkind: {}\nsource_kind: {}\nsource_path: {}",
+        output.name, output.kind, output.source_kind, output.source_path
     ))
 }
 
 fn registry_item_source_output(
     item: &ResolvedRegistryItem,
 ) -> Result<RegistryItemSourceOutput, String> {
+    let resolved = registry_item_output(item)?;
     let mut sources = Vec::new();
     for file in &item.targets.ui_files {
         sources.push(RegistrySourceContent {
@@ -799,14 +1894,96 @@ fn registry_item_source_output(
         });
     }
 
-    Ok(RegistryItemSourceOutput {
-        resolved: item.clone(),
-        sources,
+    Ok(RegistryItemSourceOutput { resolved, sources })
+}
+
+fn registry_item_output(item: &ResolvedRegistryItem) -> Result<RegistryItemOutput, String> {
+    let source_path = item
+        .source_path
+        .to_str()
+        .and_then(safe_logical_locator)
+        .ok_or_else(|| "registry manifest locator is not a safe logical path".to_owned())?;
+    let ui_files = item
+        .targets
+        .ui_files
+        .iter()
+        .map(|target| {
+            Ok(RegistryUiTargetOutput {
+                source: safe_logical_locator(&target.source).ok_or_else(|| {
+                    "registry source locator is not a safe logical path".to_owned()
+                })?,
+                path: safe_logical_locator(&target.path).ok_or_else(|| {
+                    "registry target locator is not a safe logical path".to_owned()
+                })?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let style_blocks = item
+        .targets
+        .style_blocks
+        .iter()
+        .map(|target| {
+            Ok(RegistryStyleTargetOutput {
+                source: safe_logical_locator(&target.source).ok_or_else(|| {
+                    "registry stylesheet locator is not a safe logical path".to_owned()
+                })?,
+                id: target.id.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(RegistryItemOutput {
+        source_kind: "built-in",
+        source_path,
+        content_hash: item.content_hash.clone(),
+        name: item.item.name.clone(),
+        kind: item.item.kind.to_string(),
+        version: item.item.version.clone(),
+        title: item.item.title.clone(),
+        description: item.item.description.clone(),
+        registry_dependencies: item.item.registry_dependencies.clone(),
+        targets: RegistryTargetsOutput {
+            ui_files,
+            style_blocks,
+        },
+        cargo_plan: item
+            .item
+            .cargo_plan
+            .iter()
+            .map(CargoRequirementOutput::from)
+            .collect(),
     })
 }
 
+fn safe_logical_locator(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.as_bytes().get(1) == Some(&b':')
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    Some(path)
+}
+
 fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool) -> DoctorOutput {
+    build_doctor_output_with_registry_health(cwd, strict, check, trunk_build, || {
+        validate_built_in_registry_health().map_err(|error| error.to_string())
+    })
+}
+
+fn build_doctor_output_with_registry_health(
+    cwd: &Path,
+    strict: bool,
+    check: bool,
+    trunk_build: bool,
+    registry_health: impl FnOnce() -> Result<(), String>,
+) -> DoctorOutput {
     let mut checks = Vec::new();
+    let mut detected_project_kind = None;
 
     match check_pending_recovery(cwd) {
         Ok(()) => checks.push(DoctorCheck::pass(
@@ -818,9 +1995,13 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
 
     match build_info_output(cwd) {
         Ok(info) => {
+            detected_project_kind = Some(info.detected.project_kind);
             checks.push(DoctorCheck::pass(
                 "project",
-                "supported Trunk CSR project detected",
+                format!(
+                    "supported {} project detected",
+                    info.detected.project_kind.as_str()
+                ),
             ));
             dependency_check(
                 &mut checks,
@@ -845,6 +2026,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                     names,
                     &config.install.ui_dir,
                     Some(&config.styles.css),
+                    config.project.kind.render_mode_contract(),
                 ) {
                     Ok(snapshot) => {
                         checks.extend(config_closure_checks(strict, &snapshot));
@@ -892,6 +2074,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
                         names,
                         DEFAULT_UI_DIR,
                         css_path.as_deref(),
+                        info.detected.render_mode_contract,
                     ) {
                         Ok(snapshot) => {
                             checks.push(DoctorCheck::warning(
@@ -924,7 +2107,7 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
         }
     }
 
-    match validate_built_in_registry_health() {
+    match registry_health() {
         Ok(()) => checks.push(DoctorCheck::pass(
             "registry",
             "built-in registry runtime health is valid",
@@ -933,16 +2116,19 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
     }
 
     if check {
-        checks.push(run_command_check(
-            "build.cargo_check",
-            cwd,
-            "cargo",
-            &["check", "--target", "wasm32-unknown-unknown"],
-        ));
+        let args = doctor_cargo_check_args(detected_project_kind);
+        checks.push(run_command_check("build.cargo_check", cwd, "cargo", args));
     }
 
     if trunk_build {
-        checks.push(run_command_check("build.trunk", cwd, "trunk", &["build"]));
+        if detected_project_kind == Some(ProjectKind::SingleCrateTrunkCsr) {
+            checks.push(run_command_check("build.trunk", cwd, "trunk", &["build"]));
+        } else {
+            checks.push(DoctorCheck::fail(
+                "build.trunk",
+                "--trunk-build is supported only for single-crate-trunk-csr projects",
+            ));
+        }
     }
 
     DoctorOutput {
@@ -954,21 +2140,40 @@ fn build_doctor_output(cwd: &Path, strict: bool, check: bool, trunk_build: bool)
     }
 }
 
+fn doctor_cargo_check_args(project_kind: Option<ProjectKind>) -> &'static [&'static str] {
+    match project_kind {
+        Some(ProjectKind::SingleCrateTrunkCsr | ProjectKind::SingleCrateBrowserHydration) => {
+            &["check", "--target", "wasm32-unknown-unknown"]
+        }
+        Some(ProjectKind::SingleCrateNativeSsr | ProjectKind::SharedLibraryCrate) | None => {
+            &["check"]
+        }
+    }
+}
+
 fn resolve_doctor_registry_snapshot(
     requested_names: BTreeSet<String>,
     ui_dir: &str,
     css_path: Option<&str>,
+    render_mode_contract: RenderModeContract,
 ) -> Result<DoctorRegistrySnapshot, String> {
     let sorted_names = requested_names.iter().cloned().collect::<Vec<_>>();
     let resolved =
         resolve_built_in_registry_items(&sorted_names).map_err(|error| error.to_string())?;
-    build_doctor_registry_snapshot(requested_names, ui_dir, css_path, resolved)
+    build_doctor_registry_snapshot(
+        requested_names,
+        ui_dir,
+        css_path,
+        render_mode_contract,
+        resolved,
+    )
 }
 
 fn build_doctor_registry_snapshot(
     requested_names: BTreeSet<String>,
     ui_dir: &str,
     css_path: Option<&str>,
+    render_mode_contract: RenderModeContract,
     resolved: Vec<ResolvedRegistryItem>,
 ) -> Result<DoctorRegistrySnapshot, String> {
     let mut resolved_names = BTreeSet::new();
@@ -976,7 +2181,12 @@ fn build_doctor_registry_snapshot(
     let mut expected_items = BTreeMap::new();
     let mut files_by_path = BTreeMap::new();
     let mut style_blocks_by_id = BTreeMap::new();
-    let mut cargo_plan = Vec::new();
+    let cargo_plan_entries = resolved
+        .iter()
+        .flat_map(|item| item.item.cargo_plan.iter().cloned())
+        .collect::<Vec<_>>();
+    let cargo_plan = normalize_cargo_plan_for_project(&cargo_plan_entries, render_mode_contract)
+        .map_err(|error| error.to_string())?;
     let style_ids_by_item = resolved
         .iter()
         .map(|item| {
@@ -996,8 +2206,6 @@ fn build_doctor_registry_snapshot(
         let item_id = format!("builtin:{}", item.item.name);
         resolved_names.insert(item.item.name.clone());
         resolved_order.push(item.item.name.clone());
-        merge_cargo_plan(&mut cargo_plan, &item.item.cargo_plan);
-
         let mut files = Vec::new();
         for target in &item.targets.ui_files {
             let generated =
@@ -1067,6 +2275,7 @@ fn build_doctor_registry_snapshot(
         let installed = InstalledItem {
             id: item_id.clone(),
             name: item.item.name,
+            kind: item.item.kind,
             source: "builtin".to_owned(),
             version: item.item.version,
             content_hash: item.content_hash,
@@ -1115,7 +2324,7 @@ fn load_doctor_lock(cwd: &Path, config: Option<&KitConfig>) -> DoctorLockState {
         Ok(lock) => DoctorLockState::Valid {
             logical_path,
             path,
-            lock,
+            lock: Box::new(lock),
         },
         Err(error) => DoctorLockState::Invalid {
             logical_path,
@@ -1323,6 +2532,7 @@ fn lock_snapshot_checks(
         };
         if actual.id == expected.id
             && actual.name == expected.name
+            && actual.kind == expected.kind
             && actual.source == expected.source
             && actual.version == expected.version
             && actual.content_hash == expected.content_hash
@@ -1674,43 +2884,54 @@ fn stylesheet_checks(cwd: &Path, strict: bool, info: &InfoOutput) -> Vec<DoctorC
         );
     }
 
-    match fs::read_to_string(&info.detected.index_html_path) {
-        Ok(html) if contains_trunk_css_link(&html, css_logical_path) => {
-            checks.push(
+    let Some(index_html_path) = info.detected.index_html_path.as_ref() else {
+        checks.push(DoctorCheck::pass(
+            "stylesheet_link",
+            format!(
+                "{} does not own a Trunk index.html",
+                info.detected.project_kind.as_str()
+            ),
+        ));
+        return checks;
+    };
+
+    match fs::read_to_string(index_html_path) {
+        Ok(html) => match inspect_html_stylesheet(&html, css_logical_path) {
+            Ok(HtmlStylesheetState::Present { .. }) => checks.push(
                 DoctorCheck::pass(
                     "stylesheet_link",
                     format!("index.html links {css_logical_path} for Trunk"),
                 )
-                .with_path(info.detected.index_html_path.display().to_string()),
-            );
-        }
-        Ok(_) => checks.push(
-            strict_check(
-                strict,
-                "stylesheet_link",
-                format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
-            )
-            .with_path(info.detected.index_html_path.display().to_string()),
-        ),
+                .with_path(index_html_path.display().to_string()),
+            ),
+            Ok(HtmlStylesheetState::Missing { .. }) => checks.push(
+                strict_check(
+                    strict,
+                    "stylesheet_link",
+                    format!("index.html is missing a Trunk CSS link for {css_logical_path}"),
+                )
+                .with_path(index_html_path.display().to_string()),
+            ),
+            Err(error) => checks.push(
+                strict_check(
+                    strict,
+                    "stylesheet_link",
+                    format!("index.html cannot be inspected safely: {error}"),
+                )
+                .with_path(index_html_path.display().to_string()),
+            ),
+        },
         Err(error) => checks.push(
             strict_check(
                 strict,
                 "stylesheet_link",
                 format!("failed to read index.html: {error}"),
             )
-            .with_path(info.detected.index_html_path.display().to_string()),
+            .with_path(index_html_path.display().to_string()),
         ),
     }
 
     checks
-}
-
-fn contains_trunk_css_link(html: &str, css_path: &str) -> bool {
-    html.lines().any(|line| {
-        line.contains("data-trunk")
-            && line.contains("rel=\"css\"")
-            && line.contains(&format!("href=\"{css_path}\""))
-    })
 }
 
 fn registry_dependency_checks(
@@ -1733,18 +2954,6 @@ fn registry_dependency_checks(
             format!("failed to inspect registry dependency plan: {error}"),
         )],
     }
-}
-
-fn merge_cargo_plan(plan: &mut Vec<CargoPlanEntry>, entries: &[CargoPlanEntry]) {
-    for entry in entries {
-        let mut entry = entry.clone();
-        entry.features.sort();
-        entry.features.dedup();
-        if !plan.contains(&entry) {
-            plan.push(entry);
-        }
-    }
-    plan.sort();
 }
 
 fn registry_dependency_check(strict: bool, requirement: &DependencyRequirement) -> DoctorCheck {
@@ -1934,9 +3143,28 @@ fn render_doctor_output(
     status: CommandStatus,
 ) -> Result<String, String> {
     if json {
+        let command_output = DoctorCommandOutput {
+            project_root: ".",
+            strict: output.strict,
+            check: output.check,
+            trunk_build: output.trunk_build,
+            checks: output
+                .checks
+                .iter()
+                .map(|check| DoctorCheckOutput {
+                    name: check.name.clone(),
+                    status: check.status,
+                    message: redact_project_root(&check.message, &output.project_root),
+                    path: check
+                        .path
+                        .as_deref()
+                        .and_then(|path| public_path(&output.project_root, path)),
+                })
+                .collect(),
+        };
+        let diagnostics = doctor_diagnostics(output);
         return serde_json::to_string_pretty(
-            &CommandEnvelope::new("doctor", status, output)
-                .with_diagnostics(doctor_diagnostics(output)),
+            &CliEnvelope::new("doctor", status, command_output).with_diagnostics(&diagnostics),
         )
         .map_err(|error| format!("failed to serialize doctor output: {error}"));
     }
@@ -1945,7 +3173,9 @@ fn render_doctor_output(
     for check in &output.checks {
         rendered.push_str(&format!(
             "\n- {:?} {}: {}",
-            check.status, check.name, check.message
+            check.status,
+            check.name,
+            redact_project_root(&check.message, &output.project_root)
         ));
     }
     Ok(rendered)
@@ -1964,14 +3194,33 @@ fn doctor_diagnostics(output: &DoctorOutput) -> Vec<Diagnostic> {
             let diagnostic = Diagnostic::new(
                 level,
                 format!("doctor.{}", check.name),
-                check.message.clone(),
+                redact_project_root(&check.message, &output.project_root),
             );
             check
                 .path
-                .clone()
+                .as_deref()
+                .and_then(|path| public_path(&output.project_root, path))
                 .map_or(diagnostic.clone(), |path| diagnostic.with_path(path))
         })
         .collect()
+}
+
+fn public_path(project_root: &Path, path: &str) -> Option<String> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        logical_path(project_root, path).or_else(|| (path == project_root).then(|| ".".to_owned()))
+    } else {
+        Some(path.to_string_lossy().replace('\\', "/"))
+    }
+}
+
+fn redact_project_root(message: &str, project_root: &Path) -> String {
+    let root = project_root.to_string_lossy();
+    if root.is_empty() || root == "." {
+        message.to_owned()
+    } else {
+        message.replace(root.as_ref(), ".")
+    }
 }
 
 fn read_info_install_lock(
@@ -1997,7 +3246,7 @@ fn help_text() -> String {
         "usage: leptos_ui_kit <command> [options]",
         "",
         "commands:",
-        "  info                 inspect a supported Trunk CSR Leptos app",
+        "  info                 inspect a supported Leptos project",
         "  init                 create src/components/ui/_kit/kit.json and kit-managed app files",
         "  view <item>          show a registry item",
         "  add <item>           add a registry item to the app",
@@ -2019,7 +3268,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "add" => vec![
             "usage: leptos_ui_kit add <item> [--dry-run] [--json]",
             "",
-            "Adds a built-in registry item and updates src/components/ui/_kit/kit.json, src/components/ui/_kit/kit.lock.json, generated source, and CSS.",
+            "Adds a built-in item to desired state and creates only its required source and CSS.",
         ],
         "doctor" => vec![
             "usage: leptos_ui_kit doctor [--strict] [--check] [--trunk-build] [--json]",
@@ -2029,7 +3278,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "info" => vec![
             "usage: leptos_ui_kit info [path] [--json]",
             "",
-            "Inspects a supported single-crate Trunk CSR Leptos app.",
+            "Inspects a supported Leptos CSR, SSR, hydration, or shared-library project.",
         ],
         "init" => vec![
             "usage: leptos_ui_kit init [--dry-run] [--json]",
@@ -2039,7 +3288,7 @@ fn command_help(command: &str) -> Result<String, String> {
         "sync" => vec![
             "usage: leptos_ui_kit sync [--dry-run] [--json]",
             "",
-            "Reconciles installed source, CSS, and src/components/ui/_kit/kit.lock.json with src/components/ui/_kit/kit.json.",
+            "Reconciles lock metadata and managed CSS with desired items while retaining app-owned Rust and module files.",
         ],
         "view" => vec![
             "usage: leptos_ui_kit view <item> [--source] [--json]",
@@ -2051,19 +3300,16 @@ fn command_help(command: &str) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
-fn current_dir() -> PathBuf {
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{collections::BTreeMap, fs};
 
-    use leptos_ui_kit_codegen::{extract_managed_css_block, lock_to_json, plan_init};
+    use leptos_ui_kit_codegen::{extract_managed_css_block, plan_init};
     use leptos_ui_kit_registry::{
-        canonical_kit_config, desired_builtin_button_item, kit_config_to_json,
-        kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
+        canonical_kit_config, desired_builtin_button_item, desired_builtin_spinner_item,
+        desired_builtin_tokens_item, kit_config_to_json, kit_config_with_desired_item,
+        load_built_in_registry_item, parse_kit_json_str,
     };
     use tempfile::tempdir;
 
@@ -2071,30 +3317,6 @@ mod tests {
         include_str!("../tests/fixtures/theme_pre_refactor_06124efa/button.css");
     const PINNED_SPINNER_CSS: &str =
         include_str!("../tests/fixtures/theme_pre_refactor_06124efa/spinner.css");
-
-    #[test]
-    fn packaged_css_fixtures_match_workspace_canonical_copies_when_present() {
-        let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/theme_pre_refactor_06124efa");
-        if !canonical
-            .try_exists()
-            .expect("inspect canonical fixture root")
-        {
-            return;
-        }
-        assert!(
-            canonical.is_dir(),
-            "canonical fixture root must be a directory"
-        );
-        assert_eq!(
-            PINNED_BUTTON_CSS,
-            fs::read_to_string(canonical.join("button.css")).expect("read canonical button CSS")
-        );
-        assert_eq!(
-            PINNED_SPINNER_CSS,
-            fs::read_to_string(canonical.join("spinner.css")).expect("read canonical spinner CSS")
-        );
-    }
 
     const TEST_TOOL_REV: &str = "0123456789abcdef0123456789abcdef01234567";
     const APP_TOKEN_OVERRIDES: &str = r#"
@@ -2144,9 +3366,15 @@ leptos_router = "0.9.0-alpha"
 
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"info\""));
-        assert!(output.contains("\"project_root\""));
-        assert!(output.contains("\"render_mode\": \"csr\""));
-        assert!(output.contains("\"css_file_path\""));
+        assert!(output.contains("\"projectRoot\": \".\""));
+        assert!(output.contains("\"projectKind\": \"single-crate-trunk-csr\""));
+        assert!(output.contains("\"renderModeContract\""));
+        assert!(output.contains("\"renderModeSelection\""));
+        assert!(output.contains("\"renderMode\": \"csr\""));
+        assert!(output.contains("\"stylesheet\": \"styles/kit.css\""));
+        assert!(!output.contains(&root.display().to_string()));
+        assert!(!output.contains("\"kitConfig\""));
+        assert!(!output.contains("\"installedLock\""));
     }
 
     #[test]
@@ -2157,7 +3385,7 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"schemaVersion\": \"0.9.0-alpha\""));
         assert!(output.contains("\"command\": \"view\""));
         assert!(output.contains("\"name\": \"button\""));
-        assert!(output.contains("\"source_kind\": \"built-in\""));
+        assert!(output.contains("\"sourceKind\": \"built-in\""));
         assert!(output.contains("\"kind\": \"ui\""));
         assert!(output.contains("\"cargoPlan\""));
         assert!(output.contains("\"source\""));
@@ -2215,6 +3443,12 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"init\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.json\""));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).expect("init JSON")["data"],
+            serde_json::json!({})
+        );
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"content\""));
         assert!(!root.join(DEFAULT_KIT_CONFIG_PATH).exists());
     }
 
@@ -2267,10 +3501,15 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"command\": \"add\""));
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemName\": \"button\""));
-        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"dependencies\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
         assert!(output.contains("\"path\": \"src/components/ui/_kit/kit.lock.json\""));
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"lock\""));
+        assert!(!output.contains("\"content\""));
+        assert_eq!(output.matches("\"changes\"").count(), 1);
+        assert_eq!(output.matches("\"diagnostics\"").count(), 1);
         assert!(!root.join("src/components/ui/button.rs").exists());
     }
 
@@ -2333,10 +3572,13 @@ leptos_router = "0.9.0-alpha"
         assert!(output.contains("\"status\": \"planned\""));
         assert!(output.contains("\"itemIds\": ["));
         assert!(output.contains("\"builtin:button\""));
-        assert!(output.contains("\"cargoPlan\""));
+        assert!(output.contains("\"dependencies\""));
         assert!(output.contains("\"crate\": \"leptos\""));
         assert!(!output.contains("\"crate\": \"leptos_router\""));
         assert!(output.contains("\"path\": \"src/components/ui/button.rs\""));
+        assert!(!output.contains("\"files\""));
+        assert!(!output.contains("\"lock\""));
+        assert!(!output.contains("\"content\""));
     }
 
     #[test]
@@ -2386,6 +3628,130 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn ordinary_and_strict_doctor_fail_on_injected_registry_corruption() {
+        let project = tempdir().expect("tempdir");
+        for strict in [false, true] {
+            let doctor = build_doctor_output_with_registry_health(
+                project.path(),
+                strict,
+                false,
+                false,
+                || {
+                    Err(
+                        "invalid built-in theme CSS registry/styles/tokens.css: injected drift"
+                            .to_owned(),
+                    )
+                },
+            );
+            assert_doctor_check(
+                &doctor,
+                "registry",
+                DoctorCheckStatus::Fail,
+                "registry/styles/tokens.css",
+            );
+            let registry = doctor
+                .checks
+                .iter()
+                .find(|check| check.name == "registry")
+                .expect("registry check");
+            assert!(registry.message.contains("registry/styles/tokens.css"));
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+        }
+    }
+
+    #[test]
+    fn doctor_ignores_retired_application_owned_rust_outside_the_lock() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let button_path = root.join("src/components/ui/button.rs");
+        let module_path = root.join("src/components/ui/mod.rs");
+        let button_before = fs::read(&button_path).expect("read button source");
+        let module_before = fs::read(&module_path).expect("read UI module");
+
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read config"))
+                .expect("parse config");
+        config.items = vec![
+            desired_builtin_tokens_item(),
+            desired_builtin_spinner_item(),
+        ];
+        let config_json = kit_config_to_json(&config).expect("serialize retained config");
+        fs::write(&config_path, &config_json).expect("write retained config");
+
+        let mut lock = read_install_lock(root);
+        let retired = lock.items.remove("builtin:button").expect("retired button");
+        for file in retired.files {
+            assert_eq!(
+                lock.files_by_path.remove(&file.path).as_deref(),
+                Some("builtin:button")
+            );
+        }
+        for block in retired.style_blocks {
+            assert_eq!(
+                lock.style_blocks_by_id.remove(&block.block_id).as_deref(),
+                Some("builtin:button")
+            );
+        }
+        lock.project.config_hash = hash_content_bytes(config_json.as_bytes());
+        write_install_lock(root, &lock);
+
+        let css_path = root.join(DEFAULT_CSS_PATH);
+        let css = fs::read_to_string(&css_path).expect("read stylesheet");
+        fs::write(&css_path, remove_managed_css_block(css, "button")).expect("retire button CSS");
+
+        let doctor = build_doctor_output(root, true, false, false);
+
+        assert_eq!(doctor_status(&doctor), CommandStatus::Success);
+        assert_eq!(
+            fs::read(button_path).expect("read retained button"),
+            button_before
+        );
+        assert_eq!(
+            fs::read(module_path).expect("read retained module"),
+            module_before
+        );
+    }
+
+    #[test]
+    fn sync_to_empty_retains_app_source_and_passes_strict_doctor() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let button_path = root.join("src/components/ui/button.rs");
+        let module_path = root.join("src/components/ui/mod.rs");
+        let button_before = fs::read(&button_path).expect("read button source");
+        let module_before = fs::read(&module_path).expect("read UI module");
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read config"))
+                .expect("parse config");
+        config.items.clear();
+        fs::write(
+            &config_path,
+            kit_config_to_json(&config).expect("serialize empty config"),
+        )
+        .expect("write empty config");
+
+        let first = apply_sync(root).expect("sync to empty");
+
+        assert!(first.lock.items.is_empty());
+        assert!(first.lock.files_by_path.is_empty());
+        assert!(first.lock.style_blocks_by_id.is_empty());
+        assert_eq!(
+            fs::read(&button_path).expect("read retained button"),
+            button_before
+        );
+        assert_eq!(
+            fs::read(&module_path).expect("read retained UI module"),
+            module_before
+        );
+        assert_strict_doctor_success(root);
+        assert!(apply_sync(root).expect("idempotent empty sync").is_empty());
+    }
+
+    #[test]
     fn doctor_surfaces_pending_or_invalid_transaction_recovery_state() {
         let directory = tempfile::tempdir().expect("tempdir");
         let root = directory.path();
@@ -2410,7 +3776,7 @@ leptos_router = "0.9.0-alpha"
             &doctor,
             "transaction_recovery",
             DoctorCheckStatus::Fail,
-            "journal",
+            "transaction recovery is required",
         );
         assert_eq!(fs::read(journal).expect("journal after doctor"), before);
     }
@@ -2574,7 +3940,6 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
             "<html><head></head><body></body></html>\n",
         )
         .expect("write index");
-        run(vec![OsString::from("init")], root).expect("run init");
         run(vec![OsString::from("add"), OsString::from("tokens")], root).expect("run add tokens");
 
         let doctor = build_doctor_output(root, true, false, false);
@@ -2585,6 +3950,74 @@ leptos = { version = "0.9.0-alpha", features = ["csr"] }
         assert!(output.contains("built-in registry runtime health is valid"));
         assert!(!output.contains("\"name\": \"dependency.leptos_router\""));
         assert!(!output.contains("\"name\": \"dependency.registry."));
+        assert!(!root.join("src/components/mod.rs").exists());
+        assert!(!root.join("src/components/ui/mod.rs").exists());
+        assert!(!root.join("src/components/ui/tokens.rs").exists());
+    }
+
+    #[test]
+    fn custom_components_root_converges_and_passes_strict_doctor() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.9.0-alpha", features = ["csr"] }
+"#,
+        )
+        .expect("write cargo");
+        fs::create_dir(root.join("src")).expect("create src");
+        fs::write(
+            root.join("index.html"),
+            "<html><head></head><body></body></html>\n",
+        )
+        .expect("write index");
+        let mut config = canonical_kit_config().expect("canonical config");
+        config.install.ui_dir = "src/widgets/kit_ui".to_owned();
+        config.install.ui_mod = "src/widgets/kit_ui/mod.rs".to_owned();
+        config.install.components_mod = "src/widgets/mod.rs".to_owned();
+        config.styles.css = "styles/custom.css".to_owned();
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        fs::write(
+            &config_path,
+            kit_config_to_json(&config).expect("serialize custom config"),
+        )
+        .expect("write custom config");
+
+        run(vec![OsString::from("add"), OsString::from("button")], root).expect("run custom add");
+        assert!(root.join("src/widgets/kit_ui/button.rs").is_file());
+        assert!(root.join("src/widgets/kit_ui/spinner.rs").is_file());
+        assert!(root.join("src/widgets/kit_ui/mod.rs").is_file());
+        assert!(root.join("src/widgets/mod.rs").is_file());
+        assert!(!root.join("src/components/ui/button.rs").exists());
+        assert_strict_doctor_success(root);
+
+        let button_path = root.join("src/widgets/kit_ui/button.rs");
+        let button_before = fs::read(&button_path).expect("read custom button");
+        let mut retained =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read custom config"))
+                .expect("parse custom config");
+        retained.items = vec![desired_builtin_spinner_item()];
+        fs::write(
+            &config_path,
+            kit_config_to_json(&retained).expect("serialize retained config"),
+        )
+        .expect("write retained config");
+
+        run(vec![OsString::from("sync")], root).expect("run custom sync");
+        assert_eq!(
+            fs::read(&button_path).expect("read retained custom button"),
+            button_before
+        );
+        assert_strict_doctor_success(root);
+        assert!(apply_sync(root).expect("idempotent custom sync").is_empty());
     }
 
     #[test]
@@ -2939,65 +4372,96 @@ leptos_router = "0.9.0-alpha"
 
             let doctor = build_doctor_output(root, true, false, false);
             assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-            if mutation == "misowned_file" {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_files_by_path",
-                    DoctorCheckStatus::Fail,
-                    "differs from registry target ownership",
-                );
-            } else if mutation.ends_with("_file") {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_file_targets",
-                    DoctorCheckStatus::Fail,
-                    "differ from the registry snapshot",
-                );
-            } else if mutation == "misowned_style" {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_style_blocks_by_id",
-                    DoctorCheckStatus::Fail,
-                    "differs from registry target ownership",
-                );
-            } else {
-                assert_doctor_check(
-                    &doctor,
-                    "lock_style_targets",
-                    DoctorCheckStatus::Fail,
-                    "differ from the registry snapshot",
-                );
-            }
+            let (check, message) = match mutation {
+                "extra_file" => ("lock_file_targets", "differ from the registry snapshot"),
+                "duplicate_file" => ("lock", ".path \"src/components/ui/button.rs\" duplicates"),
+                "misowned_file" => (
+                    "lock",
+                    "filesByPath[\"src/components/ui/spinner.rs\"] is owned",
+                ),
+                "extra_style" => (
+                    "lock",
+                    "styleBlocks must contain at most one UI style block",
+                ),
+                "duplicate_style" => ("lock", ".blockId \"button\" duplicates"),
+                "misowned_style" => ("lock", "styleBlocksById[\"spinner\"] is owned"),
+                _ => unreachable!(),
+            };
+            assert_doctor_check(&doctor, check, DoctorCheckStatus::Fail, message);
         }
     }
 
     #[test]
     fn doctor_rejects_stale_item_and_lock_metadata() {
+        for mutation in ["wrong_version", "stale_content", "stale_kind"] {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path();
+            create_current_button_install(root, DEFAULT_CSS_PATH);
+            let mut lock = read_install_lock(root);
+            match mutation {
+                "wrong_version" => lock.kit_version = "0.8.0".to_owned(),
+                "stale_content" => {
+                    lock.items
+                        .get_mut("builtin:button")
+                        .expect("button item")
+                        .content_hash = format!("sha256:{}", "2".repeat(64));
+                }
+                "stale_kind" => {
+                    lock.items
+                        .get_mut("builtin:tokens")
+                        .expect("tokens item")
+                        .kind = leptos_ui_kit_registry::RegistryItemKind::Ui;
+                }
+                _ => unreachable!(),
+            }
+            write_install_lock(root, &lock);
+
+            let doctor = build_doctor_output(root, true, false, false);
+            assert_eq!(doctor_status(&doctor), CommandStatus::Error);
+            match mutation {
+                "wrong_version" => assert_doctor_check(
+                    &doctor,
+                    "lock",
+                    DoctorCheckStatus::Fail,
+                    "kitVersion must be",
+                ),
+                "stale_content" => assert_doctor_check(
+                    &doctor,
+                    "lock_item_metadata",
+                    DoctorCheckStatus::Fail,
+                    "builtin:button differs",
+                ),
+                "stale_kind" => assert_doctor_check(
+                    &doctor,
+                    "lock_item_metadata",
+                    DoctorCheckStatus::Fail,
+                    "builtin:tokens differs",
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn codegen_and_doctor_use_the_same_install_lock_verdict() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         create_current_button_install(root, DEFAULT_CSS_PATH);
         let mut lock = read_install_lock(root);
-        lock.kit_version = "0.8.0".to_owned();
-        lock.items
-            .get_mut("builtin:button")
-            .expect("button item")
-            .content_hash = format!("sha256:{}", "2".repeat(64));
+        lock.files_by_path.remove("src/components/ui/button.rs");
+        let direct_reason = match lock
+            .validate()
+            .expect_err("missing reverse index must fail")
+        {
+            leptos_ui_kit_codegen::CodegenError::InvalidLock { reason, .. } => reason,
+            error => panic!("unexpected direct validator error: {error}"),
+        };
         write_install_lock(root, &lock);
 
         let doctor = build_doctor_output(root, true, false, false);
+
         assert_eq!(doctor_status(&doctor), CommandStatus::Error);
-        assert_doctor_check(
-            &doctor,
-            "lock_metadata",
-            DoctorCheckStatus::Fail,
-            "kitVersion 0.8.0",
-        );
-        assert_doctor_check(
-            &doctor,
-            "lock_item_metadata",
-            DoctorCheckStatus::Fail,
-            "builtin:button differs",
-        );
+        assert_doctor_check(&doctor, "lock", DoctorCheckStatus::Fail, &direct_reason);
     }
 
     #[test]
@@ -3077,6 +4541,7 @@ leptos_router = "0.9.0-alpha"
             InstalledItem {
                 id: "builtin:router-link".to_owned(),
                 name: "router-link".to_owned(),
+                kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
                 source: "builtin".to_owned(),
                 version: router.item.version,
                 content_hash: router.content_hash,
@@ -3251,6 +4716,7 @@ leptos_router = "0.9.0-alpha"
             InstalledItem {
                 id: "builtin:missing-item".to_owned(),
                 name: "missing-item".to_owned(),
+                kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
                 source: "builtin".to_owned(),
                 version: SCHEMA_VERSION.to_owned(),
                 content_hash: format!("sha256:{}", "3".repeat(64)),
@@ -3310,6 +4776,95 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn init_and_doctor_share_the_exact_html_stylesheet_verdict() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        create_current_button_install(root, DEFAULT_CSS_PATH);
+        let cases = [
+            (
+                "present",
+                "<HTML><HeAd><LiNk DATA-TRUNK REL='preload CSS' HREF='styles/kit&#46;css'></HeAd></HTML>",
+                "present",
+            ),
+            (
+                "missing",
+                "<html><head></head><body></body></html>",
+                "missing",
+            ),
+            (
+                "body-only",
+                "<html><head></head><body><link data-trunk rel=\"css\" href=\"styles/kit.css\"></body></html>",
+                "unsafe",
+            ),
+            (
+                "duplicate",
+                "<head><link data-trunk rel=\"css\" href=\"styles/kit.css\"><link data-trunk rel=\"css\" href=\"styles/kit.css\"></head>",
+                "unsafe",
+            ),
+            (
+                "malformed",
+                "<head><link data-trunk rel=\"css\" href=\"styles/kit.css></head>",
+                "unsafe",
+            ),
+        ];
+
+        for (name, html, expected) in cases {
+            fs::write(root.join("index.html"), html).expect("write index");
+            let plan = plan_init(root);
+            let doctor = build_doctor_output(root, true, false, false);
+            match expected {
+                "present" => {
+                    assert!(
+                        !plan
+                            .expect("present link plan")
+                            .files
+                            .iter()
+                            .any(|file| file.path == "index.html"),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Pass,
+                        "links",
+                    );
+                }
+                "missing" => {
+                    assert!(
+                        plan.expect("missing link is patchable")
+                            .files
+                            .iter()
+                            .any(|file| file.path == "index.html"),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Fail,
+                        "missing",
+                    );
+                }
+                "unsafe" => {
+                    assert!(
+                        matches!(
+                            plan,
+                            Err(leptos_ui_kit_codegen::CodegenError::UnsafePatch { .. })
+                        ),
+                        "{name}"
+                    );
+                    assert_doctor_check(
+                        &doctor,
+                        "stylesheet_link",
+                        DoctorCheckStatus::Fail,
+                        "cannot be inspected safely",
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_flags_return_usage_errors() {
         let error = run(
             vec![
@@ -3321,7 +4876,11 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("tailwind flag should be unsupported");
 
-        assert!(error.contains("unsupported flag for view"));
+        assert_eq!(error.command, "view");
+        assert_eq!(error.category, ErrorCategory::Usage);
+        assert_eq!(error.code, "cli.unsupported_flag");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.message.contains("unsupported flag for view"));
     }
 
     #[test]
@@ -3341,6 +4900,77 @@ leptos_router = "0.9.0-alpha"
     }
 
     #[test]
+    fn help_and_version_do_not_require_a_process_directory() {
+        let unavailable = || {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "process directory was removed",
+            ))
+        };
+
+        run_from_environment(vec![OsString::from("--help")], unavailable)
+            .expect("help without cwd");
+        run_from_environment(vec![OsString::from("--version")], unavailable)
+            .expect("version without cwd");
+        run_from_environment(
+            vec![OsString::from("doctor"), OsString::from("--help")],
+            unavailable,
+        )
+        .expect("command help without cwd");
+    }
+
+    #[test]
+    fn project_commands_report_typed_current_directory_failures() {
+        let error = run_from_environment(vec![OsString::from("info")], || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "cwd unavailable",
+            ))
+        })
+        .expect_err("info should require cwd");
+
+        assert_eq!(error.command, "info");
+        assert_eq!(error.category, ErrorCategory::Operational);
+        assert_eq!(error.code, "cwd.unavailable");
+        assert_eq!(error.exit_code(), 1);
+        assert!(error.source.is_some());
+        assert!(
+            error
+                .to_string()
+                .contains("failed to acquire current directory")
+        );
+    }
+
+    #[test]
+    fn info_resolves_relative_paths_against_effective_global_cwd() {
+        let dir = tempdir().expect("tempdir");
+        let effective_cwd = dir.path().join("effective");
+        fs::create_dir(&effective_cwd).expect("create effective cwd");
+
+        let relative = run(
+            vec![OsString::from("info"), OsString::from("nested")],
+            &effective_cwd,
+        )
+        .expect_err("missing relative project should fail");
+        assert_eq!(relative.command, "info");
+        assert_eq!(relative.code, "project.missing_manifest");
+        assert_eq!(relative.logical_path.as_deref(), Some("Cargo.toml"));
+
+        let absolute_target = dir.path().join("absolute");
+        let absolute = run(
+            vec![
+                OsString::from("info"),
+                absolute_target.as_os_str().to_owned(),
+            ],
+            &effective_cwd,
+        )
+        .expect_err("missing absolute project should fail");
+        assert_eq!(absolute.command, "info");
+        assert_eq!(absolute.code, "project.missing_manifest");
+        assert_eq!(absolute.logical_path.as_deref(), Some("Cargo.toml"));
+    }
+
+    #[test]
     fn version_outputs_known_tool_provenance_in_human_and_json_modes() {
         let human = render_version_output_with_tool(false, Ok(test_tool_config(TEST_TOOL_REV)))
             .expect("render human version");
@@ -3350,6 +4980,27 @@ leptos_router = "0.9.0-alpha"
             .expect("render JSON version");
         let value = serde_json::from_str::<serde_json::Value>(&output).expect("parse version JSON");
 
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schemaVersion": "0.9.0-alpha",
+                "command": "version",
+                "status": "success",
+                "diagnostics": [],
+                "changes": [],
+                "data": {
+                    "package": "leptos_ui_kit_cli",
+                    "binary": "leptos_ui_kit",
+                    "version": "0.1.0",
+                    "schemaVersion": "0.9.0-alpha",
+                    "source": {
+                        "kind": "git",
+                        "url": "https://github.com/triesap/leptos_ui_kit",
+                        "rev": TEST_TOOL_REV
+                    }
+                }
+            })
+        );
         assert_eq!(value["command"], "version");
         assert_eq!(value["status"], "success");
         assert_eq!(value["schemaVersion"], "0.9.0-alpha");
@@ -3409,7 +5060,9 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("version flag should be unsupported");
 
-        assert!(error.contains("unsupported flag for version"));
+        assert_eq!(error.category, ErrorCategory::Usage);
+        assert_eq!(error.code, "cli.unsupported_flag");
+        assert!(error.message.contains("unsupported flag for version"));
     }
 
     fn test_tool_config(rev: &str) -> ToolConfig {
@@ -3479,26 +5132,122 @@ leptos_router = "0.9.0-alpha"
 
     #[test]
     fn exit_code_mapping_matches_contract() {
-        assert_eq!(
-            exit_code_for_error("unsupported flag for view: --tailwind"),
-            2
+        let usage = CliError::usage(
+            "view",
+            false,
+            "cli.unsupported_flag",
+            "wording is irrelevant",
         );
-        assert_eq!(exit_code_for_error("doctor checks failed"), 3);
-        assert_eq!(
-            exit_code_for_error(
-                "cannot safely patch src/components/ui/button.rs: target exists but is not tracked in lock"
-            ),
-            10
+        let doctor = CliError::doctor_failed(true);
+        let root = Path::new("/project");
+        let conflict = CliError::from_codegen(
+            "add",
+            false,
+            root,
+            "different wording",
+            CodegenError::UnsafePatch {
+                path: root.join("src/components/ui/button.rs"),
+                reason: "different detail".to_owned(),
+            },
         );
-        assert_eq!(
-            exit_code_for_error("unsafe write path ../evil.rs: parent traversal"),
-            11
+        let unsafe_path = CliError::from_codegen(
+            "init",
+            true,
+            root,
+            "different wording",
+            CodegenError::UnsafePath {
+                path: "../evil.rs".to_owned(),
+                reason: "different detail".to_owned(),
+            },
         );
-        assert_eq!(
-            exit_code_for_error("built-in registry item not found: nope"),
-            12
+        let registry = CliError::from_registry(
+            "view",
+            true,
+            "nope",
+            RegistryError::BuiltInNotFound("nope".to_owned()),
         );
-        assert_eq!(exit_code_for_error("failed to inspect project"), 1);
+        let operational = CliError::operational(
+            "info",
+            false,
+            "project.inspect",
+            "different wording",
+            None,
+            None,
+        );
+
+        assert_eq!(usage.exit_code(), 2);
+        assert_eq!(doctor.exit_code(), 3);
+        assert_eq!(conflict.exit_code(), 10);
+        assert_eq!(unsafe_path.exit_code(), 11);
+        assert_eq!(registry.exit_code(), 12);
+        assert_eq!(operational.exit_code(), 1);
+        assert_eq!(conflict.category, ErrorCategory::Conflict);
+        assert_eq!(
+            conflict.logical_path.as_deref(),
+            Some("src/components/ui/button.rs")
+        );
+        assert!(conflict.suggestion.is_some());
+        assert!(conflict.source.is_some());
+        assert_eq!(unsafe_path.category, ErrorCategory::UnsafePath);
+        assert_eq!(registry.category, ErrorCategory::RegistryPackage);
+    }
+
+    #[test]
+    fn registry_diagnostics_never_expose_physical_locators() {
+        for path in [
+            "/private/build/registry/item.json",
+            r"C:\private\build\registry\item.json",
+            "../registry/item.json",
+            "registry/../item.json",
+        ] {
+            let error = CliError::from_registry(
+                "view",
+                true,
+                "button",
+                RegistryError::UnsafePath {
+                    field: "targets.uiFiles[].source",
+                    path: path.to_owned(),
+                },
+            );
+            let output = error.render_json();
+
+            assert!(!output.contains(path), "{path}");
+            assert!(!output.contains("private"), "{output}");
+            assert_eq!(error.logical_path, None);
+        }
+
+        let logical = CliError::from_registry(
+            "view",
+            true,
+            "button",
+            RegistryError::DuplicateTarget("ui/button.rs".to_owned()),
+        );
+        assert_eq!(logical.logical_path.as_deref(), Some("ui/button.rs"));
+
+        let packaged = CliError::from_codegen(
+            "add",
+            true,
+            Path::new("/project"),
+            "failed to load item",
+            CodegenError::Registry(RegistryError::Io {
+                path: PathBuf::from("/private/build/out/registry/item.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+            }),
+        );
+        let output = packaged.render_json();
+        assert!(!output.contains("/private/build"), "{output}");
+        assert!(output.contains("failed to read a packaged registry asset"));
+    }
+
+    #[test]
+    fn human_change_wording_distinguishes_planned_applied_and_unchanged() {
+        assert_eq!(change_verb(CommandStatus::Planned), "planned");
+        assert_eq!(change_verb(CommandStatus::Success), "applied");
+        assert_eq!(
+            unchanged_label(CommandStatus::Planned),
+            "no changes planned"
+        );
+        assert_eq!(unchanged_label(CommandStatus::NoChange), "no changes");
     }
 
     #[test]
@@ -3516,8 +5265,12 @@ leptos_router = "0.9.0-alpha"
         )
         .expect_err("doctor should fail");
 
-        assert_eq!(error, "doctor checks failed");
-        assert_eq!(exit_code_for_error(&error), 3);
+        assert_eq!(error.command, "doctor");
+        assert_eq!(error.category, ErrorCategory::Doctor);
+        assert_eq!(error.code, "doctor.checks_failed");
+        assert_eq!(error.message.as_ref(), "doctor checks failed");
+        assert_eq!(error.exit_code(), 3);
+        assert!(error.output_emitted);
     }
 
     #[test]
@@ -3532,6 +5285,26 @@ leptos_router = "0.9.0-alpha"
 
         assert_eq!(check.status, DoctorCheckStatus::Fail);
         assert!(check.message.contains("failed to run"));
+    }
+
+    #[test]
+    fn doctor_selects_the_build_target_from_the_project_contract() {
+        for kind in [
+            ProjectKind::SingleCrateTrunkCsr,
+            ProjectKind::SingleCrateBrowserHydration,
+        ] {
+            assert_eq!(
+                doctor_cargo_check_args(Some(kind)),
+                ["check", "--target", "wasm32-unknown-unknown"]
+            );
+        }
+        for kind in [
+            ProjectKind::SingleCrateNativeSsr,
+            ProjectKind::SharedLibraryCrate,
+        ] {
+            assert_eq!(doctor_cargo_check_args(Some(kind)), ["check"]);
+        }
+        assert_eq!(doctor_cargo_check_args(None), ["check"]);
     }
 
     fn assert_doctor_check(
@@ -3689,11 +5462,10 @@ leptos_router = "0.9.0-alpha"
     }
 
     fn write_install_lock(root: &Path, lock: &InstallLock) {
-        fs::write(
-            root.join(DEFAULT_KIT_LOCK_PATH),
-            lock_to_json(lock).expect("serialize install lock"),
-        )
-        .expect("write install lock");
+        let mut content =
+            serde_json::to_string_pretty(lock).expect("serialize install-lock fixture");
+        content.push('\n');
+        fs::write(root.join(DEFAULT_KIT_LOCK_PATH), content).expect("write install lock");
     }
 
     fn current_registry_style(block_id: &str) -> String {

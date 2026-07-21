@@ -18,7 +18,11 @@ use cap_std::{
 use leptos_ui_kit_registry::DEFAULT_KIT_CONFIG_PATH;
 
 use crate::transaction::DEFAULT_KIT_COORDINATION_IGNORE_PATH;
-use crate::{CodegenError, DEFAULT_KIT_LOCK_PATH, DEFAULT_KIT_WRITE_LOCK_PATH, hash_content_bytes};
+use crate::transaction::{opened_directory_identity, opened_regular_file_identity};
+use crate::{
+    CodegenError, DEFAULT_KIT_LOCK_PATH, DEFAULT_KIT_WRITE_LOCK_PATH, THEME_CAPABILITY_PATH,
+    TOKEN_CONTRACT_PATH, hash_content_bytes,
+};
 
 /// The permission state retained in an exact regular-file preimage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +31,7 @@ pub struct PreservedFileMode {
     pub posix_mode: Option<u32>,
 }
 
-/// A full-width filesystem identity.
+/// A full-width filesystem identity shared by planning and transaction code.
 ///
 /// Unix device and inode values are zero-extended. Windows identities retain
 /// the complete volume serial and 128-bit `FILE_ID_INFO` value.
@@ -38,6 +42,10 @@ pub(crate) struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
+    pub(crate) const fn from_unix(device: u64, inode: u64) -> Self {
+        Self::from_u64(device, inode)
+    }
+
     pub(crate) const fn from_u64(namespace: u64, object: u64) -> Self {
         Self::from_u128(namespace as u128, object as u128)
     }
@@ -50,7 +58,6 @@ impl ObjectIdentity {
     }
 
     #[cfg(windows)]
-    #[allow(dead_code)]
     pub(crate) const fn from_windows(
         identity: leptos_ui_kit_codegen_platform::FileIdentity,
     ) -> Self {
@@ -98,7 +105,10 @@ struct ProjectRootIdentity {
     identity: ObjectIdentity,
 }
 
-type DirectoryIdentity = ObjectIdentity;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectoryIdentity {
+    identity: ObjectIdentity,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExactRegularFileObservation {
@@ -154,7 +164,9 @@ impl PlanSnapshot {
         if logical_path.is_empty() {
             return Some(self.root.identity);
         }
-        self.directories.get(logical_path).copied()
+        self.directories
+            .get(logical_path)
+            .map(|identity| identity.identity)
     }
 
     pub(crate) fn revalidate_all(&self, context: &PlanningContext) -> Result<(), CodegenError> {
@@ -231,7 +243,12 @@ impl PlanSnapshot {
                 path: context.root.canonical_root.clone(),
                 source,
             })?;
-        if metadata_identity(&metadata) != self.root.identity {
+        ensure_directory_metadata(".", &metadata)?;
+        if opened_directory_identity(&context.dir).map_err(|source| CodegenError::Io {
+            path: context.root.canonical_root.clone(),
+            source,
+        })? != self.root.identity
+        {
             return Err(CodegenError::ProjectRootChanged {
                 path: context.root.canonical_root.clone(),
                 reason: "held project-root capability no longer has the planned identity"
@@ -274,7 +291,11 @@ impl PlanningContext {
             source,
         })?;
         ensure_directory_metadata(".", &metadata)?;
-        let actual_identity = metadata_identity(&metadata);
+        let actual_identity =
+            opened_directory_identity(&dir).map_err(|source| CodegenError::Io {
+                path: root.canonical_root.clone(),
+                source,
+            })?;
         if actual_identity != root.identity {
             return Err(CodegenError::ProjectRootChanged {
                 path: project_root.to_path_buf(),
@@ -331,7 +352,11 @@ impl PlanningContext {
             source,
         })?;
         ensure_directory_metadata(".", &held)?;
-        if metadata_identity(&held) != self.root.identity {
+        if opened_directory_identity(&self.dir).map_err(|source| CodegenError::Io {
+            path: self.root.canonical_root.clone(),
+            source,
+        })? != self.root.identity
+        {
             return Err(CodegenError::ProjectRootChanged {
                 path: self.root.canonical_root.clone(),
                 reason: "held project-root capability no longer has the opened identity".to_owned(),
@@ -349,7 +374,11 @@ impl PlanningContext {
                 source,
             })?;
         ensure_directory_metadata(".", &metadata)?;
-        if metadata_identity(&metadata) != self.root.identity {
+        if opened_directory_identity(directory).map_err(|source| CodegenError::Io {
+            path: self.root.canonical_root.clone(),
+            source,
+        })? != self.root.identity
+        {
             return Err(CodegenError::ProjectRootChanged {
                 path: self.root.canonical_root.clone(),
                 reason: "project root path no longer resolves to the opened identity".to_owned(),
@@ -470,7 +499,11 @@ impl PlanningContext {
             })?;
         ensure_directory_metadata(logical_path, &metadata)?;
 
-        let actual_identity = metadata_identity(&metadata);
+        let actual_identity =
+            opened_directory_identity(&directory).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
         if actual_identity != expected_identity {
             return Err(CodegenError::PreimageConflict {
                 path: logical_path.to_owned(),
@@ -523,7 +556,24 @@ impl PlanningContext {
             source,
         })?;
         ensure_regular_file_metadata(logical_path, &opened)?;
-        if metadata_identity(&metadata) != metadata_identity(&opened) {
+        let opened_identity =
+            opened_regular_file_identity(&file).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
+        let current =
+            parent
+                .open_with(&file_name, &options)
+                .map_err(|source| CodegenError::Io {
+                    path: self.project_root().join(logical_path),
+                    source,
+                })?;
+        if opened_identity
+            != opened_regular_file_identity(&current).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?
+        {
             return unsafe_path(
                 logical_path,
                 "controlled file changed while it was opened without following",
@@ -550,7 +600,18 @@ impl PlanningContext {
                 source,
             })?;
         ensure_regular_file_metadata(logical_path, &current)?;
-        if metadata_identity(&held) != metadata_identity(&current) {
+        let held_identity =
+            opened_regular_file_identity(file).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
+        let current_file = self.open_auxiliary_file(logical_path, false)?;
+        if held_identity
+            != opened_regular_file_identity(&current_file).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?
+        {
             return unsafe_path(
                 logical_path,
                 "controlled file identity changed after it was opened",
@@ -572,7 +633,12 @@ impl PlanningContext {
                 source,
             })?;
         ensure_regular_file_metadata(logical_path, &current)?;
-        if metadata_identity(&current) != identity {
+        let current_file = self.open_auxiliary_file(logical_path, false)?;
+        if opened_regular_file_identity(&current_file).map_err(|source| CodegenError::Io {
+            path: self.project_root().join(logical_path),
+            source,
+        })? != identity
+        {
             return unsafe_path(
                 logical_path,
                 "controlled file identity changed after it was opened",
@@ -587,6 +653,16 @@ impl PlanningContext {
         staged: &Dir,
         current: &Dir,
     ) -> Result<(), CodegenError> {
+        let staged_identity =
+            opened_directory_identity(staged).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
+        let current_identity =
+            opened_directory_identity(current).map_err(|source| CodegenError::Io {
+                path: self.project_root().join(logical_path),
+                source,
+            })?;
         let staged = staged.dir_metadata().map_err(|source| CodegenError::Io {
             path: self.project_root().join(logical_path),
             source,
@@ -597,7 +673,7 @@ impl PlanningContext {
         })?;
         ensure_directory_metadata(logical_path, &staged)?;
         ensure_directory_metadata(logical_path, &current)?;
-        if metadata_identity(&staged) != metadata_identity(&current) {
+        if staged_identity != current_identity {
             return Err(CodegenError::PreimageConflict {
                 path: logical_path.to_owned(),
                 reason: "controlled parent changed between staging and commit".to_owned(),
@@ -667,6 +743,11 @@ impl PlanningContext {
                 "file changed while it was opened without following",
             );
         }
+        let opened_identity =
+            opened_regular_file_identity(&file).map_err(|source| CodegenError::Io {
+                path: self.root.canonical_root.join(logical_path),
+                source,
+            })?;
 
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
@@ -681,7 +762,7 @@ impl PlanningContext {
             },
             bytes: Some(bytes),
             regular_file: Some(ExactRegularFileObservation {
-                identity: metadata_identity(&opened_metadata),
+                identity: opened_identity,
                 byte_len: opened_metadata.len(),
             }),
         })
@@ -811,9 +892,14 @@ impl PlanningContext {
                     "directory changed while it was opened without following",
                 );
             }
+            let identity =
+                opened_directory_identity(&current).map_err(|source| CodegenError::Io {
+                    path: self.root.canonical_root.join(&relative),
+                    source,
+                })?;
             self.record_directory_identity(
                 relative.to_string_lossy().into_owned(),
-                metadata_identity(&opened),
+                DirectoryIdentity { identity },
             )?;
         }
 
@@ -888,7 +974,7 @@ impl PlanningContext {
                     reason: error.to_string(),
                 }
             })?;
-            if metadata_identity(&metadata) != *expected_identity {
+            if metadata_identity(&metadata) != expected_identity.identity {
                 return Err(CodegenError::PreimageConflict {
                     path: directory.clone(),
                     reason: "controlled parent identity changed after planning".to_owned(),
@@ -1024,10 +1110,11 @@ fn open_project_root(project_root: &Path) -> io::Result<ProjectRootIdentity> {
             "project root is not a directory",
         ));
     }
+    let identity = opened_directory_identity(&dir)?;
     Ok(ProjectRootIdentity {
         requested_root,
         canonical_root,
-        identity: metadata_identity(&metadata),
+        identity,
     })
 }
 
@@ -1136,7 +1223,7 @@ fn ensure_not_indirection(path: &str, metadata: &Metadata) -> Result<(), Codegen
 }
 
 fn metadata_identity(metadata: &Metadata) -> ObjectIdentity {
-    ObjectIdentity::from_u64(MetadataExt::dev(metadata), MetadataExt::ino(metadata))
+    ObjectIdentity::from_unix(MetadataExt::dev(metadata), MetadataExt::ino(metadata))
 }
 
 fn preserved_mode(metadata: &Metadata) -> PreservedFileMode {
@@ -1201,29 +1288,36 @@ fn unsafe_path<T>(path: &str, reason: &str) -> Result<T, CodegenError> {
 fn is_allowed_write_path(path: &str) -> bool {
     matches!(
         path,
-        DEFAULT_KIT_CONFIG_PATH | DEFAULT_KIT_LOCK_PATH | "index.html" | "src/components/mod.rs"
+        DEFAULT_KIT_CONFIG_PATH
+            | DEFAULT_KIT_LOCK_PATH
+            | TOKEN_CONTRACT_PATH
+            | THEME_CAPABILITY_PATH
+            | "index.html"
     ) || is_allowed_stylesheet_path(path)
-        || path.starts_with("src/components/ui/")
+        || is_allowed_component_rust_path(path)
 }
 
 fn is_allowed_stylesheet_path(path: &str) -> bool {
     path.starts_with("styles/") && path.ends_with(".css")
 }
 
+fn is_allowed_component_rust_path(path: &str) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments.len() < 3
+        || segments.first() != Some(&"src")
+        || segments.contains(&"_kit")
+        || !segments
+            .last()
+            .is_some_and(|file_name| file_name.ends_with(".rs"))
+    {
+        return false;
+    }
+    segments.len() > 3 || segments.last() == Some(&"mod.rs")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ObjectIdentity, PlanningContext, metadata_identity, preserved_mode};
-
-    #[test]
-    fn object_identity_preserves_both_full_width_components() {
-        let namespace = u128::MAX - 1;
-        let object = (1_u128 << 127) | 0x0123_4567_89ab_cdef;
-        let identity = ObjectIdentity::from_u128(namespace, object);
-
-        assert_eq!(identity.namespace_u128(), namespace);
-        assert_eq!(identity.object_u128(), object);
-        assert_eq!(identity.namespace(), namespace.to_le_bytes());
-    }
+    use super::{PlanningContext, metadata_identity, preserved_mode};
 
     #[test]
     fn reopen_exact_directory_returns_a_fresh_matching_capability() {

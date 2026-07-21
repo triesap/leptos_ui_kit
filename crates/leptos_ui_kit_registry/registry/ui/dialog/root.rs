@@ -1,8 +1,6 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use leptos::prelude::*;
 
-static NEXT_DIALOG_ID: AtomicUsize = AtomicUsize::new(1);
+use super::super::identity::use_kit_id;
 
 #[derive(Clone)]
 pub(crate) struct DialogContext {
@@ -30,7 +28,7 @@ pub fn DialogRoot(
     children: Children,
 ) -> impl IntoView {
     let open = open.unwrap_or_else(|| RwSignal::new(default_open));
-    let base_id = id.unwrap_or_else(next_dialog_id);
+    let base_id = id.unwrap_or_else(|| use_kit_id("kit-dialog"));
     provide_context(DialogContext {
         open,
         modal,
@@ -53,9 +51,4 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
     } else {
         format!("{base} {class}")
     }
-}
-
-fn next_dialog_id() -> String {
-    let id = NEXT_DIALOG_ID.fetch_add(1, Ordering::Relaxed);
-    format!("kit-dialog-{id}")
 }

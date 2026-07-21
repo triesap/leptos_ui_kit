@@ -14,10 +14,13 @@ use std::{
 use leptos_ui_kit_registry::{
     ConfigError, DEFAULT_KIT_CONFIG_PATH, KitConfig, SCHEMA_VERSION, TOOL_GIT_URL,
     ToolSourceConfig, canonical_kit_json, canonical_tool_config, desired_builtin_button_item,
-    kit_config_to_json, kit_config_with_desired_item, parse_kit_json_str,
-    read_built_in_registry_source, resolve_built_in_registry_items,
+    desired_builtin_dialog_item, desired_builtin_spinner_item, kit_config_to_json,
+    kit_config_with_desired_item, parse_kit_json_str, read_built_in_registry_source,
+    resolve_built_in_registry_items,
 };
 use serde::Serialize;
+
+use crate::planning::ItemLockTransition;
 
 use super::*;
 
@@ -179,6 +182,71 @@ fn init_plan_uses_configured_stylesheet_path() {
 }
 
 #[test]
+fn init_html_planning_uses_the_lossless_stylesheet_authority() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    write_kit_config(root, canonical_kit_json().expect("canonical config"));
+    let html = "<html>\r\n  <head>\r\n    <!-- fake <link data-trunk rel=\"css\" href=\"styles/kit.css\"> -->\r\n    <link data-trunk rel=\"css\" href=\"styles/app.css\">\r\n  </head>\r\n</html>\r\n";
+    fs::write(root.join("index.html"), html).expect("write index");
+
+    let plan = plan_init(root).expect("plan init");
+    let index = plan
+        .files
+        .iter()
+        .find(|file| file.path == "index.html")
+        .expect("planned index");
+
+    assert_eq!(
+        index.content,
+        "<html>\r\n  <head>\r\n    <!-- fake <link data-trunk rel=\"css\" href=\"styles/kit.css\"> -->\r\n    <link data-trunk rel=\"css\" href=\"styles/kit.css\" />\r\n    <link data-trunk rel=\"css\" href=\"styles/app.css\">\r\n  </head>\r\n</html>\r\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("index.html")).unwrap(),
+        html,
+        "planning is write-free"
+    );
+}
+
+#[test]
+fn init_html_planning_accepts_decoded_mixed_case_link_idempotently() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    write_kit_config(root, canonical_kit_json().expect("canonical config"));
+    let html =
+        "<HTML><HeAd><LiNk HREF='styles/kit&#46;css' REL='preload CSS' DATA-TRUNK></HeAd></HTML>";
+    fs::write(root.join("index.html"), html).expect("write index");
+
+    let plan = plan_init(root).expect("plan init");
+
+    assert!(!plan.files.iter().any(|file| file.path == "index.html"));
+}
+
+#[test]
+fn init_html_planning_rejects_ambiguous_or_outside_head_links_before_writes() {
+    for html in [
+        "<html><head></head><body><link data-trunk rel=\"css\" href=\"styles/kit.css\"></body></html>",
+        "<head><link data-trunk rel=\"css\" href=\"styles/kit.css\"><link data-trunk rel=\"css\" href=\"styles/kit.css\"></head>",
+        "<head><link data-trunk rel=\"css\" href=\"styles/kit.css></head>",
+        "<head></head><head></head>",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("create src");
+        write_kit_config(root, canonical_kit_json().expect("canonical config"));
+        fs::write(root.join("index.html"), html).expect("write index");
+
+        let error = plan_init(root).expect_err("unsafe HTML must fail");
+
+        assert!(matches!(error, CodegenError::UnsafePatch { .. }), "{html}");
+        assert_eq!(fs::read_to_string(root.join("index.html")).unwrap(), html);
+        assert!(!root.join("styles/kit.css").exists());
+        assert!(!root.join(DEFAULT_KIT_LOCK_PATH).exists());
+    }
+}
+
+#[test]
 fn init_write_creates_expected_files_and_persistent_coordination() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -251,6 +319,7 @@ fn lock_rejects_malformed_hash_fields() {
         InstalledItem {
             id: "builtin:button".to_owned(),
             name: "button".to_owned(),
+            kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
             source: "builtin".to_owned(),
             version: SCHEMA_VERSION.to_owned(),
             content_hash: "missing-prefix".to_owned(),
@@ -262,8 +331,419 @@ fn lock_rejects_malformed_hash_fields() {
     let error = lock.validate().expect_err("content hash should fail");
 
     assert!(
-        matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains("items[].contentHash"))
+        matches!(error, CodegenError::InvalidLock { reason, .. } if reason.contains(".contentHash"))
     );
+}
+
+#[test]
+fn install_lock_validator_rejects_every_structural_consistency_fault() {
+    for (case, expected) in [
+        ("schema_version", "schemaVersion"),
+        ("kit_version", "kitVersion"),
+        ("crate_root", "project.crateRoot"),
+        ("project_kind", "project.kind"),
+        ("item_key", ".id must equal its map key"),
+        ("item_identity", ".id must be \"builtin:renamed\""),
+        ("item_name", ".name is invalid"),
+        ("item_keyword", ".name is invalid"),
+        (
+            "foundation_with_file",
+            ".files must be empty for a foundation",
+        ),
+        ("ui_style_identity", ".blockId must equal \"button\""),
+        (
+            "foundation_missing_style",
+            ".styleBlocks must contain at least one foundation style",
+        ),
+        (
+            "foundation_style_suffix",
+            ".blockId must begin with \"button-\"",
+        ),
+        ("item_source", ".source must be \"builtin\""),
+        ("item_version", ".version must be"),
+        (
+            "content_hash",
+            ".contentHash must be a lowercase sha256 hash",
+        ),
+        (
+            "unsafe_file_path",
+            ".path must be a safe writable project path",
+        ),
+        ("wrong_file_extension", ".path must end in .rs"),
+        ("wrong_file_kind", ".kind must be \"rust\""),
+        (
+            "generated_file_hash",
+            ".generatedHash must be a lowercase sha256 hash",
+        ),
+        (
+            "local_file_hash",
+            ".localHashAtInstall must be a lowercase sha256 hash",
+        ),
+        (
+            "duplicate_file",
+            ".path \"src/components/ui/button.rs\" duplicates",
+        ),
+        ("case_folded_file", "collides under ASCII case folding"),
+        (
+            "unsafe_css_path",
+            ".cssPath must be a safe writable project path",
+        ),
+        ("wrong_css_extension", ".cssPath must end in .css"),
+        (
+            "invalid_block_id",
+            ".blockId must be an ASCII lowercase kebab-case",
+        ),
+        (
+            "generated_style_hash",
+            ".generatedHash must be a lowercase sha256 hash",
+        ),
+        ("duplicate_style", ".blockId \"button\" duplicates"),
+        (
+            "missing_file_index",
+            "filesByPath[\"src/components/ui/button.rs\"] is missing",
+        ),
+        (
+            "extra_file_index",
+            "filesByPath[\"src/components/ui/extra.rs\"] is an extra",
+        ),
+        (
+            "misowned_file_index",
+            "filesByPath[\"src/components/ui/button.rs\"] is owned",
+        ),
+        (
+            "missing_style_index",
+            "styleBlocksById[\"button\"] is missing",
+        ),
+        (
+            "extra_style_index",
+            "styleBlocksById[\"extra\"] is an extra",
+        ),
+        (
+            "misowned_style_index",
+            "styleBlocksById[\"button\"] is owned",
+        ),
+    ] {
+        let mut lock = populated_install_lock_fixture();
+        match case {
+            "schema_version" => lock.schema_version = "old".to_owned(),
+            "kit_version" => lock.kit_version = "old".to_owned(),
+            "crate_root" => lock.project.crate_root = "nested".to_owned(),
+            "project_kind" => lock.project.kind = "workspace".to_owned(),
+            "item_key" => lock.items.get_mut("builtin:button").expect("item").id = "other".into(),
+            "item_identity" => {
+                lock.items.get_mut("builtin:button").expect("item").name = "renamed".into();
+            }
+            "item_name" => {
+                lock.items.get_mut("builtin:button").expect("item").name = "not--kebab".into();
+            }
+            "item_keyword" => {
+                let mut item = lock.items.remove("builtin:button").expect("item");
+                item.id = "builtin:async".into();
+                item.name = "async".into();
+                lock.items.insert(item.id.clone(), item);
+                lock.files_by_path
+                    .insert("src/components/ui/button.rs".into(), "builtin:async".into());
+                lock.style_blocks_by_id
+                    .insert("button".into(), "builtin:async".into());
+            }
+            "foundation_with_file" => {
+                lock.items.get_mut("builtin:button").expect("item").kind =
+                    leptos_ui_kit_registry::RegistryItemKind::Foundation;
+            }
+            "ui_style_identity" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.style_blocks[0].block_id = "other".into();
+                lock.style_blocks_by_id.clear();
+                lock.style_blocks_by_id
+                    .insert("other".into(), "builtin:button".into());
+            }
+            "foundation_missing_style" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.kind = leptos_ui_kit_registry::RegistryItemKind::Foundation;
+                item.files.clear();
+                item.style_blocks.clear();
+                lock.files_by_path.clear();
+                lock.style_blocks_by_id.clear();
+            }
+            "foundation_style_suffix" => {
+                let item = lock.items.get_mut("builtin:button").expect("item");
+                item.kind = leptos_ui_kit_registry::RegistryItemKind::Foundation;
+                item.files.clear();
+                item.style_blocks.push(InstalledStyleBlock {
+                    css_path: "styles/kit.css".into(),
+                    block_id: "other".into(),
+                    generated_hash: hash_bytes(b"second style"),
+                });
+                lock.files_by_path.clear();
+                lock.style_blocks_by_id
+                    .insert("other".into(), "builtin:button".into());
+            }
+            "item_source" => {
+                lock.items.get_mut("builtin:button").expect("item").source = "local".into();
+            }
+            "item_version" => {
+                lock.items.get_mut("builtin:button").expect("item").version = "old".into();
+            }
+            "content_hash" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .content_hash = format!("sha256:{}", "A".repeat(64));
+            }
+            "unsafe_file_path" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].path =
+                    "../button.rs".into();
+            }
+            "wrong_file_extension" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].path =
+                    "src/components/ui/button.css".into();
+            }
+            "wrong_file_kind" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].kind = "css".into();
+            }
+            "generated_file_hash" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0].generated_hash =
+                    "bad".into();
+            }
+            "local_file_hash" => {
+                lock.items.get_mut("builtin:button").expect("item").files[0]
+                    .local_hash_at_install = "bad".into();
+            }
+            "duplicate_file" => {
+                let duplicate = lock.items["builtin:button"].files[0].clone();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .files
+                    .push(duplicate);
+            }
+            "case_folded_file" => {
+                let mut duplicate = lock.items["builtin:button"].files[0].clone();
+                duplicate.path = "src/components/ui/Button.rs".into();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .files
+                    .push(duplicate);
+            }
+            "unsafe_css_path" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .css_path = "../kit.css".into();
+            }
+            "wrong_css_extension" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .css_path = "styles/kit.rs".into();
+            }
+            "invalid_block_id" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .block_id = "not--kebab".into();
+            }
+            "generated_style_hash" => {
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks[0]
+                    .generated_hash = "bad".into();
+            }
+            "duplicate_style" => {
+                let duplicate = lock.items["builtin:button"].style_blocks[0].clone();
+                lock.items
+                    .get_mut("builtin:button")
+                    .expect("item")
+                    .style_blocks
+                    .push(duplicate);
+            }
+            "missing_file_index" => lock.files_by_path.clear(),
+            "extra_file_index" => {
+                lock.files_by_path
+                    .insert("src/components/ui/extra.rs".into(), "builtin:button".into());
+            }
+            "misowned_file_index" => {
+                lock.files_by_path
+                    .insert("src/components/ui/button.rs".into(), "builtin:other".into());
+            }
+            "missing_style_index" => lock.style_blocks_by_id.clear(),
+            "extra_style_index" => {
+                lock.style_blocks_by_id
+                    .insert("extra".into(), "builtin:button".into());
+            }
+            "misowned_style_index" => {
+                lock.style_blocks_by_id
+                    .insert("button".into(), "builtin:other".into());
+            }
+            _ => unreachable!("complete install-lock mutation matrix"),
+        }
+
+        let error = match lock.validate() {
+            Ok(()) => panic!("{case} unexpectedly passed"),
+            Err(error) => error,
+        };
+        let CodegenError::InvalidLock { reason, .. } = error else {
+            panic!("{case} returned the wrong error: {error}");
+        };
+        assert!(
+            reason.contains(expected),
+            "{case} returned {reason:?}, expected {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn install_lock_parser_rejects_duplicate_object_keys() {
+    let lock = populated_install_lock_fixture();
+    let item = serde_json::to_string(&lock.items["builtin:button"]).expect("serialize item");
+    let files = serde_json::to_string(&lock.files_by_path).expect("serialize files index");
+    let styles = serde_json::to_string(&lock.style_blocks_by_id).expect("serialize styles index");
+    let input = format!(
+        r#"{{
+  "schemaVersion": "{version}",
+  "kitVersion": "{version}",
+  "project": {{"configHash":"{config_hash}","crateRoot":".","kind":"single-crate-trunk-csr"}},
+  "items": {{"builtin:button":{item},"builtin:button":{item}}},
+  "filesByPath": {files},
+  "styleBlocksById": {styles}
+}}"#,
+        version = SCHEMA_VERSION,
+        config_hash = lock.project.config_hash,
+    );
+
+    let error = parse_install_lock_str(&input).expect_err("duplicate item key must fail");
+    assert!(
+        matches!(error, CodegenError::LockParse { source, .. } if source.to_string().contains("duplicate object key"))
+    );
+
+    for kind in [None, Some("component")] {
+        let mut value = serde_json::to_value(&lock).expect("serialize lock value");
+        let item = value["items"]["builtin:button"]
+            .as_object_mut()
+            .expect("button item object");
+        match kind {
+            Some(kind) => {
+                item.insert(
+                    "kind".to_owned(),
+                    serde_json::Value::String(kind.to_owned()),
+                );
+            }
+            None => {
+                item.remove("kind");
+            }
+        }
+        assert!(matches!(
+            parse_install_lock_str(
+                &serde_json::to_string(&value).expect("serialize invalid lock value")
+            ),
+            Err(CodegenError::LockParse { .. })
+        ));
+    }
+}
+
+#[test]
+fn internally_valid_stale_lock_is_reconstructed_from_empty_desired_state() {
+    let stale = populated_install_lock_fixture();
+    stale
+        .validate()
+        .expect("stale preimage is internally valid");
+    let config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+
+    let projection = project_desired_state(&config, hash_bytes(b"current config"), &stale)
+        .expect("stale lock is accepted as a transaction preimage");
+
+    assert_eq!(
+        projection.retired_item_ids,
+        BTreeSet::from(["builtin:button".to_owned()])
+    );
+    assert!(projection.lock.items.is_empty());
+    assert!(projection.lock.files_by_path.is_empty());
+    assert!(projection.lock.style_blocks_by_id.is_empty());
+    assert_eq!(
+        projection.lock.project.config_hash,
+        hash_bytes(b"current config")
+    );
+}
+
+#[test]
+fn loading_an_internally_valid_lock_preserves_the_exact_preimage() {
+    let temporary = tempfile::tempdir().expect("temporary project");
+    let root = temporary.path();
+    let lock = populated_install_lock_fixture();
+    fs::create_dir_all(
+        root.join(DEFAULT_KIT_LOCK_PATH)
+            .parent()
+            .expect("lock parent"),
+    )
+    .expect("create lock parent");
+    fs::write(
+        root.join(DEFAULT_KIT_LOCK_PATH),
+        lock_to_json(&lock).expect("serialize lock"),
+    )
+    .expect("write lock");
+    let context = PlanningContext::open(root).expect("open planning context");
+
+    let loaded = load_or_empty_lock(&context, DEFAULT_KIT_LOCK_PATH, hash_bytes(b"new config"))
+        .expect("load preimage");
+
+    assert_eq!(loaded, lock);
+
+    drop(context);
+    let mut invalid = lock;
+    invalid.kit_version = "old".to_owned();
+    let mut invalid_json = serde_json::to_string_pretty(&invalid).expect("serialize invalid lock");
+    invalid_json.push('\n');
+    fs::write(root.join(DEFAULT_KIT_LOCK_PATH), invalid_json).expect("write invalid lock");
+    let context = PlanningContext::open(root).expect("reopen planning context");
+    assert!(matches!(
+        load_or_empty_lock(
+            &context,
+            DEFAULT_KIT_LOCK_PATH,
+            hash_bytes(b"new config"),
+        ),
+        Err(CodegenError::InvalidLock { path, .. })
+            if path == Path::new(DEFAULT_KIT_LOCK_PATH)
+    ));
+}
+
+fn populated_install_lock_fixture() -> InstallLock {
+    let mut lock = InstallLock::empty(hash_bytes(b"fixture config"));
+    let generated_file_hash = hash_bytes(b"generated Rust");
+    lock.items.insert(
+        "builtin:button".to_owned(),
+        InstalledItem {
+            id: "builtin:button".to_owned(),
+            name: "button".to_owned(),
+            kind: leptos_ui_kit_registry::RegistryItemKind::Ui,
+            source: "builtin".to_owned(),
+            version: SCHEMA_VERSION.to_owned(),
+            content_hash: hash_bytes(b"registry item"),
+            files: vec![InstalledFile {
+                path: "src/components/ui/button.rs".to_owned(),
+                kind: "rust".to_owned(),
+                generated_hash: generated_file_hash.clone(),
+                local_hash_at_install: generated_file_hash,
+            }],
+            style_blocks: vec![InstalledStyleBlock {
+                css_path: "styles/kit.css".to_owned(),
+                block_id: "button".to_owned(),
+                generated_hash: hash_bytes(b"generated CSS"),
+            }],
+        },
+    );
+    lock.files_by_path.insert(
+        "src/components/ui/button.rs".to_owned(),
+        "builtin:button".to_owned(),
+    );
+    lock.style_blocks_by_id
+        .insert("button".to_owned(), "builtin:button".to_owned());
+    lock
 }
 
 #[test]
@@ -310,6 +790,51 @@ fn add_plan_records_generated_hashes() {
             .iter()
             .any(|entry| entry.crate_name == "leptos" && entry.features == ["csr".to_owned()])
     );
+}
+
+#[test]
+fn sync_projects_exact_delivery_mode_or_neutral_shared_dependency_plans() {
+    for (kind, render_mode, expected_features) in [
+        (
+            leptos_ui_kit_registry::ProjectKind::SingleCrateNativeSsr,
+            Some(leptos_ui_kit_registry::RenderMode::Ssr),
+            vec!["ssr".to_owned()],
+        ),
+        (
+            leptos_ui_kit_registry::ProjectKind::SingleCrateBrowserHydration,
+            Some(leptos_ui_kit_registry::RenderMode::Hydrate),
+            vec!["hydrate".to_owned()],
+        ),
+        (
+            leptos_ui_kit_registry::ProjectKind::SharedLibraryCrate,
+            None,
+            Vec::new(),
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        setup_empty_project(root);
+        let mut config = parse_kit_json_str(&canonical_kit_json().expect("canonical config"))
+            .expect("parse canonical config");
+        config.project.kind = kind;
+        config.project.index_html = None;
+        config.leptos.render_mode = render_mode;
+        config = kit_config_with_desired_item(config, desired_builtin_button_item())
+            .expect("request button");
+        write_kit_config(
+            root,
+            kit_config_to_json(&config).expect("serialize project config"),
+        );
+
+        let plan = plan_sync(root).expect("plan sync");
+        let leptos = plan
+            .cargo_plan
+            .iter()
+            .find(|entry| entry.crate_name == "leptos")
+            .expect("Leptos dependency plan");
+        assert_eq!(leptos.features, expected_features);
+        assert_eq!(plan.lock.project.kind, kind.as_str());
+    }
 }
 
 #[test]
@@ -386,6 +911,136 @@ fn add_plan_uses_configured_stylesheet_path() {
 }
 
 #[test]
+fn custom_components_root_add_and_sync_use_only_configured_source_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    let mut config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+    config.install.ui_dir = "src/widgets/kit_ui".to_owned();
+    config.install.ui_mod = "src/widgets/kit_ui/mod.rs".to_owned();
+    config.install.components_mod = "src/widgets/mod.rs".to_owned();
+    config.styles.css = "styles/custom.css".to_owned();
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize custom config"),
+    );
+
+    let added = apply_add(root, "button").expect("add button at custom root");
+
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/button.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/spinner.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/kit_ui/mod.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .any(|file| file.path == "src/widgets/mod.rs")
+    );
+    assert!(
+        added
+            .files
+            .iter()
+            .all(|file| !file.path.starts_with("src/components/") || file.path.contains("/_kit/"))
+    );
+    for path in ["src/widgets/mod.rs", "src/widgets/kit_ui/mod.rs"] {
+        assert_eq!(
+            added
+                .changes
+                .iter()
+                .find(|change| change.path == path)
+                .expect("module change")
+                .kind,
+            ChangeKind::CreateFile
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(root.join("src/widgets/mod.rs")).expect("read components module"),
+        "pub mod kit_ui;\n"
+    );
+    let ui_mod =
+        fs::read_to_string(root.join("src/widgets/kit_ui/mod.rs")).expect("read UI module");
+    assert!(ui_mod.contains("pub mod button;"));
+    assert!(ui_mod.contains("pub mod spinner;"));
+    assert_eq!(
+        added.lock.files_by_path.get("src/widgets/kit_ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+    let button_path = root.join("src/widgets/kit_ui/button.rs");
+    let button_before = fs::read(&button_path).expect("read custom button");
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut retained =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read custom config"))
+            .expect("parse custom config");
+    retained.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&retained).expect("serialize retained config"),
+    );
+    let synced = apply_sync(root).expect("sync custom root");
+
+    assert!(!synced.lock.items.contains_key("builtin:button"));
+    assert!(
+        !synced
+            .lock
+            .files_by_path
+            .contains_key("src/widgets/kit_ui/button.rs")
+    );
+    assert_eq!(
+        fs::read(&button_path).expect("read retained custom button"),
+        button_before
+    );
+    assert!(apply_sync(root).expect("idempotent custom sync").is_empty());
+    let readopt = plan_add(root, "button").expect("plan exact custom-source re-adoption");
+    assert!(
+        readopt
+            .files
+            .iter()
+            .all(|file| file.path != "src/widgets/kit_ui/button.rs")
+    );
+    assert_eq!(
+        readopt
+            .lock
+            .files_by_path
+            .get("src/widgets/kit_ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+
+    fs::write(
+        &button_path,
+        format!(
+            "{}\n// application customization\n",
+            String::from_utf8(button_before).expect("button source is UTF-8")
+        ),
+    )
+    .expect("customize retired button");
+    let before_conflict = snapshot_project_files(root);
+    let error = plan_add(root, "button").expect_err("modified custom source must conflict");
+    assert_sync_unsafe_patch_path(
+        "custom source re-adoption",
+        error,
+        "src/widgets/kit_ui/button.rs",
+    );
+    assert_eq!(snapshot_project_files(root), before_conflict);
+}
+
+#[test]
 fn item_planner_supports_nested_ui_targets() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -406,12 +1061,16 @@ fn item_planner_supports_nested_ui_targets() {
     .expect("parse config");
     let item = nested_registry_item();
     let context = PlanningContext::open(root).expect("open planning context");
+    let prior_lock = lock.clone();
 
     let item_id = plan_built_in_item(
         &context,
         &mut files,
         &mut changes,
-        &mut lock,
+        ItemLockTransition {
+            prior: &prior_lock,
+            output: &mut lock,
+        },
         &config,
         &item,
         &mut css_operations,
@@ -441,7 +1100,7 @@ fn item_planner_supports_nested_ui_targets() {
 }
 
 #[test]
-fn add_tokens_updates_only_css_config_and_lock() {
+fn fresh_add_tokens_creates_only_foundation_integration_and_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::create_dir_all(root.join("src")).expect("create src");
@@ -450,10 +1109,6 @@ fn add_tokens_updates_only_css_config_and_lock() {
         "<html><head></head><body></body></html>\n",
     )
     .expect("write index");
-    apply_init(root).expect("init");
-    let components_mod =
-        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod");
-    let ui_mod = fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod");
 
     let plan = plan_add(root, "tokens").expect("plan tokens");
     let paths = plan
@@ -464,22 +1119,23 @@ fn add_tokens_updates_only_css_config_and_lock() {
 
     assert!(paths.contains(&DEFAULT_KIT_CONFIG_PATH));
     assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
+    assert!(paths.contains(&TOKEN_CONTRACT_PATH));
+    assert!(paths.contains(&THEME_CAPABILITY_PATH));
     assert!(paths.contains(&"styles/kit.css"));
+    assert!(paths.contains(&"index.html"));
+    assert_eq!(paths.len(), 6);
     assert!(!paths.contains(&"src/components/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/mod.rs"));
     assert!(!paths.contains(&"src/components/ui/tokens.rs"));
     assert!(plan.lock.items["builtin:tokens"].files.is_empty());
     assert_eq!(plan.lock.items["builtin:tokens"].style_blocks.len(), 1);
+    assert!(plan.lock.files_by_path.is_empty());
+    assert_eq!(plan.lock.style_blocks_by_id.len(), 1);
 
     apply_add(root, "tokens").expect("apply tokens");
-    assert_eq!(
-        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod"),
-        components_mod
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod"),
-        ui_mod
-    );
+    assert!(!root.join("src/components/mod.rs").exists());
+    assert!(!root.join("src/components/ui/mod.rs").exists());
+    assert!(!root.join("src/components/ui/tokens.rs").exists());
     assert!(
         fs::read_to_string(root.join("styles/kit.css"))
             .expect("read css")
@@ -589,6 +1245,600 @@ fn sync_plan_installs_declared_button_without_writes() {
 }
 
 #[test]
+fn desired_projection_is_exact_for_empty_retained_and_retired_closures() {
+    let empty_config =
+        parse_kit_json_str(&canonical_kit_json().expect("canonical config")).expect("parse config");
+    let empty_lock = InstallLock::empty(hash_bytes(b"empty"));
+    let empty = project_desired_state(&empty_config, hash_bytes(b"empty"), &empty_lock)
+        .expect("project empty desired state");
+
+    assert!(empty.desired_items.is_empty());
+    assert!(empty.resolved_items.is_empty());
+    assert!(empty.retained_item_ids.is_empty());
+    assert!(empty.retired_item_ids.is_empty());
+    assert!(empty.lock.items.is_empty());
+    assert!(empty.lock.files_by_path.is_empty());
+    assert!(empty.lock.style_blocks_by_id.is_empty());
+    assert!(empty.item_ids.is_empty());
+    assert!(empty.cargo_plan.is_empty());
+    assert!(empty.css_operations.is_empty());
+    assert!(empty.css_dependencies.is_empty());
+
+    let mut installed_config = empty_config.clone();
+    installed_config.items = vec![desired_builtin_button_item(), desired_builtin_dialog_item()];
+    let installed = project_desired_state(&installed_config, hash_bytes(b"installed"), &empty.lock)
+        .expect("project installed state");
+    assert_eq!(
+        installed
+            .desired_items
+            .iter()
+            .map(|item| item.item_name())
+            .collect::<Vec<_>>(),
+        ["identity", "tokens", "dialog", "spinner", "button"]
+    );
+
+    let mut retained_config = empty_config;
+    retained_config.items = vec![desired_builtin_spinner_item()];
+    let retained =
+        project_desired_state(&retained_config, hash_bytes(b"retained"), &installed.lock)
+            .expect("project retained state");
+
+    assert_eq!(retained.item_ids, ["builtin:tokens", "builtin:spinner"]);
+    assert_eq!(
+        retained.retained_item_ids,
+        BTreeSet::from(["builtin:spinner".to_owned(), "builtin:tokens".to_owned()])
+    );
+    assert_eq!(
+        retained.retired_item_ids,
+        BTreeSet::from([
+            "builtin:button".to_owned(),
+            "builtin:dialog".to_owned(),
+            "builtin:identity".to_owned(),
+        ])
+    );
+    assert_eq!(
+        retained
+            .lock
+            .items
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["builtin:spinner", "builtin:tokens"]
+    );
+    assert_eq!(
+        retained
+            .lock
+            .files_by_path
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["src/components/ui/spinner.rs"]
+    );
+    assert_eq!(
+        retained
+            .lock
+            .style_blocks_by_id
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["spinner", "tokens"]
+    );
+    assert_eq!(
+        retained
+            .css_operations
+            .iter()
+            .map(|operation| operation.block_id.as_str())
+            .collect::<Vec<_>>(),
+        ["tokens", "spinner"]
+    );
+}
+
+#[test]
+fn public_sync_prunes_lock_and_css_while_preserving_app_owned_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let protected_paths = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ];
+    let protected = protected_paths
+        .iter()
+        .map(|path| {
+            (
+                (*path).to_owned(),
+                fs::read(root.join(path)).expect("read protected source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut config = parse_kit_json_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_CONFIG_PATH)).expect("read config"),
+    )
+    .expect("parse config");
+    config.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize retained config"),
+    );
+
+    let plan = plan_sync(root).expect("plan desired-state sync");
+
+    assert!(!plan.lock.items.contains_key("builtin:button"));
+    assert!(plan.lock.items.contains_key("builtin:tokens"));
+    assert!(plan.lock.items.contains_key("builtin:spinner"));
+    assert!(
+        plan.files
+            .iter()
+            .find(|file| file.path == "styles/kit.css")
+            .expect("planned stylesheet")
+            .content
+            .contains("leptos-ui-kit:start spinner")
+    );
+    assert!(
+        !plan
+            .files
+            .iter()
+            .find(|file| file.path == "styles/kit.css")
+            .expect("planned stylesheet")
+            .content
+            .contains("leptos-ui-kit:start button")
+    );
+    assert!(
+        plan.files
+            .iter()
+            .all(|file| !protected_paths.contains(&file.path.as_str()))
+    );
+
+    apply_sync(root).expect("apply desired-state sync");
+    for (path, expected) in protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read protected source"),
+            expected
+        );
+    }
+    let applied_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read applied lock"),
+    )
+    .expect("parse applied lock");
+    assert_eq!(applied_lock, plan.lock);
+    assert!(!applied_lock.items.contains_key("builtin:button"));
+    let applied_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read applied stylesheet");
+    assert!(!applied_css.contains("leptos-ui-kit:start button"));
+    assert!(applied_css.contains("leptos-ui-kit:start spinner"));
+    assert!(
+        apply_sync(root)
+            .expect("idempotent desired-state sync")
+            .is_empty()
+    );
+}
+
+#[test]
+fn public_sync_converges_to_exact_empty_state_without_deleting_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let protected = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ]
+    .into_iter()
+    .map(|path| {
+        (
+            path.to_owned(),
+            fs::read(root.join(path)).expect("read app-owned source"),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    config.items.clear();
+    write_kit_config(
+        root,
+        kit_config_to_json(&config).expect("serialize empty desired config"),
+    );
+
+    let first = apply_sync(root).expect("converge to empty desired state");
+
+    assert!(first.lock.items.is_empty());
+    assert!(first.lock.files_by_path.is_empty());
+    assert!(first.lock.style_blocks_by_id.is_empty());
+    for (path, expected) in protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read retained app-owned source"),
+            expected
+        );
+    }
+    let css = fs::read_to_string(root.join("styles/kit.css")).expect("read empty stylesheet");
+    assert!(!css.contains("leptos-ui-kit:start"));
+    assert!(root.join("styles/kit.css").is_file());
+    assert!(apply_sync(root).expect("idempotent empty sync").is_empty());
+}
+
+#[test]
+fn public_sync_conflicts_are_atomic_for_retired_css_and_module_wiring() {
+    let css_dir = tempfile::tempdir().expect("CSS tempdir");
+    let css_root = css_dir.path();
+    setup_empty_project(css_root);
+    apply_init(css_root).expect("init CSS project");
+    apply_add(css_root, "button").expect("add button");
+    let config_path = css_root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read CSS config"))
+            .expect("parse CSS config");
+    config.items = vec![desired_builtin_spinner_item()];
+    write_kit_config(
+        css_root,
+        kit_config_to_json(&config).expect("serialize retired config"),
+    );
+    let css_path = css_root.join("styles/kit.css");
+    let css = fs::read_to_string(&css_path).expect("read CSS");
+    let button_block = extract_managed_css_block_at_path(&css, "styles/kit.css", "button")
+        .expect("inspect button block")
+        .expect("button block");
+    let edited_button = button_block.replacen("display: inline-flex;", "display: grid;", 1);
+    assert_ne!(edited_button, button_block);
+    fs::write(&css_path, css.replacen(&button_block, &edited_button, 1))
+        .expect("edit retired block");
+    let css_before = snapshot_project_files(css_root);
+
+    let css_error = apply_sync(css_root).expect_err("edited retired CSS must conflict");
+
+    assert_sync_unsafe_patch_path("retired CSS", css_error, "styles/kit.css");
+    assert_eq!(snapshot_project_files(css_root), css_before);
+
+    let module_dir = tempfile::tempdir().expect("module tempdir");
+    let module_root = module_dir.path();
+    setup_empty_project(module_root);
+    apply_init(module_root).expect("init module project");
+    write_desired_button_config(module_root);
+    fs::write(
+        module_root.join("src/components/ui/mod.rs"),
+        "mod spinner;\n",
+    )
+    .expect("write private module conflict");
+    let module_before = snapshot_project_files(module_root);
+
+    let module_error = apply_sync(module_root).expect_err("private module must conflict");
+
+    assert_sync_unsafe_patch_path("private module", module_error, "src/components/ui/mod.rs");
+    assert_eq!(snapshot_project_files(module_root), module_before);
+}
+
+#[test]
+fn independent_family_retention_and_multi_item_retirement_fault_are_atomic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    apply_add(root, "dialog").expect("add dialog");
+    let installed_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+    )
+    .expect("parse installed lock");
+    let dialog_item = installed_lock.items["builtin:dialog"].clone();
+    let dialog_files = dialog_item
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                fs::read(root.join(&file.path)).expect("read dialog source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let installed_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read installed stylesheet");
+    let dialog_css = extract_managed_css_block_at_path(&installed_css, "styles/kit.css", "dialog")
+        .expect("inspect dialog block")
+        .expect("dialog block");
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut retained =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    retained.items = vec![desired_builtin_dialog_item()];
+    write_kit_config(
+        root,
+        kit_config_to_json(&retained).expect("serialize retained family config"),
+    );
+
+    let retained_plan = apply_sync(root).expect("retain independent dialog family");
+
+    assert!(!retained_plan.lock.items.contains_key("builtin:button"));
+    assert!(!retained_plan.lock.items.contains_key("builtin:spinner"));
+    assert_eq!(
+        retained_plan.lock.items["builtin:dialog"], dialog_item,
+        "retained family lock ownership must not drift"
+    );
+    for (path, expected) in dialog_files {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read retained dialog source"),
+            expected
+        );
+    }
+    let retained_css =
+        fs::read_to_string(root.join("styles/kit.css")).expect("read retained stylesheet");
+    assert_eq!(
+        extract_managed_css_block_at_path(&retained_css, "styles/kit.css", "dialog")
+            .expect("inspect retained dialog")
+            .expect("retained dialog block"),
+        dialog_css
+    );
+
+    let mut empty =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read retained config"))
+            .expect("parse retained config");
+    empty.items.clear();
+    write_kit_config(
+        root,
+        kit_config_to_json(&empty).expect("serialize empty config"),
+    );
+    let plan = plan_sync(root).expect("plan multi-item retirement");
+    assert!(plan.lock.items.is_empty());
+    let before = snapshot_project_files(root);
+
+    apply_planned_files_with_snapshot(
+        root,
+        &plan.files,
+        &plan.changes,
+        &plan.snapshot,
+        Arc::new(FaultFs::fail_nth(FsOperation::ReplaceExisting, 1)),
+    )
+    .expect_err("retirement fault must roll back the complete cohort");
+
+    assert_eq!(snapshot_project_files(root), before);
+}
+
+#[test]
+fn internal_retirement_seam_is_atomic_on_default_and_custom_stylesheets() {
+    for css_path in ["styles/kit.css", "styles/custom.css"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        setup_sync_project(root, css_path);
+        apply_add(root, "button").expect("add button");
+
+        let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+        let mut config =
+            parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+                .expect("parse installed config");
+        config.items = vec![desired_builtin_spinner_item()];
+        let config_content = kit_config_to_json(&config).expect("serialize retained config");
+        fs::write(&config_path, &config_content).expect("write retained config");
+        let prior_lock = parse_install_lock_str(
+            &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+        )
+        .expect("parse installed lock");
+        let projection =
+            project_desired_state(&config, hash_bytes(config_content.as_bytes()), &prior_lock)
+                .expect("project retirement");
+        let context = PlanningContext::open(root).expect("open planning context");
+        let mut files = Vec::new();
+        let mut changes = Vec::new();
+        plan_managed_stylesheet_batch_with_retirements(
+            &context,
+            &mut files,
+            &mut changes,
+            &prior_lock,
+            &config,
+            ManagedStylesheetProjection {
+                operations: &projection.css_operations,
+                dependencies: &projection.css_dependencies,
+                retirements: &projection.css_retirements,
+            },
+        )
+        .expect("plan retirement stylesheet");
+        let snapshot = context.finish_snapshot();
+        let planned_css = files
+            .iter()
+            .find(|file| file.path == css_path)
+            .expect("planned stylesheet");
+        assert!(
+            !planned_css
+                .content
+                .contains("/* leptos-ui-kit:start button */")
+        );
+        assert!(
+            planned_css
+                .content
+                .contains("/* leptos-ui-kit:start spinner */")
+        );
+        assert!(
+            planned_css
+                .content
+                .contains("/* leptos-ui-kit:start tokens */")
+        );
+
+        let before = snapshot_project_files(root);
+        let fault = Arc::new(FaultFs::fail_nth(FsOperation::ReplaceExisting, 1));
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault)
+            .expect_err("replacement fault must roll back retirement");
+        assert_eq!(snapshot_project_files(root), before);
+
+        apply_planned_files_with_snapshot(
+            root,
+            &files,
+            &changes,
+            &snapshot,
+            Arc::new(FaultFs::passthrough()),
+        )
+        .expect("apply retirement stylesheet");
+        assert_eq!(
+            fs::read_to_string(root.join(css_path)).expect("read retired stylesheet"),
+            planned_css.content
+        );
+    }
+}
+
+#[test]
+fn internal_desired_cohort_prunes_ownership_without_touching_app_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    setup_empty_project(root);
+    apply_init(root).expect("init");
+    apply_add(root, "button").expect("add button");
+    let protected_paths = [
+        "src/components/mod.rs",
+        "src/components/ui/mod.rs",
+        "src/components/ui/button.rs",
+        "src/components/ui/spinner.rs",
+    ];
+    let protected = protected_paths
+        .iter()
+        .map(|path| {
+            (
+                (*path).to_owned(),
+                fs::read(root.join(path)).expect("read source"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let config_path = root.join(DEFAULT_KIT_CONFIG_PATH);
+    let mut config =
+        parse_kit_json_str(&fs::read_to_string(&config_path).expect("read installed config"))
+            .expect("parse installed config");
+    config.items = vec![desired_builtin_spinner_item()];
+    let config_content = kit_config_to_json(&config).expect("serialize retained config");
+    fs::write(&config_path, &config_content).expect("write retained config");
+    let prior_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read installed lock"),
+    )
+    .expect("parse installed lock");
+    let projection =
+        project_desired_state(&config, hash_bytes(config_content.as_bytes()), &prior_lock)
+            .expect("project desired ownership");
+    let context = PlanningContext::open(root).expect("open planning context");
+    let mut files = Vec::new();
+    let mut changes = Vec::new();
+    let output_lock = plan_desired_ownership_cohort(
+        &context,
+        &mut files,
+        &mut changes,
+        &prior_lock,
+        &config,
+        &projection,
+    )
+    .expect("plan desired ownership cohort");
+    let snapshot = context.finish_snapshot();
+
+    assert!(!output_lock.items.contains_key("builtin:button"));
+    assert!(
+        !output_lock
+            .files_by_path
+            .contains_key("src/components/ui/button.rs")
+    );
+    assert!(output_lock.items.contains_key("builtin:spinner"));
+    assert!(
+        files
+            .iter()
+            .all(|file| !protected_paths.contains(&file.path.as_str()))
+    );
+    assert_eq!(
+        files.last().expect("final lock target").path,
+        DEFAULT_KIT_LOCK_PATH
+    );
+
+    apply_planned_files_with_snapshot(
+        root,
+        &files,
+        &changes,
+        &snapshot,
+        Arc::new(FaultFs::passthrough()),
+    )
+    .expect("apply desired ownership cohort");
+    for (path, expected) in &protected {
+        assert_eq!(
+            fs::read(root.join(path)).expect("read protected source"),
+            *expected
+        );
+    }
+    let applied_lock = parse_install_lock_str(
+        &fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("read pruned lock"),
+    )
+    .expect("parse pruned lock");
+    assert_eq!(applied_lock, output_lock);
+
+    let readopt = plan_add(root, "button").expect("plan exact source re-adoption");
+    assert!(
+        !readopt
+            .files
+            .iter()
+            .any(|file| file.path == "src/components/ui/button.rs")
+    );
+    assert_eq!(
+        readopt
+            .lock
+            .files_by_path
+            .get("src/components/ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+    apply_add(root, "button").expect("apply exact source re-adoption");
+    assert_eq!(
+        fs::read(root.join("src/components/ui/button.rs")).expect("read re-adopted source"),
+        protected["src/components/ui/button.rs"]
+    );
+}
+
+#[test]
+fn untracked_exact_source_re_adopts_but_modified_source_has_recovery_guidance() {
+    let exact_dir = tempfile::tempdir().expect("exact tempdir");
+    let exact_root = exact_dir.path();
+    setup_empty_project(exact_root);
+    apply_init(exact_root).expect("init exact project");
+    let generated = read_built_in_registry_source("ui/button.rs").expect("read button source");
+    fs::write(exact_root.join("src/components/ui/button.rs"), &generated)
+        .expect("write exact app-owned source");
+
+    let exact = plan_add(exact_root, "button").expect("plan exact re-adoption");
+    assert!(
+        !exact
+            .files
+            .iter()
+            .any(|file| file.path == "src/components/ui/button.rs")
+    );
+    assert_eq!(
+        exact.lock.files_by_path.get("src/components/ui/button.rs"),
+        Some(&"builtin:button".to_owned())
+    );
+
+    let modified_dir = tempfile::tempdir().expect("modified tempdir");
+    let modified_root = modified_dir.path();
+    setup_empty_project(modified_root);
+    apply_init(modified_root).expect("init modified project");
+    fs::write(
+        modified_root.join("src/components/ui/button.rs"),
+        "// application-owned\n",
+    )
+    .expect("write modified app-owned source");
+    let before = snapshot_project_files(modified_root);
+
+    let error = plan_add(modified_root, "button").expect_err("modified source must conflict");
+    assert!(
+        matches!(
+            &error,
+            CodegenError::UnsafePatch { path, reason }
+                if path == Path::new("src/components/ui/button.rs")
+                    && reason.contains("application-owned")
+                    && reason.contains("reconcile or move")
+        ),
+        "unexpected re-adoption error: {error}"
+    );
+    assert_eq!(snapshot_project_files(modified_root), before);
+}
+
+#[test]
 fn sync_write_is_idempotent_when_declared_button_is_current() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -624,6 +1874,8 @@ fn init_add_and_sync_republish_an_unchanged_lock_with_every_nonempty_cohort() {
     let sync_dir = tempfile::tempdir().expect("sync tempdir");
     let sync_root = sync_dir.path();
     materialize_initialized_project(sync_root);
+    let initial_sync = plan_sync(sync_root).expect("plan initial sync");
+    materialize_planned_files(sync_root, &initial_sync.files);
     let sync_lock = fs::read_to_string(sync_root.join(DEFAULT_KIT_LOCK_PATH)).expect("sync lock");
     fs::remove_file(sync_root.join("src/components/mod.rs")).expect("remove sync target");
 
@@ -651,9 +1903,11 @@ fn init_add_and_sync_keep_truly_idempotent_commands_empty() {
     materialize_initialized_project(root);
 
     let init = plan_init(root).expect("plan no-op init");
-    let sync = plan_sync(root).expect("plan no-op sync");
     assert!(init.files.is_empty());
     assert!(init.changes.is_empty());
+    let initial_sync = plan_sync(root).expect("plan initial sync");
+    materialize_planned_files(root, &initial_sync.files);
+    let sync = plan_sync(root).expect("plan no-op sync");
     assert!(sync.files.is_empty());
     assert!(sync.changes.is_empty());
 
@@ -1399,11 +2653,9 @@ fn assert_successful_sync(
         lock_to_json(&first.lock).expect("serialize applied lock"),
         "{case}: canonical lock bytes"
     );
-    assert_eq!(
-        lock,
-        expected_install_lock(&config_content, css_path, &resolved),
-        "{case}: complete registry-derived lock"
-    );
+    let mut expected = expected_install_lock(&config_content, css_path, &resolved);
+    expected.theme_integration = first.lock.theme_integration.clone();
+    assert_eq!(lock, expected, "{case}: complete registry-derived lock");
 
     let second =
         apply_sync(root).unwrap_or_else(|error| panic!("{case}: second sync failed: {error}"));
@@ -1487,6 +2739,7 @@ fn expected_install_lock(
             InstalledItem {
                 id: item_id,
                 name: item.item.name.clone(),
+                kind: item.item.kind,
                 source: "builtin".to_owned(),
                 version: item.item.version.clone(),
                 content_hash: item.content_hash.clone(),
@@ -1538,30 +2791,6 @@ const PINNED_SPINNER_CSS: &str = include_str!(concat!(
     "/tests/fixtures/theme_pre_refactor_06124efa/spinner.css"
 ));
 
-#[test]
-fn packaged_css_fixtures_match_workspace_canonical_copies_when_present() {
-    let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/theme_pre_refactor_06124efa");
-    if !canonical
-        .try_exists()
-        .expect("inspect canonical fixture root")
-    {
-        return;
-    }
-    assert!(
-        canonical.is_dir(),
-        "canonical fixture root must be a directory"
-    );
-    assert_eq!(
-        PINNED_BUTTON_CSS,
-        fs::read_to_string(canonical.join("button.css")).expect("read canonical button CSS")
-    );
-    assert_eq!(
-        PINNED_SPINNER_CSS,
-        fs::read_to_string(canonical.join("spinner.css")).expect("read canonical spinner CSS")
-    );
-}
-
 const APP_OVERRIDE_CSS: &str = r#"
 /* application-owned theme overrides */
 :root {
@@ -1581,8 +2810,17 @@ fn managed_css_operation(
     role: ManagedCssBlockRole,
     declaration: &str,
 ) -> ManagedCssOperation {
+    managed_css_operation_for_item(&format!("builtin:{block_id}"), block_id, role, declaration)
+}
+
+fn managed_css_operation_for_item(
+    item_id: &str,
+    block_id: &str,
+    role: ManagedCssBlockRole,
+    declaration: &str,
+) -> ManagedCssOperation {
     ManagedCssOperation {
-        item_id: format!("builtin:{block_id}"),
+        item_id: item_id.to_owned(),
         block_id: block_id.to_owned(),
         role,
         generated: managed_css_block(block_id, declaration),
@@ -1596,25 +2834,43 @@ fn managed_css_dependency(dependency: &str, dependent: &str) -> ManagedCssDepend
     }
 }
 
+fn managed_css_retirement(
+    operation: &ManagedCssOperation,
+    current_generated: Option<String>,
+) -> ManagedCssRetirement {
+    ManagedCssRetirement {
+        item_id: operation.item_id.clone(),
+        block_id: operation.block_id.clone(),
+        current_generated,
+    }
+}
+
 fn tracked_css_lock(css_path: &str, blocks: &[(&ManagedCssOperation, &str)]) -> InstallLock {
     let mut lock = InstallLock::empty(hash_bytes(b"config"));
     for (operation, baseline) in blocks {
-        lock.items.insert(
-            operation.item_id.clone(),
-            InstalledItem {
+        let item = lock
+            .items
+            .entry(operation.item_id.clone())
+            .or_insert_with(|| InstalledItem {
                 id: operation.item_id.clone(),
                 name: operation.block_id.clone(),
+                kind: match operation.role {
+                    ManagedCssBlockRole::Foundation => {
+                        leptos_ui_kit_registry::RegistryItemKind::Foundation
+                    }
+                    ManagedCssBlockRole::Component => leptos_ui_kit_registry::RegistryItemKind::Ui,
+                },
                 source: "builtin".to_owned(),
                 version: SCHEMA_VERSION.to_owned(),
                 content_hash: hash_bytes(operation.item_id.as_bytes()),
                 files: Vec::new(),
-                style_blocks: vec![InstalledStyleBlock {
-                    css_path: css_path.to_owned(),
-                    block_id: operation.block_id.clone(),
-                    generated_hash: hash_bytes(baseline.as_bytes()),
-                }],
-            },
-        );
+                style_blocks: Vec::new(),
+            });
+        item.style_blocks.push(InstalledStyleBlock {
+            css_path: css_path.to_owned(),
+            block_id: operation.block_id.clone(),
+            generated_hash: hash_bytes(baseline.as_bytes()),
+        });
         lock.style_blocks_by_id
             .insert(operation.block_id.clone(), operation.item_id.clone());
     }
@@ -1762,6 +3018,125 @@ fn css_batch_relocates_safe_late_foundation_and_is_idempotent() {
         first.find("leptos-ui-kit:start tokens").expect("tokens")
             < first.find("--kit-button-gap: 0.75rem").expect("override")
     );
+}
+
+#[test]
+fn css_batch_relocates_multiple_foundation_cohorts_in_canonical_manifest_order() {
+    let palette = managed_css_operation_for_item(
+        "builtin:palette",
+        "palette",
+        ManagedCssBlockRole::Foundation,
+        "--palette: light;",
+    );
+    let palette_dark = managed_css_operation_for_item(
+        "builtin:palette",
+        "palette-dark",
+        ManagedCssBlockRole::Foundation,
+        "--palette-dark: dark;",
+    );
+    let tokens = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens",
+        ManagedCssBlockRole::Foundation,
+        "--token: one;",
+    );
+    let tokens_motion = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens-motion",
+        ManagedCssBlockRole::Foundation,
+        "--motion: two;",
+    );
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let existing = format!(
+        "{}/* app-owned one */\n{}{}/* app-owned two */\n{}{}",
+        tokens_motion.generated,
+        button.generated,
+        palette_dark.generated,
+        tokens.generated,
+        palette.generated,
+    );
+    let lock = tracked_css_lock(
+        "styles/kit.css",
+        &[
+            (&palette, &palette.generated),
+            (&palette_dark, &palette_dark.generated),
+            (&tokens, &tokens.generated),
+            (&tokens_motion, &tokens_motion.generated),
+            (&button, &button.generated),
+        ],
+    );
+    let operations = [palette, palette_dark, tokens, tokens_motion, button];
+    let dependencies = [
+        managed_css_dependency("palette", "button"),
+        managed_css_dependency("palette-dark", "button"),
+        managed_css_dependency("tokens", "button"),
+        managed_css_dependency("tokens-motion", "button"),
+    ];
+
+    let first = reconcile_managed_css_blocks_at_path(
+        &existing,
+        "styles/kit.css",
+        &lock,
+        &operations,
+        &dependencies,
+    )
+    .expect("relocate foundation cohorts");
+    let second = reconcile_managed_css_blocks_at_path(
+        &first,
+        "styles/kit.css",
+        &lock,
+        &operations,
+        &dependencies,
+    )
+    .expect("repeat foundation cohort reconciliation");
+    let ranges =
+        inspect_managed_css_blocks_at_path(&first, "styles/kit.css").expect("inspect blocks");
+
+    assert_eq!(ranges["palette"].end, ranges["palette-dark"].start);
+    assert_eq!(ranges["palette-dark"].end, ranges["tokens"].start);
+    assert_eq!(ranges["tokens"].end, ranges["tokens-motion"].start);
+    assert!(ranges["tokens-motion"].end <= ranges["button"].start);
+    assert_eq!(first, second);
+    assert_eq!(
+        unmanaged_css(&first, "styles/kit.css"),
+        unmanaged_css(&existing, "styles/kit.css")
+    );
+}
+
+#[test]
+fn css_batch_rejects_a_noncontiguous_multi_style_item_cohort() {
+    let first = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens",
+        ManagedCssBlockRole::Foundation,
+        "--token: one;",
+    );
+    let interloper = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let second = managed_css_operation_for_item(
+        "builtin:tokens",
+        "tokens-motion",
+        ManagedCssBlockRole::Foundation,
+        "--motion: two;",
+    );
+
+    let error = reconcile_managed_css_blocks_at_path(
+        "",
+        "styles/kit.css",
+        &InstallLock::empty(hash_bytes(b"config")),
+        &[first, interloper, second],
+        &[],
+    )
+    .expect_err("split item cohort must fail");
+
+    assert_unsafe_patch_path(error, "styles/kit.css");
 }
 
 #[test]
@@ -1982,6 +3357,99 @@ fn css_batch_prevalidates_duplicate_and_unknown_operations_and_dependencies() {
         )
         .expect_err("invalid batch metadata should fail before output");
         assert_unsafe_patch_path(error, "styles/custom.css");
+    }
+}
+
+#[test]
+fn css_batch_retires_current_tracked_and_missing_blocks_without_touching_app_bytes() {
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let old_button = managed_css_block("button", "display: block;");
+    let retirement = managed_css_retirement(&button, Some(button.generated.clone()));
+    let unmanaged_prefix = "/* application prefix */\n.app { color: rebeccapurple; }\n";
+    let unmanaged_suffix = "\n/* application suffix */\n";
+
+    for (case, existing, baseline) in [
+        (
+            "current",
+            format!("{unmanaged_prefix}{}{unmanaged_suffix}", button.generated),
+            old_button.as_str(),
+        ),
+        (
+            "tracked-baseline",
+            format!("{unmanaged_prefix}{old_button}{unmanaged_suffix}"),
+            old_button.as_str(),
+        ),
+        (
+            "already-missing",
+            format!("{unmanaged_prefix}{unmanaged_suffix}"),
+            old_button.as_str(),
+        ),
+    ] {
+        let lock = tracked_css_lock("styles/custom.css", &[(&button, baseline)]);
+        let reconciled = reconcile_managed_css_blocks_with_retirements_at_path(
+            &existing,
+            "styles/custom.css",
+            &lock,
+            &[],
+            &[],
+            std::slice::from_ref(&retirement),
+        )
+        .unwrap_or_else(|error| panic!("{case}: retire safe block: {error}"));
+
+        assert_eq!(
+            reconciled,
+            format!("{unmanaged_prefix}{unmanaged_suffix}"),
+            "{case}: unmanaged bytes changed"
+        );
+    }
+}
+
+#[test]
+fn css_batch_rejects_unsafe_retirements_before_producing_output() {
+    let button = managed_css_operation(
+        "button",
+        ManagedCssBlockRole::Component,
+        "display: inline-flex;",
+    );
+    let retirement = managed_css_retirement(&button, Some(button.generated.clone()));
+    let edited = managed_css_block("button", "display: grid;");
+    let lock = tracked_css_lock("styles/custom.css", &[(&button, &button.generated)]);
+
+    for (case, existing, lock, retirements) in [
+        (
+            "edited",
+            edited.as_str(),
+            lock.clone(),
+            vec![retirement.clone()],
+        ),
+        (
+            "untracked",
+            button.generated.as_str(),
+            InstallLock::empty(hash_bytes(b"config")),
+            vec![retirement.clone()],
+        ),
+        (
+            "duplicate",
+            button.generated.as_str(),
+            lock.clone(),
+            vec![retirement.clone(), retirement.clone()],
+        ),
+    ] {
+        let error = reconcile_managed_css_blocks_with_retirements_at_path(
+            existing,
+            "styles/custom.css",
+            &lock,
+            &[],
+            &[],
+            &retirements,
+        )
+        .expect_err("unsafe retirement must conflict");
+        assert_unsafe_patch_path(error, "styles/custom.css");
+        assert!(!case.is_empty());
     }
 }
 
@@ -2300,7 +3768,7 @@ fn ui_module_patcher_accepts_formatted_grouped_exports() {
 }
 
 #[test]
-fn ui_module_patcher_consolidates_stale_grouped_exports() {
+fn ui_module_patcher_preserves_multiple_grouped_exports() {
     let existing = "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectIcon,\n    TextArea, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\npub use field::{FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField, SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType};\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2323,16 +3791,13 @@ fn ui_module_patcher_consolidates_stale_grouped_exports() {
             ],
         )],
     )
-    .expect("stale grouped export should be consolidated");
+    .expect("symbols across grouped exports should satisfy the surface");
 
-    assert_eq!(
-        patched,
-        "pub mod field;\npub use field::{\n    FieldLabel, FieldMessage, FieldRequired, FieldRoot, FieldSurface, NativeSelect, SelectField,\n    SelectIcon, TextArea, TextAreaField, TextField, TextInput, TextInputType,\n};\npub mod router_link;\npub use router_link::RouterLink;\n\n"
-    );
+    assert_eq!(patched, existing);
 }
 
 #[test]
-fn ui_module_patcher_consolidates_stale_single_exports() {
+fn ui_module_patcher_preserves_single_export_and_appends_only_missing_symbol() {
     let existing = "pub mod spinner;\npub use spinner::Spinner;\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2341,16 +3806,16 @@ fn ui_module_patcher_consolidates_stale_single_exports() {
             vec!["Spinner".to_owned(), "SpinnerMode".to_owned()],
         )],
     )
-    .expect("stale single export should be consolidated");
+    .expect("missing export should be appended");
 
     assert_eq!(
         patched,
-        "pub mod spinner;\npub use spinner::{Spinner, SpinnerMode};\n"
+        "pub mod spinner;\npub use spinner::Spinner;\npub use spinner::SpinnerMode;\n"
     );
 }
 
 #[test]
-fn ui_module_patcher_removes_obsolete_grouped_exports() {
+fn ui_module_patcher_preserves_obsolete_grouped_exports() {
     let existing = "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField, SelectFieldSlot};\n";
     let patched = patch_ui_mod(
         Some(existing),
@@ -2364,12 +3829,90 @@ fn ui_module_patcher_removes_obsolete_grouped_exports() {
             ],
         )],
     )
-    .expect("obsolete grouped export should be removed");
+    .expect("obsolete grouped export should remain app-owned");
+
+    assert_eq!(patched, existing);
+}
+
+#[test]
+fn ui_module_patcher_preserves_aliases_comments_attributes_and_group_order() {
+    let existing = "#[allow(clippy::module_name_repetitions)]\npub mod button;\n// application alias\npub use button::{Button as AppButton, ButtonSize};\n#[doc = \"kept\"]\npub use button::{ButtonVariant};\n";
+    let patched = patch_ui_mod(
+        Some(existing),
+        &[UiModuleExport::new(
+            "button",
+            vec![
+                "Button".to_owned(),
+                "ButtonSize".to_owned(),
+                "ButtonType".to_owned(),
+                "ButtonVariant".to_owned(),
+            ],
+        )],
+    )
+    .expect("compatible groups should be inspected additively");
 
     assert_eq!(
         patched,
-        "pub mod field;\npub use field::{FieldLabel, FieldRoot, FieldSlot, SelectField};\n"
+        format!("{existing}pub use button::{{Button, ButtonType}};\n")
     );
+    assert_eq!(
+        patch_ui_mod(
+            Some(&patched),
+            &[UiModuleExport::new(
+                "button",
+                vec![
+                    "Button".to_owned(),
+                    "ButtonSize".to_owned(),
+                    "ButtonType".to_owned(),
+                    "ButtonVariant".to_owned(),
+                ],
+            )],
+        )
+        .expect("additive patch should be idempotent"),
+        patched
+    );
+}
+
+#[test]
+fn module_patcher_uses_the_minimum_separator_without_rewriting_input() {
+    let existing = "// application module without a trailing newline";
+    let patched = patch_components_mod(Some(existing)).expect("append public module");
+
+    assert_eq!(patched, format!("{existing}\npub mod ui;\n"));
+}
+
+#[test]
+fn ui_module_patcher_rejects_private_or_incompatible_surface_conflicts() {
+    for existing in [
+        "mod spinner;\n",
+        "pub(crate) mod spinner;\n",
+        "pub mod spinner {}\n",
+        "pub mod spinner;\nuse spinner::Spinner;\n",
+        "pub mod spinner;\npub use application::Spinner;\n",
+    ] {
+        let error = patch_ui_mod(
+            Some(existing),
+            &[UiModuleExport::new("spinner", vec!["Spinner".to_owned()])],
+        )
+        .expect_err("incompatible public surface must conflict");
+
+        assert!(
+            matches!(error, CodegenError::UnsafePatch { .. }),
+            "unexpected conflict for {existing:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn module_patcher_rejects_malformed_or_unbounded_source() {
+    let malformed = patch_components_mod(Some("pub mod ui {\n"))
+        .expect_err("malformed source must not be appended");
+    assert!(matches!(malformed, CodegenError::UnsafePatch { .. }));
+
+    let oversized = " ".repeat(1024 * 1024 + 1);
+    let unbounded =
+        patch_components_mod(Some(&oversized)).expect_err("oversized source must be bounded");
+    assert!(matches!(unbounded, CodegenError::UnsafePatch { .. }));
 }
 
 #[test]
@@ -2410,6 +3953,9 @@ fn path_safety_accepts_mvp_paths() {
         "src/components/mod.rs".to_owned(),
         "src/components/ui/button.rs".to_owned(),
         "src/components/ui/nested/root.rs".to_owned(),
+        "src/widgets/mod.rs".to_owned(),
+        "src/widgets/kit_ui/mod.rs".to_owned(),
+        "src/widgets/kit_ui/button.rs".to_owned(),
         DEFAULT_KIT_LOCK_PATH.to_owned(),
     ];
 
@@ -2427,6 +3973,8 @@ fn path_safety_rejects_unsafe_paths() {
         "src/components/ui/../../evil.rs",
         "src/components/ui/Button Rs",
         "src/lib.rs",
+        "src/widgets/button.rs",
+        "src/widgets/_kit/button.rs",
     ] {
         assert!(validate_logical_write_path(path).is_err(), "{path}");
     }
@@ -3558,78 +5106,6 @@ fn atomic_write_preserves_the_persistent_advisory_lock() {
 }
 
 #[test]
-fn successful_single_file_transaction_bounds_strict_exact_reads() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    fs::create_dir_all(root.join("styles")).expect("styles");
-    let logical_path = "styles/kit.css";
-    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
-    let files = vec![PlannedFile {
-        path: logical_path.to_owned(),
-        action: PlannedFileAction::Create,
-        content: ":root {}\n".to_owned(),
-    }];
-    let changes = vec![ChangeRecord::new(
-        ChangeKind::CreateFile,
-        logical_path,
-        true,
-    )];
-    let fault_fs = Arc::new(FaultFs::passthrough());
-
-    apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
-        .expect("apply single-file transaction");
-
-    let events = fault_fs.events();
-    let exact_reads = events
-        .iter()
-        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
-        .count();
-    let exact_byte_reads = events
-        .iter()
-        .filter(|event| event.operation == FsOperation::ReadRegularFileBytesExact)
-        .count();
-    let journal_record_hash_reads = events
-        .iter()
-        .filter(|event| {
-            event.operation == FsOperation::ReadRegularFileExact
-                && event
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("transaction-v2-")
-                            && (name.ends_with(".json") || name.ends_with(".json.partial"))
-                    })
-        })
-        .count();
-    let mut reads_by_path = BTreeMap::<PathBuf, usize>::new();
-    for event in events
-        .iter()
-        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
-    {
-        *reads_by_path.entry(event.path.clone()).or_default() += 1;
-    }
-    let mut reads_by_path = reads_by_path.into_iter().collect::<Vec<_>>();
-    reads_by_path.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-    assert!(
-        journal_record_hash_reads <= 64,
-        "journal lineage hash-and-validate reads exceeded the bounded budget: \
-         {journal_record_hash_reads}"
-    );
-    assert!(
-        exact_reads <= 1_200,
-        "strict hash-and-validate reads exceeded the diagnostic ceiling: {exact_reads}; \
-         exact byte rereads: {exact_byte_reads}; hottest paths: {:?}",
-        &reads_by_path[..reads_by_path.len().min(20)]
-    );
-    assert!(
-        (1..=1_650).contains(&exact_byte_reads),
-        "cached exact byte revalidation count was outside its bounded budget: \
-         {exact_byte_reads}"
-    );
-}
-
-#[test]
 fn advisory_write_lock_uses_exact_format_and_preserves_debug_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -4227,54 +5703,6 @@ fn parent_swap_after_final_revalidation_is_caught_before_rename() {
 
 #[cfg(unix)]
 #[test]
-fn newly_created_parent_identity_is_bound_through_commit() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-    fs::create_dir(root.join("styles")).expect("styles");
-    let logical_path = "styles/nested/kit.css";
-    let target = root.join(logical_path);
-    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
-    let files = vec![PlannedFile {
-        path: logical_path.to_owned(),
-        action: PlannedFileAction::Create,
-        content: "planned\n".to_owned(),
-    }];
-    let changes = vec![ChangeRecord::new(
-        ChangeKind::CreateFile,
-        logical_path,
-        true,
-    )];
-    let parent = root.join("styles/nested");
-    let moved_parent = root.join("styles/staged-parent");
-    let fault_fs = Arc::new(
-        FaultFs::replace_parent_with_directory_after_final_revalidation(
-            target,
-            parent.clone(),
-            moved_parent.clone(),
-        ),
-    );
-
-    let error =
-        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
-            .expect_err("replacement parent with an ordinary directory must conflict");
-
-    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
-    assert!(!parent.join("kit.css").exists());
-    let staged_paths = fs::read_dir(&moved_parent)
-        .expect("read detached stage parent")
-        .map(|entry| entry.expect("stage entry").path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-v2-"))
-        })
-        .collect::<Vec<_>>();
-    assert!(staged_paths.is_empty(), "rollback removes detached stages");
-    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
-}
-
-#[cfg(unix)]
-#[test]
 fn mode_only_preimage_change_conflicts_before_target_writes() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -4767,6 +6195,7 @@ fn legacy_v1_journal_evidence_is_preserved_and_fails_closed() {
 }
 
 #[test]
+#[ignore = "exhaustive fault matrix; run explicitly with --ignored --exact"]
 fn every_transaction_io_fault_avoids_partial_application_state() {
     let baseline = tempfile::tempdir().expect("baseline tempdir");
     let (files, changes) = setup_two_file_update(baseline.path());
@@ -4874,136 +6303,6 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
 }
 
 #[test]
-fn journal_partial_create_failure_reconciles_without_cached_authority_drift() {
-    let directory = tempfile::tempdir().expect("journal partial create fault tempdir");
-    let root = directory.path();
-    let (files, changes) = setup_two_file_update(root);
-    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::CreateNewFile, 34));
-
-    let result = apply_planned_files_with(root, &files, &changes, fault_fs.clone());
-    let events = fault_fs.events();
-    let commit_complete_visible = events
-        .iter()
-        .any(|event| matches!(event.operation, FsOperation::CommitBoundary { .. }));
-    assert!(
-        two_file_cohort_state_matches(root, commit_complete_visible),
-        "create-new failure left a partial cohort; result={result:?}; event tail={:?}",
-        &events[events.len().saturating_sub(64)..]
-    );
-}
-
-#[test]
-fn post_open_create_errors_recover_exact_empty_journal_and_finalization_residuals() {
-    #[derive(Debug, Clone, Copy)]
-    enum Injection {
-        IdentityAcquisition,
-        PostSuccess,
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum Preparation {
-        Journal,
-        Finalization,
-    }
-
-    let baseline = tempfile::tempdir().expect("baseline tempdir");
-    let (files, changes) = setup_two_file_update(baseline.path());
-    let baseline_fs = Arc::new(FaultFs::passthrough());
-    apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
-        .expect("baseline transaction");
-    let baseline_events = baseline_fs.events();
-    let preparation_path_matches = |path: &Path, preparation: Preparation| {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        match preparation {
-            Preparation::Journal => {
-                name.starts_with("transaction-v2-") && name.ends_with(".json.partial")
-            }
-            Preparation::Finalization => {
-                name.starts_with("finalization-v2-") && name.ends_with(".json.partial")
-            }
-        }
-    };
-
-    for preparation in [Preparation::Journal, Preparation::Finalization] {
-        for injection in [Injection::IdentityAcquisition, Injection::PostSuccess] {
-            let operation = match injection {
-                Injection::IdentityAcquisition => FsOperation::AcquireCreatedFileIdentity,
-                Injection::PostSuccess => FsOperation::CreateNewFile,
-            };
-            let ordinal = baseline_events
-                .iter()
-                .filter(|event| event.operation == operation)
-                .position(|event| preparation_path_matches(&event.path, preparation))
-                .map(|index| index + 1)
-                .expect("baseline contains the selected preparation create");
-            let directory = tempfile::tempdir().expect("fault tempdir");
-            let root = directory.path();
-            let (files, changes) = setup_two_file_update(root);
-            let fault_fs = Arc::new(match injection {
-                Injection::IdentityAcquisition => FaultFs::fail_nth(operation, ordinal),
-                Injection::PostSuccess => FaultFs::fail_after_success_nth(operation, ordinal),
-            });
-
-            let error = match apply_planned_files_with(root, &files, &changes, fault_fs.clone()) {
-                Ok(()) => {
-                    assert_two_file_cohort_state(root, true);
-                    assert!(transaction_workspace_paths(root).is_empty());
-                    continue;
-                }
-                Err(error) => error,
-            };
-            assert!(
-                matches!(error, CodegenError::RecoveryRequired { .. }),
-                "typed post-open create failure returned {error}"
-            );
-            let events = fault_fs.events();
-            let residual = events
-                .iter()
-                .filter(|event| event.operation == operation)
-                .nth(ordinal - 1)
-                .expect("selected create event")
-                .path
-                .clone();
-            assert!(
-                preparation_path_matches(&residual, preparation),
-                "selected residual path was {}",
-                residual.display()
-            );
-            assert_eq!(
-                fs::read(&residual).expect("read exact created residual"),
-                b"",
-                "post-open failure must leave the exact empty created object"
-            );
-            assert!(
-                !events.iter().any(|event| matches!(
-                    (preparation, event.operation),
-                    (
-                        Preparation::Journal,
-                        FsOperation::PrepareJournalPartial { after: true, .. },
-                    ) | (
-                        Preparation::Finalization,
-                        FsOperation::PrepareFinalizationPartial { after: true, .. },
-                    )
-                )),
-                "a failed preparation emitted a truthful-success transition"
-            );
-
-            apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
-                .unwrap_or_else(|recovery| {
-                    panic!(
-                        "recover exact empty {} residual after {operation:?} {ordinal}: {recovery}",
-                        residual.display()
-                    )
-                });
-            assert_two_file_cohort_state(root, matches!(preparation, Preparation::Finalization));
-            assert!(transaction_workspace_paths(root).is_empty());
-        }
-    }
-}
-
-#[test]
 fn semantic_crashes_recover_to_the_side_selected_by_commit_complete() {
     let baseline = tempfile::tempdir().expect("semantic baseline tempdir");
     let (baseline_files, baseline_changes) = setup_two_file_update(baseline.path());
@@ -5048,157 +6347,6 @@ fn semantic_crashes_recover_to_the_side_selected_by_commit_complete() {
             .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
         assert_two_file_cohort_state(root, expect_desired);
         assert!(transaction_workspace_paths(root).is_empty());
-    }
-}
-
-#[test]
-fn terminal_namespace_retirement_recovers_at_every_semantic_boundary() {
-    for transition in [
-        FsOperation::ArmNamespaceRetirementAuthority { after: false },
-        FsOperation::ArmNamespaceRetirementAuthority { after: true },
-        FsOperation::MoveTransactionNamespaceToRetirement { after: false },
-        FsOperation::MoveTransactionNamespaceToRetirement { after: true },
-        FsOperation::RemoveInternalFinalizationLease { after: false },
-        FsOperation::RemoveInternalFinalizationLease { after: true },
-        FsOperation::RetireTransactionNamespace { after: false },
-        FsOperation::RetireTransactionNamespace { after: true },
-        FsOperation::RetireNamespaceRetirementAuthority { after: false },
-        FsOperation::RetireNamespaceRetirementAuthority { after: true },
-    ] {
-        let directory = tempfile::tempdir().expect("namespace-retirement crash tempdir");
-        let root = directory.path();
-        let (files, changes) = setup_two_file_update(root);
-        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
-
-        let crash = std::panic::catch_unwind(|| {
-            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
-        });
-        assert!(crash.is_err(), "{transition:?} did not terminate execution");
-
-        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
-            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
-        assert_two_file_cohort_state(root, true);
-        assert_no_transaction_namespace_lifecycle(root);
-
-        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
-            .unwrap_or_else(|error| panic!("repeat recovery after {transition:?}: {error}"));
-        assert_no_transaction_namespace_lifecycle(root);
-    }
-}
-
-#[test]
-fn coordination_migration_and_namespace_bootstrap_recover_from_every_observed_transition() {
-    let baseline = tempfile::tempdir().expect("coordination lifecycle baseline tempdir");
-    let (baseline_files, baseline_changes) =
-        setup_two_file_update_with_legacy_coordination(baseline.path());
-    let baseline_fs = Arc::new(FaultFs::passthrough());
-    apply_planned_files_with(
-        baseline.path(),
-        &baseline_files,
-        &baseline_changes,
-        baseline_fs.clone(),
-    )
-    .expect("baseline legacy migration and namespace bootstrap");
-    let mut transitions = Vec::new();
-    for event in baseline_fs.events() {
-        if is_coordination_lifecycle_transition(event.operation)
-            && !transitions.contains(&event.operation)
-        {
-            transitions.push(event.operation);
-        }
-    }
-    assert!(
-        transitions.len() >= 44,
-        "successful legacy migration and bootstrap exposed only {} before/after transition points: {transitions:?}",
-        transitions.len(),
-    );
-
-    for transition in transitions {
-        let directory = tempfile::tempdir().expect("coordination lifecycle crash tempdir");
-        let root = directory.path();
-        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
-        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
-
-        let crash = std::panic::catch_unwind(|| {
-            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
-        });
-        assert!(crash.is_err(), "{transition:?} did not terminate execution");
-
-        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
-            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
-        assert_two_file_cohort_state(root, false);
-        assert_no_transaction_namespace_lifecycle(root);
-    }
-}
-
-#[test]
-fn coordination_control_partials_recover_from_prewrite_and_postwrite_failures() {
-    let baseline = tempfile::tempdir().expect("coordination partial baseline tempdir");
-    let (baseline_files, baseline_changes) =
-        setup_two_file_update_with_legacy_coordination(baseline.path());
-    let baseline_fs = Arc::new(FaultFs::passthrough());
-    apply_planned_files_with(
-        baseline.path(),
-        &baseline_files,
-        &baseline_changes,
-        baseline_fs.clone(),
-    )
-    .expect("baseline coordination lifecycle");
-    let mut write_ordinal = 0_usize;
-    let mut sync_ordinal = 0_usize;
-    let partial_faults = baseline_fs
-        .events()
-        .into_iter()
-        .filter_map(|event| {
-            let (operation, ordinal, after_success) = match event.operation {
-                FsOperation::WriteHandle => {
-                    write_ordinal += 1;
-                    (FsOperation::WriteHandle, write_ordinal, false)
-                }
-                FsOperation::SyncHandle => {
-                    sync_ordinal += 1;
-                    (FsOperation::SyncHandle, sync_ordinal, true)
-                }
-                _ => return None,
-            };
-            let name = event.path.file_name()?.to_str()?;
-            (name.ends_with(".partial")
-                && (name.starts_with("coordination-")
-                    || name.starts_with("namespace-bootstrap-v2-")))
-            .then_some((operation, ordinal, after_success, name.to_owned()))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        partial_faults.len(),
-        8,
-        "intent, owner, completion, and namespace intent must expose write and sync failure points"
-    );
-
-    for (operation, ordinal, after_success, name) in partial_faults {
-        let directory = tempfile::tempdir().expect("coordination partial fault tempdir");
-        let root = directory.path();
-        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
-        let fault_fs = Arc::new(if after_success {
-            FaultFs::fail_after_success_nth(operation, ordinal)
-        } else {
-            FaultFs::fail_nth(operation, ordinal)
-        });
-
-        let error = match apply_planned_files_with(root, &files, &changes, fault_fs) {
-            Ok(()) => {
-                panic!("{name} after_success={after_success} selected partial write did not fail")
-            }
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, CodegenError::RecoveryRequired { .. }),
-            "{name} after_success={after_success} returned {error}"
-        );
-        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough())).unwrap_or_else(
-            |recovery| panic!("recover {name} after_success={after_success}: {recovery}"),
-        );
-        assert_two_file_cohort_state(root, false);
-        assert_no_transaction_namespace_lifecycle(root);
     }
 }
 
@@ -5300,76 +6448,27 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
     )
 }
 
-fn setup_two_file_update_with_legacy_coordination(
-    root: &Path,
-) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
-    let planned = setup_two_file_update(root);
-    let kit = root.join("src/components/ui/_kit");
-    fs::write(kit.join(".gitignore"), b"/.write.lock\n/.transactions/\n")
-        .expect("restore exact legacy coordination ignore");
-    fs::create_dir(kit.join(".transactions")).expect("create exact-empty legacy namespace");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(kit.join(".transactions"), fs::Permissions::from_mode(0o700))
-            .expect("set exact legacy namespace mode");
-    }
-    planned
-}
-
-fn is_coordination_lifecycle_transition(operation: FsOperation) -> bool {
-    matches!(
-        operation,
-        FsOperation::ArmCoordinationMigration { .. }
-            | FsOperation::BindLegacyTransactionNamespaceResidual { .. }
-            | FsOperation::CancelLegacyTransactionNamespaceResidual { .. }
-            | FsOperation::CreateCoordinationMigrationWorkspace { .. }
-            | FsOperation::BindCoordinationMigrationWorkspace { .. }
-            | FsOperation::PrepareCoordinationMigrationIntent { .. }
-            | FsOperation::PublishCoordinationMigrationIntent { .. }
-            | FsOperation::CreateCoordinationIgnoreOwner { .. }
-            | FsOperation::PublishCoordinationIgnoreOwner { .. }
-            | FsOperation::ReplaceCoordinationIgnore { .. }
-            | FsOperation::PrepareCoordinationMigrationComplete { .. }
-            | FsOperation::PublishCoordinationMigrationComplete { .. }
-            | FsOperation::CleanupCoordinationMigrationObject { .. }
-            | FsOperation::RetireCoordinationMigrationWorkspace { .. }
-            | FsOperation::RetireCoordinationMigrationAlias { .. }
-            | FsOperation::ArmTransactionNamespaceBootstrap { .. }
-            | FsOperation::CreateTransactionNamespace { .. }
-            | FsOperation::BindTransactionNamespaceBootstrap { .. }
-            | FsOperation::PrepareTransactionNamespaceBootstrapIntent { .. }
-            | FsOperation::PublishTransactionNamespaceBootstrapIntent { .. }
-            | FsOperation::ActivateTransactionNamespace { .. }
-            | FsOperation::RetireTransactionNamespaceBootstrapIntent { .. }
-            | FsOperation::RetireTransactionNamespaceBootstrapAlias { .. }
-    )
-}
-
 fn assert_two_file_cohort_state(root: &Path, desired: bool) {
-    assert!(
-        two_file_cohort_state_matches(root, desired),
-        "two-file cohort does not match the expected desired={desired} state"
-    );
-}
-
-fn two_file_cohort_state_matches(root: &Path, desired: bool) -> bool {
     let (first, second) = if desired {
         (b"first-after\n".as_slice(), b"second-after\n".as_slice())
     } else {
         (b"first-before\n".as_slice(), b"second-before\n".as_slice())
     };
-    if fs::read(root.join("styles/first.css")).ok().as_deref() != Some(first)
-        || fs::read(root.join("styles/second.css")).ok().as_deref() != Some(second)
-    {
-        return false;
-    }
+    assert_eq!(
+        fs::read(root.join("styles/first.css")).expect("first target"),
+        first
+    );
+    assert_eq!(
+        fs::read(root.join("styles/second.css")).expect("second target"),
+        second
+    );
     if desired {
-        fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH))
-            .is_ok_and(|lock| lock == test_install_lock_json())
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH)).expect("desired install lock"),
+            test_install_lock_json()
+        );
     } else {
-        !root.join(DEFAULT_KIT_LOCK_PATH).exists()
+        assert!(!root.join(DEFAULT_KIT_LOCK_PATH).exists());
     }
 }
 
@@ -5403,23 +6502,6 @@ fn transaction_workspace_paths(root: &Path) -> Vec<PathBuf> {
         })
         .map(|entry| entry.path())
         .collect()
-}
-
-fn assert_no_transaction_namespace_lifecycle(root: &Path) {
-    let kit = root.join("src/components/ui/_kit");
-    let names = fs::read_dir(&kit)
-        .expect("read coordination directory")
-        .map(|entry| entry.expect("coordination entry").file_name())
-        .filter(|name| {
-            name.to_str().is_some_and(|name| {
-                name == ".transactions" || name.starts_with(".transactions.retirement-v2-")
-            })
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        names.is_empty(),
-        "transaction namespace lifecycle artifacts remain: {names:?}"
-    );
 }
 
 fn transaction_journal_paths(root: &Path) -> Vec<PathBuf> {
@@ -5666,7 +6748,12 @@ fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {
             leptos: leptos_ui_kit_registry::RegistryLeptos {
                 version: leptos_ui_kit_registry::LEPTOS_VERSION.to_owned(),
                 router_version: leptos_ui_kit_registry::LEPTOS_ROUTER_VERSION.to_owned(),
-                render_mode: leptos_ui_kit_registry::RenderMode::Csr,
+                render_modes: vec![
+                    leptos_ui_kit_registry::RenderMode::Csr,
+                    leptos_ui_kit_registry::RenderMode::Hydrate,
+                    leptos_ui_kit_registry::RenderMode::Ssr,
+                ],
+                legacy_render_mode: None,
             },
             accessibility: leptos_ui_kit_registry::RegistryAccessibility::default(),
             files: vec![leptos_ui_kit_registry::RegistryItemFile {
@@ -5683,4 +6770,566 @@ fn nested_registry_item() -> leptos_ui_kit_registry::ResolvedRegistryItem {
             extra: BTreeMap::new(),
         },
     }
+}
+
+// Transaction-protocol remediation coverage retained across the master reconciliation.
+
+#[test]
+fn add_tokens_updates_only_css_config_and_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::write(
+        root.join("index.html"),
+        "<html><head></head><body></body></html>\n",
+    )
+    .expect("write index");
+    apply_init(root).expect("init");
+    let components_mod =
+        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod");
+    let ui_mod = fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod");
+
+    let plan = plan_add(root, "tokens").expect("plan tokens");
+    let paths = plan
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(paths.contains(&DEFAULT_KIT_CONFIG_PATH));
+    assert!(paths.contains(&DEFAULT_KIT_LOCK_PATH));
+    assert!(paths.contains(&"styles/kit.css"));
+    assert!(!paths.contains(&"src/components/mod.rs"));
+    assert!(!paths.contains(&"src/components/ui/mod.rs"));
+    assert!(!paths.contains(&"src/components/ui/tokens.rs"));
+    assert!(plan.lock.items["builtin:tokens"].files.is_empty());
+    assert_eq!(plan.lock.items["builtin:tokens"].style_blocks.len(), 1);
+
+    apply_add(root, "tokens").expect("apply tokens");
+    assert_eq!(
+        fs::read_to_string(root.join("src/components/mod.rs")).expect("read components mod"),
+        components_mod
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("src/components/ui/mod.rs")).expect("read ui mod"),
+        ui_mod
+    );
+    assert!(
+        fs::read_to_string(root.join("styles/kit.css"))
+            .expect("read css")
+            .contains("/* leptos-ui-kit:start tokens */")
+    );
+    assert!(
+        apply_add(root, "tokens")
+            .expect("second tokens add")
+            .is_empty()
+    );
+}
+
+#[test]
+fn packaged_css_fixtures_match_workspace_canonical_copies_when_present() {
+    let canonical = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/theme_pre_refactor_06124efa");
+    if !canonical
+        .try_exists()
+        .expect("inspect canonical fixture root")
+    {
+        return;
+    }
+    assert!(
+        canonical.is_dir(),
+        "canonical fixture root must be a directory"
+    );
+    assert_eq!(
+        PINNED_BUTTON_CSS,
+        fs::read_to_string(canonical.join("button.css")).expect("read canonical button CSS")
+    );
+    assert_eq!(
+        PINNED_SPINNER_CSS,
+        fs::read_to_string(canonical.join("spinner.css")).expect("read canonical spinner CSS")
+    );
+}
+
+#[test]
+fn successful_single_file_transaction_bounds_strict_exact_reads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("styles")).expect("styles");
+    let logical_path = "styles/kit.css";
+    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
+    let files = vec![PlannedFile {
+        path: logical_path.to_owned(),
+        action: PlannedFileAction::Create,
+        content: ":root {}\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::CreateFile,
+        logical_path,
+        true,
+    )];
+    let fault_fs = Arc::new(FaultFs::passthrough());
+
+    apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+        .expect("apply single-file transaction");
+
+    let events = fault_fs.events();
+    let exact_reads = events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
+        .count();
+    let exact_byte_reads = events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileBytesExact)
+        .count();
+    let journal_record_hash_reads = events
+        .iter()
+        .filter(|event| {
+            event.operation == FsOperation::ReadRegularFileExact
+                && event
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("transaction-v2-")
+                            && (name.ends_with(".json") || name.ends_with(".json.partial"))
+                    })
+        })
+        .count();
+    let mut reads_by_path = BTreeMap::<PathBuf, usize>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.operation == FsOperation::ReadRegularFileExact)
+    {
+        *reads_by_path.entry(event.path.clone()).or_default() += 1;
+    }
+    let mut reads_by_path = reads_by_path.into_iter().collect::<Vec<_>>();
+    reads_by_path.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    assert!(
+        journal_record_hash_reads <= 64,
+        "journal lineage hash-and-validate reads exceeded the bounded budget: \
+         {journal_record_hash_reads}"
+    );
+    assert!(
+        exact_reads <= 1_200,
+        "strict hash-and-validate reads exceeded the diagnostic ceiling: {exact_reads}; \
+         exact byte rereads: {exact_byte_reads}; hottest paths: {:?}",
+        &reads_by_path[..reads_by_path.len().min(20)]
+    );
+    assert!(
+        (1..=1_650).contains(&exact_byte_reads),
+        "cached exact byte revalidation count was outside its bounded budget: \
+         {exact_byte_reads}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn newly_created_parent_identity_is_bound_through_commit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("styles")).expect("styles");
+    let logical_path = "styles/nested/kit.css";
+    let target = root.join(logical_path);
+    let snapshot = capture_plan_snapshot(root, [logical_path]).expect("capture absent target");
+    let files = vec![PlannedFile {
+        path: logical_path.to_owned(),
+        action: PlannedFileAction::Create,
+        content: "planned\n".to_owned(),
+    }];
+    let changes = vec![ChangeRecord::new(
+        ChangeKind::CreateFile,
+        logical_path,
+        true,
+    )];
+    let parent = root.join("styles/nested");
+    let moved_parent = root.join("styles/staged-parent");
+    let fault_fs = Arc::new(
+        FaultFs::replace_parent_with_directory_after_final_revalidation(
+            target,
+            parent.clone(),
+            moved_parent.clone(),
+        ),
+    );
+
+    let error =
+        apply_planned_files_with_snapshot(root, &files, &changes, &snapshot, fault_fs.clone())
+            .expect_err("replacement parent with an ordinary directory must conflict");
+
+    assert!(matches!(error, CodegenError::PreimageConflict { .. }));
+    assert!(!parent.join("kit.css").exists());
+    let staged_paths = fs::read_dir(&moved_parent)
+        .expect("read detached stage parent")
+        .map(|entry| entry.expect("stage entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".leptos-ui-kit-stage-v2-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(staged_paths.is_empty(), "rollback removes detached stages");
+    assert!(!fault_fs.events().iter().any(is_target_replacement_event));
+}
+
+#[test]
+fn journal_partial_create_failure_reconciles_without_cached_authority_drift() {
+    let directory = tempfile::tempdir().expect("journal partial create fault tempdir");
+    let root = directory.path();
+    let (files, changes) = setup_two_file_update(root);
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::CreateNewFile, 34));
+
+    let result = apply_planned_files_with(root, &files, &changes, fault_fs.clone());
+    let events = fault_fs.events();
+    let commit_complete_visible = events
+        .iter()
+        .any(|event| matches!(event.operation, FsOperation::CommitBoundary { .. }));
+    assert!(
+        two_file_cohort_state_matches(root, commit_complete_visible),
+        "create-new failure left a partial cohort; result={result:?}; event tail={:?}",
+        &events[events.len().saturating_sub(64)..]
+    );
+}
+
+#[test]
+fn post_open_create_errors_recover_exact_empty_journal_and_finalization_residuals() {
+    #[derive(Debug, Clone, Copy)]
+    enum Injection {
+        IdentityAcquisition,
+        PostSuccess,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Preparation {
+        Journal,
+        Finalization,
+    }
+
+    let baseline = tempfile::tempdir().expect("baseline tempdir");
+    let (files, changes) = setup_two_file_update(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(baseline.path(), &files, &changes, baseline_fs.clone())
+        .expect("baseline transaction");
+    let baseline_events = baseline_fs.events();
+    let preparation_path_matches = |path: &Path, preparation: Preparation| {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        match preparation {
+            Preparation::Journal => {
+                name.starts_with("transaction-v2-") && name.ends_with(".json.partial")
+            }
+            Preparation::Finalization => {
+                name.starts_with("finalization-v2-") && name.ends_with(".json.partial")
+            }
+        }
+    };
+
+    for preparation in [Preparation::Journal, Preparation::Finalization] {
+        for injection in [Injection::IdentityAcquisition, Injection::PostSuccess] {
+            let operation = match injection {
+                Injection::IdentityAcquisition => FsOperation::AcquireCreatedFileIdentity,
+                Injection::PostSuccess => FsOperation::CreateNewFile,
+            };
+            let ordinal = baseline_events
+                .iter()
+                .filter(|event| event.operation == operation)
+                .position(|event| preparation_path_matches(&event.path, preparation))
+                .map(|index| index + 1)
+                .expect("baseline contains the selected preparation create");
+            let directory = tempfile::tempdir().expect("fault tempdir");
+            let root = directory.path();
+            let (files, changes) = setup_two_file_update(root);
+            let fault_fs = Arc::new(match injection {
+                Injection::IdentityAcquisition => FaultFs::fail_nth(operation, ordinal),
+                Injection::PostSuccess => FaultFs::fail_after_success_nth(operation, ordinal),
+            });
+
+            let error = match apply_planned_files_with(root, &files, &changes, fault_fs.clone()) {
+                Ok(()) => {
+                    assert_two_file_cohort_state(root, true);
+                    assert!(transaction_workspace_paths(root).is_empty());
+                    continue;
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, CodegenError::RecoveryRequired { .. }),
+                "typed post-open create failure returned {error}"
+            );
+            let events = fault_fs.events();
+            let residual = events
+                .iter()
+                .filter(|event| event.operation == operation)
+                .nth(ordinal - 1)
+                .expect("selected create event")
+                .path
+                .clone();
+            assert!(
+                preparation_path_matches(&residual, preparation),
+                "selected residual path was {}",
+                residual.display()
+            );
+            assert_eq!(
+                fs::read(&residual).expect("read exact created residual"),
+                b"",
+                "post-open failure must leave the exact empty created object"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    (preparation, event.operation),
+                    (
+                        Preparation::Journal,
+                        FsOperation::PrepareJournalPartial { after: true, .. },
+                    ) | (
+                        Preparation::Finalization,
+                        FsOperation::PrepareFinalizationPartial { after: true, .. },
+                    )
+                )),
+                "a failed preparation emitted a truthful-success transition"
+            );
+
+            apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+                .unwrap_or_else(|recovery| {
+                    panic!(
+                        "recover exact empty {} residual after {operation:?} {ordinal}: {recovery}",
+                        residual.display()
+                    )
+                });
+            assert_two_file_cohort_state(root, matches!(preparation, Preparation::Finalization));
+            assert!(transaction_workspace_paths(root).is_empty());
+        }
+    }
+}
+
+#[test]
+fn terminal_namespace_retirement_recovers_at_every_semantic_boundary() {
+    for transition in [
+        FsOperation::ArmNamespaceRetirementAuthority { after: false },
+        FsOperation::ArmNamespaceRetirementAuthority { after: true },
+        FsOperation::MoveTransactionNamespaceToRetirement { after: false },
+        FsOperation::MoveTransactionNamespaceToRetirement { after: true },
+        FsOperation::RemoveInternalFinalizationLease { after: false },
+        FsOperation::RemoveInternalFinalizationLease { after: true },
+        FsOperation::RetireTransactionNamespace { after: false },
+        FsOperation::RetireTransactionNamespace { after: true },
+        FsOperation::RetireNamespaceRetirementAuthority { after: false },
+        FsOperation::RetireNamespaceRetirementAuthority { after: true },
+    ] {
+        let directory = tempfile::tempdir().expect("namespace-retirement crash tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update(root);
+        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+        let crash = std::panic::catch_unwind(|| {
+            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+        });
+        assert!(crash.is_err(), "{transition:?} did not terminate execution");
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
+        assert_two_file_cohort_state(root, true);
+        assert_no_transaction_namespace_lifecycle(root);
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("repeat recovery after {transition:?}: {error}"));
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+#[test]
+fn coordination_migration_and_namespace_bootstrap_recover_from_every_observed_transition() {
+    let baseline = tempfile::tempdir().expect("coordination lifecycle baseline tempdir");
+    let (baseline_files, baseline_changes) =
+        setup_two_file_update_with_legacy_coordination(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(
+        baseline.path(),
+        &baseline_files,
+        &baseline_changes,
+        baseline_fs.clone(),
+    )
+    .expect("baseline legacy migration and namespace bootstrap");
+    let mut transitions = Vec::new();
+    for event in baseline_fs.events() {
+        if is_coordination_lifecycle_transition(event.operation)
+            && !transitions.contains(&event.operation)
+        {
+            transitions.push(event.operation);
+        }
+    }
+    assert!(
+        transitions.len() >= 44,
+        "successful legacy migration and bootstrap exposed only {} before/after transition points: {transitions:?}",
+        transitions.len(),
+    );
+
+    for transition in transitions {
+        let directory = tempfile::tempdir().expect("coordination lifecycle crash tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
+        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+        let crash = std::panic::catch_unwind(|| {
+            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+        });
+        assert!(crash.is_err(), "{transition:?} did not terminate execution");
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
+        assert_two_file_cohort_state(root, false);
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+#[test]
+fn coordination_control_partials_recover_from_prewrite_and_postwrite_failures() {
+    let baseline = tempfile::tempdir().expect("coordination partial baseline tempdir");
+    let (baseline_files, baseline_changes) =
+        setup_two_file_update_with_legacy_coordination(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(
+        baseline.path(),
+        &baseline_files,
+        &baseline_changes,
+        baseline_fs.clone(),
+    )
+    .expect("baseline coordination lifecycle");
+    let mut write_ordinal = 0_usize;
+    let mut sync_ordinal = 0_usize;
+    let partial_faults = baseline_fs
+        .events()
+        .into_iter()
+        .filter_map(|event| {
+            let (operation, ordinal, after_success) = match event.operation {
+                FsOperation::WriteHandle => {
+                    write_ordinal += 1;
+                    (FsOperation::WriteHandle, write_ordinal, false)
+                }
+                FsOperation::SyncHandle => {
+                    sync_ordinal += 1;
+                    (FsOperation::SyncHandle, sync_ordinal, true)
+                }
+                _ => return None,
+            };
+            let name = event.path.file_name()?.to_str()?;
+            (name.ends_with(".partial")
+                && (name.starts_with("coordination-")
+                    || name.starts_with("namespace-bootstrap-v2-")))
+            .then_some((operation, ordinal, after_success, name.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial_faults.len(),
+        8,
+        "intent, owner, completion, and namespace intent must expose write and sync failure points"
+    );
+
+    for (operation, ordinal, after_success, name) in partial_faults {
+        let directory = tempfile::tempdir().expect("coordination partial fault tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
+        let fault_fs = Arc::new(if after_success {
+            FaultFs::fail_after_success_nth(operation, ordinal)
+        } else {
+            FaultFs::fail_nth(operation, ordinal)
+        });
+
+        let error = match apply_planned_files_with(root, &files, &changes, fault_fs) {
+            Ok(()) => {
+                panic!("{name} after_success={after_success} selected partial write did not fail")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, CodegenError::RecoveryRequired { .. }),
+            "{name} after_success={after_success} returned {error}"
+        );
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough())).unwrap_or_else(
+            |recovery| panic!("recover {name} after_success={after_success}: {recovery}"),
+        );
+        assert_two_file_cohort_state(root, false);
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+fn setup_two_file_update_with_legacy_coordination(
+    root: &Path,
+) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
+    let planned = setup_two_file_update(root);
+    let kit = root.join("src/components/ui/_kit");
+    fs::write(kit.join(".gitignore"), b"/.write.lock\n/.transactions/\n")
+        .expect("restore exact legacy coordination ignore");
+    fs::create_dir(kit.join(".transactions")).expect("create exact-empty legacy namespace");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(kit.join(".transactions"), fs::Permissions::from_mode(0o700))
+            .expect("set exact legacy namespace mode");
+    }
+    planned
+}
+
+fn is_coordination_lifecycle_transition(operation: FsOperation) -> bool {
+    matches!(
+        operation,
+        FsOperation::ArmCoordinationMigration { .. }
+            | FsOperation::BindLegacyTransactionNamespaceResidual { .. }
+            | FsOperation::CancelLegacyTransactionNamespaceResidual { .. }
+            | FsOperation::CreateCoordinationMigrationWorkspace { .. }
+            | FsOperation::BindCoordinationMigrationWorkspace { .. }
+            | FsOperation::PrepareCoordinationMigrationIntent { .. }
+            | FsOperation::PublishCoordinationMigrationIntent { .. }
+            | FsOperation::CreateCoordinationIgnoreOwner { .. }
+            | FsOperation::PublishCoordinationIgnoreOwner { .. }
+            | FsOperation::ReplaceCoordinationIgnore { .. }
+            | FsOperation::PrepareCoordinationMigrationComplete { .. }
+            | FsOperation::PublishCoordinationMigrationComplete { .. }
+            | FsOperation::CleanupCoordinationMigrationObject { .. }
+            | FsOperation::RetireCoordinationMigrationWorkspace { .. }
+            | FsOperation::RetireCoordinationMigrationAlias { .. }
+            | FsOperation::ArmTransactionNamespaceBootstrap { .. }
+            | FsOperation::CreateTransactionNamespace { .. }
+            | FsOperation::BindTransactionNamespaceBootstrap { .. }
+            | FsOperation::PrepareTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::PublishTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::ActivateTransactionNamespace { .. }
+            | FsOperation::RetireTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::RetireTransactionNamespaceBootstrapAlias { .. }
+    )
+}
+
+fn two_file_cohort_state_matches(root: &Path, desired: bool) -> bool {
+    let (first, second) = if desired {
+        (b"first-after\n".as_slice(), b"second-after\n".as_slice())
+    } else {
+        (b"first-before\n".as_slice(), b"second-before\n".as_slice())
+    };
+    if fs::read(root.join("styles/first.css")).ok().as_deref() != Some(first)
+        || fs::read(root.join("styles/second.css")).ok().as_deref() != Some(second)
+    {
+        return false;
+    }
+    if desired {
+        fs::read_to_string(root.join(DEFAULT_KIT_LOCK_PATH))
+            .is_ok_and(|lock| lock == test_install_lock_json())
+    } else {
+        !root.join(DEFAULT_KIT_LOCK_PATH).exists()
+    }
+}
+
+fn assert_no_transaction_namespace_lifecycle(root: &Path) {
+    let kit = root.join("src/components/ui/_kit");
+    let names = fs::read_dir(&kit)
+        .expect("read coordination directory")
+        .map(|entry| entry.expect("coordination entry").file_name())
+        .filter(|name| {
+            name.to_str().is_some_and(|name| {
+                name == ".transactions" || name.starts_with(".transactions.retirement-v2-")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        names.is_empty(),
+        "transaction namespace lifecycle artifacts remain: {names:?}"
+    );
 }

@@ -17,10 +17,13 @@ use crate::{
 };
 
 #[cfg(test)]
-use crate::{parse_registry_item_str, parse_registry_root_str, parse_theme_contract_str};
+use crate::{
+    item::{parse_registry_item_raw_str, parse_registry_root_raw_str},
+    parse_theme_contract_str,
+};
 
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
-const THEME_TOKEN_NAME_PATTERN: &str = "^--kit-[a-z][a-z0-9-]*$";
+const THEME_TOKEN_NAME_PATTERN: &str = "^--kit-[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 
 /// The role of a packaged file involved in built-in registry validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,9 +235,13 @@ impl std::error::Error for RegistryHealthError {
 }
 
 /// Validates every runtime-relevant file in the packaged built-in registry.
+#[allow(
+    clippy::result_large_err,
+    reason = "the stable public health error preserves typed paths, versions, and source diagnostics"
+)]
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
     let snapshot = built_in_registry_snapshot().map_err(snapshot_health_error)?;
-    debug_assert_eq!(snapshot.schema_count(), 4);
+    debug_assert_eq!(snapshot.schema_count(), 6);
     Ok(())
 }
 
@@ -255,12 +262,13 @@ fn validate_built_in_registry_health_with_schema_at(
 ) -> Result<(), RegistryHealthError> {
     let root_path = registry_root.join("registry.json");
     let root_input = read_utf8(RegistryHealthFileKind::RegistryRoot, &root_path)?;
-    let root =
-        parse_registry_root_str(&root_input).map_err(|source| RegistryHealthError::ParseJson {
+    let root = parse_registry_root_raw_str(&root_input).map_err(|source| {
+        RegistryHealthError::ParseJson {
             kind: RegistryHealthFileKind::RegistryRoot,
             path: root_path.clone(),
             source,
-        })?;
+        }
+    })?;
     root.validate()
         .map_err(|source| RegistryHealthError::InvalidRegistryRoot {
             path: root_path.clone(),
@@ -272,12 +280,13 @@ fn validate_built_in_registry_health_with_schema_at(
     for entry in &root.items {
         let path = registry_root.join(&entry.path);
         let input = read_utf8(RegistryHealthFileKind::RegistryItem, &path)?;
-        let item =
-            parse_registry_item_str(&input).map_err(|source| RegistryHealthError::ParseJson {
+        let item = parse_registry_item_raw_str(&input).map_err(|source| {
+            RegistryHealthError::ParseJson {
                 kind: RegistryHealthFileKind::RegistryItem,
                 path: path.clone(),
                 source,
-            })?;
+            }
+        })?;
         item.validate()
             .map_err(|source| RegistryHealthError::InvalidRegistryItem {
                 path: path.clone(),
@@ -397,6 +406,10 @@ fn read_utf8(kind: RegistryHealthFileKind, path: &Path) -> Result<String, Regist
     })
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 pub(crate) fn validate_theme_contract_schema_shape(
     path: &Path,
     schema: &Value,
@@ -448,6 +461,7 @@ pub(crate) fn validate_theme_contract_schema_shape(
         ("/properties/name/const", json!(THEME_CONTRACT_NAME)),
         ("/properties/tokens/type", json!("array")),
         ("/properties/tokens/minItems", json!(1)),
+        ("/properties/tokens/uniqueItems", json!(true)),
         ("/properties/tokens/items/type", json!("object")),
         (
             "/properties/tokens/items/additionalProperties",
@@ -504,6 +518,10 @@ pub(crate) fn validate_theme_contract_schema_shape(
     )
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_value(
     path: &Path,
     schema: &Value,
@@ -523,6 +541,10 @@ fn expect_schema_value(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_string_set(
     path: &Path,
     schema: &Value,
@@ -553,6 +575,10 @@ fn expect_schema_string_set(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "schema validation preserves the stable typed registry health error"
+)]
 fn expect_schema_object_keys(
     path: &Path,
     schema: &Value,
@@ -652,6 +678,16 @@ fn snapshot_health_error(error: SnapshotError) -> RegistryHealthError {
             first_owner,
             second_owner,
         }),
+        SnapshotError::InvalidThemeCss {
+            logical_path,
+            reason,
+        } => RegistryHealthError::BuiltInAsset {
+            kind: RegistryHealthFileKind::RegistrySource,
+            source: BuiltInAssetError::InvalidContent {
+                logical_path: logical_path.into(),
+                reason,
+            },
+        },
         SnapshotError::ParseJson {
             logical_path,
             source,
@@ -797,7 +833,7 @@ mod tests {
     use crate::{
         BuiltInAssetError, BuiltInAssetKind,
         builtin_registry::BuiltInRegistrySnapshot,
-        embedded_assets::{EmbeddedAssetKind, InMemoryAssetProvider},
+        embedded_assets::{AssetProvider, EmbeddedAssetKind, InMemoryAssetProvider},
         load_built_in_registry_item,
     };
 
@@ -968,6 +1004,34 @@ mod tests {
                 && manifest_version == "2"
                 && contract_version == "1"
                 && expected == "1"
+        ));
+    }
+
+    #[test]
+    fn health_adapter_reports_theme_css_drift_by_logical_locator() {
+        let mut provider = InMemoryAssetProvider::from_embedded();
+        let path = "registry/styles/tokens.css";
+        let css = provider
+            .utf8_asset(path, EmbeddedAssetKind::Css)
+            .expect("read tokens CSS");
+        let changed = css.replacen("#f8fafc", "#000000", 1);
+        provider
+            .set_bytes(path, changed.into_bytes())
+            .expect("replace tokens CSS");
+        let injected = BuiltInRegistrySnapshot::from_provider(&provider)
+            .expect_err("theme CSS drift must reject the snapshot");
+
+        assert!(matches!(
+            snapshot_health_error(injected),
+            RegistryHealthError::BuiltInAsset {
+                kind: RegistryHealthFileKind::RegistrySource,
+                source: BuiltInAssetError::InvalidContent {
+                    logical_path,
+                    reason,
+                },
+            } if logical_path == Path::new(path)
+                && reason.contains("--kit-color-canvas")
+                && !reason.contains(env!("CARGO_MANIFEST_DIR"))
         ));
     }
 

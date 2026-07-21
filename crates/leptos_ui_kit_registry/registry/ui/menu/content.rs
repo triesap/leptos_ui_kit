@@ -3,8 +3,8 @@ use leptos::prelude::*;
 use web_ui_primitives::core::{PlacementAlign, PlacementSide};
 use web_ui_primitives::leptos::{
     DismissibleFocusOutsideEvent, DismissiblePointerDownOutsideEvent, DismissibleReason,
-    MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions, use_menu_layer_with_node_ref,
-    use_menu_placement_with_node_refs,
+    MenuLayerOptions, MenuPlacementBinding, MenuPlacementOptions, PlacementSink,
+    use_menu_layer_with_node_ref, use_menu_placement_with_node_refs,
 };
 
 use super::root::{MenuContext, class_with_base};
@@ -53,6 +53,7 @@ pub fn MenuContent(
     #[prop(optional, default = MenuContentAlign::Start)] align: MenuContentAlign,
     #[prop(optional, default = 4.0)] spacing: f64,
     #[prop(optional, default = 8.0)] viewport_padding: f64,
+    #[prop(optional)] placement_sink: PlacementSink,
     #[prop(optional, into)] class: String,
     children: ChildrenFn,
 ) -> impl IntoView {
@@ -102,10 +103,13 @@ pub fn MenuContent(
             align.as_placement(),
         )
         .spacing(spacing)
-        .viewport_padding(viewport_padding),
+        .viewport_padding(viewport_padding)
+        .sink(placement_sink),
     );
     let transition_end = layer.transition_end_handler();
+    let transition_cancel = layer.transition_cancel_handler();
     let animation_end = layer.animation_end_handler();
+    let animation_cancel = layer.animation_cancel_handler();
 
     view! {
         {move || {
@@ -113,17 +117,19 @@ pub fn MenuContent(
                 return ().into_any();
             }
 
-            menu_surface(
+            menu_surface(MenuSurface {
                 node_ref,
                 content_id,
                 trigger_id,
                 content_class,
                 data_state,
-                placement.clone(),
-                transition_end.clone(),
-                animation_end.clone(),
+                placement: placement.clone(),
+                transition_end,
+                transition_cancel,
+                animation_end,
+                animation_cancel,
                 children,
-            )
+            })
             .into_any()
         }}
     }
@@ -154,7 +160,7 @@ fn target_is_trigger(
     false
 }
 
-fn menu_surface(
+struct MenuSurface {
     node_ref: NodeRef<html::Div>,
     content_id: Signal<String>,
     trigger_id: Signal<String>,
@@ -162,10 +168,28 @@ fn menu_surface(
     data_state: Signal<&'static str>,
     placement: MenuPlacementBinding,
     transition_end: Callback<leptos::ev::TransitionEvent>,
+    transition_cancel: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
+    animation_cancel: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
-) -> impl IntoView {
+}
+
+fn menu_surface(surface: MenuSurface) -> impl IntoView {
+    let MenuSurface {
+        node_ref,
+        content_id,
+        trigger_id,
+        content_class,
+        data_state,
+        placement,
+        transition_end,
+        transition_cancel,
+        animation_end,
+        animation_cancel,
+        children,
+    } = surface;
     let style_placement = placement.clone();
+    let strict_id_placement = placement.clone();
     let side_placement = placement.clone();
     let align_placement = placement.clone();
 
@@ -176,13 +200,25 @@ fn menu_surface(
             class=move || content_class.get()
             role="menu"
             tabindex="-1"
-            style=move || style_placement.style()
+            style=move || {
+                style_placement
+                    .strict_id()
+                    .is_none()
+                    .then(|| style_placement.style())
+            }
+            data-web-ui-placement-id=move || {
+                strict_id_placement
+                    .strict_id()
+                    .map(|id| id.as_str().to_owned())
+            }
             data-state=move || data_state.get()
             data-side=move || side_placement.data_side()
             data-align=move || align_placement.data_align()
             aria-labelledby=move || trigger_id.get()
             on:transitionend=move |event| transition_end.run(event)
+            on:transitioncancel=move |event| transition_cancel.run(event)
             on:animationend=move |event| animation_end.run(event)
+            on:animationcancel=move |event| animation_cancel.run(event)
         >
             {children.with_value(|children| children())}
         </div>

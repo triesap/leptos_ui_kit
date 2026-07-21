@@ -62,16 +62,21 @@ pub enum CodegenError {
 impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
+            Self::Io { path, source } => {
+                write!(
+                    f,
+                    "filesystem access failed for {}: {source}",
+                    path.display()
+                )
+            }
             Self::FilesystemOperation {
                 operation,
                 logical_path,
-                path,
                 source,
+                ..
             } => write!(
                 f,
-                "filesystem operation {operation} failed for project path {logical_path} at {}: {source}",
-                path.display()
+                "filesystem operation {operation} failed for project path {logical_path}: {source}"
             ),
             Self::Config(error) => write!(f, "{error}"),
             Self::Registry(error) => write!(f, "{error}"),
@@ -121,7 +126,28 @@ impl fmt::Display for CodegenError {
     }
 }
 
-impl std::error::Error for CodegenError {}
+impl std::error::Error for CodegenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } | Self::FilesystemOperation { source, .. } => Some(source),
+            Self::LockParse { source, .. } => Some(source),
+            Self::Config(source) => Some(source),
+            Self::Registry(source) => Some(source),
+            Self::LockSerialize(source) => Some(source),
+            Self::InvalidLock { .. }
+            | Self::UnsafePatch { .. }
+            | Self::UnsafePath { .. }
+            | Self::PreimageConflict { .. }
+            | Self::ProjectRootChanged { .. }
+            | Self::DuplicatePath(_)
+            | Self::WriteLockContended { .. }
+            | Self::LegacyWriteLock { .. }
+            | Self::InvalidCoordinationState { .. }
+            | Self::RecoveryRequired { .. }
+            | Self::LockExists(_) => None,
+        }
+    }
+}
 
 impl From<ConfigError> for CodegenError {
     fn from(value: ConfigError) -> Self {
@@ -132,5 +158,46 @@ impl From<ConfigError> for CodegenError {
 impl From<RegistryError> for CodegenError {
     fn from(value: RegistryError) -> Self {
         Self::Registry(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        error::Error,
+        io,
+        path::{Path, PathBuf},
+    };
+
+    use super::CodegenError;
+
+    #[test]
+    fn legacy_io_diagnostic_does_not_mislabel_every_operation_as_a_read() {
+        let error = CodegenError::Io {
+            path: PathBuf::from("styles/kit.css"),
+            source: io::Error::other("simulated operation failure"),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("filesystem access failed"));
+        assert!(!message.contains("failed to read"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn operation_diagnostic_exposes_only_the_logical_path_in_display() {
+        let physical = Path::new("/private/build/root/styles/kit.css");
+        let error = CodegenError::FilesystemOperation {
+            operation: "replace target",
+            logical_path: "styles/kit.css".to_owned(),
+            path: physical.to_path_buf(),
+            source: io::Error::other("simulated replacement failure"),
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("replace target"));
+        assert!(message.contains("styles/kit.css"));
+        assert!(!message.contains("/private/build/root"));
+        assert!(error.source().is_some());
     }
 }

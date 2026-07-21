@@ -1,8 +1,7 @@
-use leptos::html;
 use leptos::prelude::*;
-use web_ui_primitives::leptos::{attrs::tabs_panel_attrs, use_dom_bindings};
+use web_ui_primitives::leptos::attrs::tabs_panel_attrs;
 
-use super::root::{TabsContext, class_with_base};
+use super::root::{TabsContext, attr_bool, attr_string, class_with_base};
 
 #[component]
 pub fn TabsPanel(
@@ -27,12 +26,14 @@ pub fn TabsPanel(
             Some(trigger_id.as_str()),
         )
     });
-    let bindings = use_dom_bindings::<html::Div>(attrs, Vec::new());
-
     view! {
         <div
-            node_ref=bindings.node_ref()
+            id=move || attr_string(&attrs.get(), "id")
             class=class_with_base("kit-tabs-panel", &class)
+            role=move || attr_string(&attrs.get(), "role")
+            tabindex=move || attr_string(&attrs.get(), "tabindex")
+            hidden=move || attr_bool(&attrs.get(), "hidden")
+            aria-labelledby=move || attr_string(&attrs.get(), "aria-labelledby")
         >
             {children()}
         </div>

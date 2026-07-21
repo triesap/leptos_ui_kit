@@ -124,8 +124,10 @@ impl KitConfig {
         self.tool.validate()?;
         self.project.validate()?;
         self.leptos.validate()?;
+        validate_render_mode_contract(self.project.kind, self.leptos.render_mode)?;
         self.install.validate()?;
         self.styles.validate()?;
+        validate_distinct_file_targets(self)?;
         self.registry.validate()?;
         validate_desired_items(&self.items)?;
         Ok(())
@@ -149,7 +151,7 @@ impl ToolConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ToolSourceConfig {
     Git { url: String, rev: String },
 }
@@ -171,14 +173,40 @@ pub struct ProjectConfig {
     pub kind: ProjectKind,
     pub crate_root: String,
     pub src_dir: String,
-    pub index_html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_html: Option<String>,
 }
 
 impl ProjectConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         expect_path("project.crateRoot", ".", &self.crate_root)?;
         expect_path("project.srcDir", "src", &self.src_dir)?;
-        expect_path("project.indexHtml", "index.html", &self.index_html)
+        match (self.kind, self.index_html.as_deref()) {
+            (ProjectKind::SingleCrateTrunkCsr, Some(index_html)) => {
+                expect_path("project.indexHtml", "index.html", index_html)
+            }
+            (ProjectKind::SingleCrateTrunkCsr, None) => Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                expected: "index.html for a single-crate-trunk-csr project",
+                actual: "missing".to_owned(),
+            }),
+            (
+                ProjectKind::SingleCrateNativeSsr
+                | ProjectKind::SingleCrateBrowserHydration
+                | ProjectKind::SharedLibraryCrate,
+                None,
+            ) => Ok(()),
+            (
+                ProjectKind::SingleCrateNativeSsr
+                | ProjectKind::SingleCrateBrowserHydration
+                | ProjectKind::SharedLibraryCrate,
+                Some(index_html),
+            ) => Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                expected: "absent unless project.kind is single-crate-trunk-csr",
+                actual: index_html.to_owned(),
+            }),
+        }
     }
 }
 
@@ -186,6 +214,29 @@ impl ProjectConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectKind {
     SingleCrateTrunkCsr,
+    SingleCrateNativeSsr,
+    SingleCrateBrowserHydration,
+    SharedLibraryCrate,
+}
+
+impl ProjectKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleCrateTrunkCsr => "single-crate-trunk-csr",
+            Self::SingleCrateNativeSsr => "single-crate-native-ssr",
+            Self::SingleCrateBrowserHydration => "single-crate-browser-hydration",
+            Self::SharedLibraryCrate => "shared-library-crate",
+        }
+    }
+
+    pub const fn render_mode_contract(self) -> RenderModeContract {
+        match self {
+            Self::SingleCrateTrunkCsr => RenderModeContract::Selected(RenderMode::Csr),
+            Self::SingleCrateNativeSsr => RenderModeContract::Selected(RenderMode::Ssr),
+            Self::SingleCrateBrowserHydration => RenderModeContract::Selected(RenderMode::Hydrate),
+            Self::SharedLibraryCrate => RenderModeContract::Neutral,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +244,8 @@ pub enum ProjectKind {
 pub struct LeptosConfig {
     pub version: String,
     pub router_version: String,
-    pub render_mode: RenderMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_mode: Option<RenderMode>,
 }
 
 impl LeptosConfig {
@@ -211,6 +263,25 @@ impl LeptosConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum RenderMode {
     Csr,
+    Hydrate,
+    Ssr,
+}
+
+impl RenderMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Csr => "csr",
+            Self::Hydrate => "hydrate",
+            Self::Ssr => "ssr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "mode", rename_all = "kebab-case")]
+pub enum RenderModeContract {
+    Neutral,
+    Selected(RenderMode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,13 +294,56 @@ pub struct InstallConfig {
 
 impl InstallConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        expect_path("install.uiDir", "src/components/ui", &self.ui_dir)?;
-        expect_path("install.uiMod", "src/components/ui/mod.rs", &self.ui_mod)?;
-        expect_path(
-            "install.componentsMod",
-            "src/components/mod.rs",
-            &self.components_mod,
-        )
+        validate_safe_rust_module_dir("install.uiDir", &self.ui_dir, 3)?;
+        validate_safe_relative_path("install.uiMod", &self.ui_mod)?;
+        let expected_ui_mod = format!("{}/mod.rs", self.ui_dir);
+        if self.ui_mod != expected_ui_mod {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiMod",
+                expected: "install.uiDir followed by /mod.rs",
+                actual: self.ui_mod.clone(),
+            });
+        }
+
+        validate_safe_relative_path("install.componentsMod", &self.components_mod)?;
+        let Some(components_root) = self.components_mod.strip_suffix("/mod.rs") else {
+            return Err(ConfigError::InvalidValue {
+                field: "install.componentsMod",
+                expected: "a components-root path under src/ followed by /mod.rs",
+                actual: self.components_mod.clone(),
+            });
+        };
+        validate_safe_rust_module_dir("install.componentsMod", components_root, 2)?;
+
+        let Some((ui_parent, _)) = self.ui_dir.rsplit_once('/') else {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiDir",
+                expected: "a direct child of the configured components root",
+                actual: self.ui_dir.clone(),
+            });
+        };
+        if ui_parent != components_root {
+            return Err(ConfigError::InvalidValue {
+                field: "install.uiDir",
+                expected: "a direct child of the configured components root",
+                actual: self.ui_dir.clone(),
+            });
+        }
+
+        let folded_ui_dir = self.ui_dir.to_ascii_lowercase();
+        let folded_kit_dir = DEFAULT_KIT_DIR.to_ascii_lowercase();
+        if folded_ui_dir == folded_kit_dir
+            || folded_ui_dir
+                .strip_prefix(&folded_kit_dir)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            return Err(ConfigError::PathOverlap {
+                field: "install.uiDir",
+                value: self.ui_dir.clone(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -287,6 +401,7 @@ impl DesiredItemConfig {
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Identity, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::RouterLink, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
@@ -309,6 +424,7 @@ pub enum DesiredItemName {
     Collapsible,
     Dialog,
     Field,
+    Identity,
     Menu,
     RouterLink,
     Spinner,
@@ -325,6 +441,7 @@ impl DesiredItemName {
             Self::Collapsible => "collapsible",
             Self::Dialog => "dialog",
             Self::Field => "field",
+            Self::Identity => "identity",
             Self::Menu => "menu",
             Self::RouterLink => "router-link",
             Self::Spinner => "spinner",
@@ -353,13 +470,14 @@ pub struct InstallRoots {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedProjectConfig {
     pub schema_version: String,
-    pub render_mode: RenderMode,
+    pub project_kind: ProjectKind,
+    pub render_mode: Option<RenderMode>,
     pub desired_items: Vec<DesiredItemConfig>,
     pub workspace_mode: WorkspaceMode,
     pub project_root: PathBuf,
     pub crate_root: PathBuf,
     pub source_root: PathBuf,
-    pub index_html: PathBuf,
+    pub index_html: Option<PathBuf>,
     pub install_roots: InstallRoots,
 }
 
@@ -406,12 +524,12 @@ fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigE
             kind: ProjectKind::SingleCrateTrunkCsr,
             crate_root: ".".to_owned(),
             src_dir: "src".to_owned(),
-            index_html: "index.html".to_owned(),
+            index_html: Some("index.html".to_owned()),
         },
         leptos: LeptosConfig {
             version: LEPTOS_VERSION.to_owned(),
             router_version: LEPTOS_ROUTER_VERSION.to_owned(),
-            render_mode: RenderMode::Csr,
+            render_mode: Some(RenderMode::Csr),
         },
         install: InstallConfig {
             ui_dir: DEFAULT_UI_DIR.to_owned(),
@@ -429,6 +547,52 @@ fn canonical_kit_config_from_tool(tool: ToolConfig) -> Result<KitConfig, ConfigE
     };
     config.validate()?;
     Ok(config)
+}
+
+fn validate_render_mode_contract(
+    project_kind: ProjectKind,
+    render_mode: Option<RenderMode>,
+) -> Result<(), ConfigError> {
+    let expected = project_kind.render_mode_contract();
+    let valid = matches!(
+        (expected, render_mode),
+        (RenderModeContract::Neutral, None)
+            | (
+                RenderModeContract::Selected(RenderMode::Csr),
+                Some(RenderMode::Csr)
+            )
+            | (
+                RenderModeContract::Selected(RenderMode::Hydrate),
+                Some(RenderMode::Hydrate)
+            )
+            | (
+                RenderModeContract::Selected(RenderMode::Ssr),
+                Some(RenderMode::Ssr)
+            )
+    );
+    if valid {
+        return Ok(());
+    }
+
+    Err(ConfigError::InvalidValue {
+        field: "leptos.renderMode",
+        expected: match expected {
+            RenderModeContract::Neutral => "absent for a shared-library-crate project",
+            RenderModeContract::Selected(RenderMode::Csr) => {
+                "csr for a single-crate-trunk-csr project"
+            }
+            RenderModeContract::Selected(RenderMode::Hydrate) => {
+                "hydrate for a single-crate-browser-hydration project"
+            }
+            RenderModeContract::Selected(RenderMode::Ssr) => {
+                "ssr for a single-crate-native-ssr project"
+            }
+        },
+        actual: render_mode
+            .map(RenderMode::as_str)
+            .unwrap_or("missing")
+            .to_owned(),
+    })
 }
 
 /// Replaces a configuration's tool source with this binary's proven Git
@@ -501,6 +665,13 @@ pub fn desired_builtin_field_item() -> DesiredItemConfig {
     }
 }
 
+pub fn desired_builtin_identity_item() -> DesiredItemConfig {
+    DesiredItemConfig {
+        name: DesiredItemName::Identity,
+        source: RegistrySource::Builtin,
+    }
+}
+
 pub fn desired_builtin_menu_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Menu,
@@ -559,7 +730,11 @@ fn validate_desired_items(items: &[DesiredItemConfig]) -> Result<(), ConfigError
 }
 
 fn validate_git_rev(field: &'static str, rev: &str) -> Result<(), ConfigError> {
-    if rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if rev.len() == 40
+        && rev
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
         Ok(())
     } else {
         Err(ConfigError::InvalidValue {
@@ -587,9 +762,17 @@ pub fn parse_kit_json_str(input: &str) -> Result<KitConfig, ConfigError> {
     Ok(config)
 }
 
-pub fn normalize_single_crate_project(
+pub fn normalize_project(
     config: &KitConfig,
     options: &NormalizeOptions,
+) -> Result<NormalizedProjectConfig, ConfigError> {
+    normalize_project_with_workspace_mode(config, options, WorkspaceMode::SingleCrate)
+}
+
+pub fn normalize_project_with_workspace_mode(
+    config: &KitConfig,
+    options: &NormalizeOptions,
+    workspace_mode: WorkspaceMode,
 ) -> Result<NormalizedProjectConfig, ConfigError> {
     config.validate()?;
 
@@ -600,17 +783,19 @@ pub fn normalize_single_crate_project(
         "project.crateRoot",
     )?;
     let source_root = join_checked(&project_root, &config.project.src_dir, "project.srcDir")?;
-    let index_html = join_checked(
-        &project_root,
-        &config.project.index_html,
-        "project.indexHtml",
-    )?;
+    let index_html = config
+        .project
+        .index_html
+        .as_deref()
+        .map(|path| join_checked(&project_root, path, "project.indexHtml"))
+        .transpose()?;
 
     Ok(NormalizedProjectConfig {
         schema_version: config.schema_version.clone(),
+        project_kind: config.project.kind,
         render_mode: config.leptos.render_mode,
         desired_items: config.items.clone(),
-        workspace_mode: WorkspaceMode::SingleCrate,
+        workspace_mode,
         project_root: project_root.clone(),
         crate_root,
         source_root,
@@ -626,6 +811,13 @@ pub fn normalize_single_crate_project(
             css_file: join_checked(&project_root, &config.styles.css, "styles.css")?,
         },
     })
+}
+
+pub fn normalize_single_crate_project(
+    config: &KitConfig,
+    options: &NormalizeOptions,
+) -> Result<NormalizedProjectConfig, ConfigError> {
+    normalize_project(config, options)
 }
 
 fn expect_string(
@@ -727,6 +919,72 @@ fn validate_safe_relative_path(field: &'static str, value: &str) -> Result<(), C
     Ok(())
 }
 
+fn validate_safe_rust_module_dir(
+    field: &'static str,
+    value: &str,
+    minimum_segments: usize,
+) -> Result<(), ConfigError> {
+    validate_safe_relative_path(field, value)?;
+    let segments = value.split('/').collect::<Vec<_>>();
+    if segments.len() < minimum_segments || segments.first() != Some(&"src") {
+        return Err(ConfigError::InvalidValue {
+            field,
+            expected: "a safe Rust module directory under src/",
+            actual: value.to_owned(),
+        });
+    }
+    for segment in segments.iter().skip(1) {
+        if !is_rust_module_identifier(segment) || *segment == "_kit" {
+            return Err(ConfigError::UnsafePathSegment {
+                field,
+                value: value.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_rust_module_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return false;
+    }
+    !crate::item::is_rust_2024_keyword(value)
+}
+
+fn validate_distinct_file_targets(config: &KitConfig) -> Result<(), ConfigError> {
+    const KIT_LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+    let targets = [
+        ("install.uiMod", Some(config.install.ui_mod.as_str())),
+        (
+            "install.componentsMod",
+            Some(config.install.components_mod.as_str()),
+        ),
+        ("styles.css", Some(config.styles.css.as_str())),
+        ("project.indexHtml", config.project.index_html.as_deref()),
+        ("kit.config", Some(DEFAULT_KIT_CONFIG_PATH)),
+        ("kit.lock", Some(KIT_LOCK_PATH)),
+    ];
+    let mut seen = BTreeSet::new();
+    for (field, value) in targets
+        .into_iter()
+        .filter_map(|(field, value)| value.map(|value| (field, value)))
+    {
+        if !seen.insert(value.to_ascii_lowercase()) {
+            return Err(ConfigError::PathOverlap {
+                field,
+                value: value.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn join_checked(
     project_root: &Path,
     relative: &str,
@@ -812,7 +1070,7 @@ mod tests {
         assert!(matches!(config.tool.source, ToolSourceConfig::Git { .. }));
         assert_eq!(config.leptos.version, LEPTOS_VERSION);
         assert_eq!(config.leptos.router_version, LEPTOS_ROUTER_VERSION);
-        assert_eq!(config.leptos.render_mode, RenderMode::Csr);
+        assert_eq!(config.leptos.render_mode, Some(RenderMode::Csr));
         assert_eq!(config.styles.mode, StylesMode::PureCss);
         assert_eq!(config.registry.source, RegistrySource::Builtin);
         assert!(config.items.is_empty());
@@ -874,6 +1132,7 @@ mod tests {
             DesiredItemName::Collapsible,
             DesiredItemName::Dialog,
             DesiredItemName::Field,
+            DesiredItemName::Identity,
             DesiredItemName::Menu,
             DesiredItemName::RouterLink,
             DesiredItemName::Spinner,
@@ -922,6 +1181,23 @@ mod tests {
         assert!(
             matches!(error, ConfigError::InvalidValue { field, .. } if field == "tool.source.url")
         );
+    }
+
+    #[test]
+    fn rejects_null_missing_cross_kind_and_unknown_tool_source_fields() {
+        for source in [
+            serde_json::json!({"kind": "git", "url": null, "rev": TEST_REV_A}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": null}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": TEST_REV_A, "version": "1"}),
+            serde_json::json!({"kind": "git", "url": TOOL_GIT_URL, "rev": TEST_REV_A, "branch": "main"}),
+        ] {
+            let mut config: serde_json::Value =
+                serde_json::from_str(&valid_config_json()).expect("parse fixture");
+            config["tool"]["source"] = source.clone();
+            let input = serde_json::to_string(&config).expect("serialize fixture");
+            assert!(parse_kit_json_str(&input).is_err(), "{source}");
+        }
     }
 
     #[test]
@@ -989,13 +1265,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_csr_render_mode() {
+    fn rejects_render_mode_that_does_not_match_project_kind() {
         let input =
             valid_config_json().replace("\"renderMode\": \"csr\"", "\"renderMode\": \"hydrate\"");
 
         let error = parse_kit_json_str(&input).expect_err("hydrate should fail");
 
-        assert!(matches!(error, ConfigError::Parse(_)));
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "leptos.renderMode",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1077,7 +1359,7 @@ mod tests {
         )
         .expect("normalize");
 
-        assert_eq!(normalized.render_mode, RenderMode::Csr);
+        assert_eq!(normalized.render_mode, Some(RenderMode::Csr));
         assert_eq!(normalized.source_root, PathBuf::from("/workspace/demo/src"));
         assert_eq!(
             normalized.install_roots.ui_dir,
@@ -1087,5 +1369,196 @@ mod tests {
             normalized.install_roots.css_file,
             PathBuf::from("/workspace/demo/styles/kit.css")
         );
+        assert_eq!(normalized.project_kind, ProjectKind::SingleCrateTrunkCsr);
+        assert_eq!(
+            normalized.index_html,
+            Some(PathBuf::from("/workspace/demo/index.html"))
+        );
+    }
+
+    #[test]
+    fn shared_library_project_omits_index_html_and_normalizes_safely() {
+        let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        config.project.kind = ProjectKind::SharedLibraryCrate;
+        config.project.index_html = None;
+        config.leptos.render_mode = None;
+
+        let encoded = kit_config_to_json(&config).expect("serialize shared config");
+        assert!(encoded.contains("\"kind\": \"shared-library-crate\""));
+        assert!(!encoded.contains("\"indexHtml\""));
+
+        let parsed = parse_kit_json_str(&encoded).expect("parse shared config");
+        let normalized = normalize_project(
+            &parsed,
+            &NormalizeOptions {
+                project_root: PathBuf::from("/workspace/shared_ui"),
+            },
+        )
+        .expect("normalize shared project");
+        assert_eq!(normalized.project_kind, ProjectKind::SharedLibraryCrate);
+        assert_eq!(normalized.render_mode, None);
+        assert_eq!(normalized.index_html, None);
+        assert_eq!(
+            normalized.install_roots.ui_dir,
+            PathBuf::from("/workspace/shared_ui/src/components/ui")
+        );
+    }
+
+    #[test]
+    fn native_ssr_and_browser_hydration_projects_round_trip_exact_modes() {
+        for (kind, mode, serialized_kind) in [
+            (
+                ProjectKind::SingleCrateNativeSsr,
+                RenderMode::Ssr,
+                "single-crate-native-ssr",
+            ),
+            (
+                ProjectKind::SingleCrateBrowserHydration,
+                RenderMode::Hydrate,
+                "single-crate-browser-hydration",
+            ),
+        ] {
+            let mut config = parse_kit_json_str(&valid_config_json()).expect("canonical config");
+            config.project.kind = kind;
+            config.project.index_html = None;
+            config.leptos.render_mode = Some(mode);
+
+            let encoded = kit_config_to_json(&config).expect("serialize delivery config");
+            assert!(encoded.contains(&format!("\"kind\": \"{serialized_kind}\"")));
+            assert!(encoded.contains(&format!("\"renderMode\": \"{}\"", mode.as_str())));
+            assert!(!encoded.contains("\"indexHtml\""));
+
+            let parsed = parse_kit_json_str(&encoded).expect("parse delivery config");
+            assert_eq!(
+                parsed.project.kind.render_mode_contract(),
+                RenderModeContract::Selected(mode)
+            );
+            assert_eq!(parsed.leptos.render_mode, Some(mode));
+        }
+    }
+
+    #[test]
+    fn project_kind_and_index_html_contract_fails_closed() {
+        let mut trunk = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        trunk.project.index_html = None;
+        assert!(matches!(
+            trunk.validate(),
+            Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                ..
+            })
+        ));
+
+        let mut shared = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        shared.project.kind = ProjectKind::SharedLibraryCrate;
+        assert!(matches!(
+            shared.validate(),
+            Err(ConfigError::InvalidValue {
+                field: "project.indexHtml",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn accepts_and_normalizes_a_coherent_custom_components_root() {
+        let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+        config.install = InstallConfig {
+            ui_dir: "src/widgets/kit_ui".to_owned(),
+            ui_mod: "src/widgets/kit_ui/mod.rs".to_owned(),
+            components_mod: "src/widgets/mod.rs".to_owned(),
+        };
+        let serialized = kit_config_to_json(&config).expect("serialize custom root");
+        let parsed = parse_kit_json_str(&serialized).expect("parse custom root");
+        let normalized = normalize_single_crate_project(
+            &parsed,
+            &NormalizeOptions {
+                project_root: PathBuf::from("/workspace/demo"),
+            },
+        )
+        .expect("normalize custom root");
+
+        assert_eq!(
+            normalized.install_roots.components_mod,
+            PathBuf::from("/workspace/demo/src/widgets/mod.rs")
+        );
+        assert_eq!(
+            normalized.install_roots.ui_dir,
+            PathBuf::from("/workspace/demo/src/widgets/kit_ui")
+        );
+        assert_eq!(
+            normalized.install_roots.ui_mod,
+            PathBuf::from("/workspace/demo/src/widgets/kit_ui/mod.rs")
+        );
+    }
+
+    #[test]
+    fn rejects_incoherent_or_unsafe_custom_components_roots() {
+        let cases = [
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/kit_ui".to_owned(),
+                    ui_mod: "src/widgets/other/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiMod",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/Widgets/kit_ui".to_owned(),
+                    ui_mod: "src/widgets/kit_ui/mod.rs".to_owned(),
+                    components_mod: "src/Widgets/mod.rs".to_owned(),
+                },
+                "install.uiMod",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/other/kit_ui".to_owned(),
+                    ui_mod: "src/other/kit_ui/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/ui-kit".to_owned(),
+                    ui_mod: "src/widgets/ui-kit/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/widgets/type".to_owned(),
+                    ui_mod: "src/widgets/type/mod.rs".to_owned(),
+                    components_mod: "src/widgets/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+            (
+                InstallConfig {
+                    ui_dir: "src/components/ui/_kit".to_owned(),
+                    ui_mod: "src/components/ui/_kit/mod.rs".to_owned(),
+                    components_mod: "src/components/ui/mod.rs".to_owned(),
+                },
+                "install.uiDir",
+            ),
+        ];
+
+        for (install, expected_field) in cases {
+            let mut config = parse_kit_json_str(&valid_config_json()).expect("parse config");
+            config.install = install;
+            let error = config.validate().expect_err("unsafe custom root must fail");
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::InvalidValue { field, .. }
+                        | ConfigError::UnsafePathSegment { field, .. }
+                        | ConfigError::PathOverlap { field, .. }
+                        if field == expected_field
+                ),
+                "unexpected error for {expected_field}: {error}"
+            );
+        }
     }
 }

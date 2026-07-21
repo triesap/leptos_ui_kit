@@ -9,7 +9,11 @@
   "leptos": {
     "version": "0.9.0-alpha",
     "routerVersion": "0.9.0-alpha",
-    "renderMode": "csr"
+    "renderModes": [
+      "csr",
+      "hydrate",
+      "ssr"
+    ]
   },
   "accessibility": {
     "behaviors": [
@@ -23,6 +27,14 @@
       },
       {
         "name": "hidden-closed-content",
+        "required": true
+      },
+      {
+        "name": "stable-hydration-identity",
+        "required": true
+      },
+      {
+        "name": "ssr-attribute-projection",
         "required": true
       }
     ],
@@ -76,6 +88,7 @@
     }
   ],
   "registryDependencies": [
+    "identity",
     "tokens"
   ],
   "cargoPlan": [
@@ -85,18 +98,18 @@
         "kind": "version",
         "version": "0.9.0-alpha"
       },
-      "features": [
-        "csr"
-      ],
+      "features": [],
       "required": true
     },
     {
       "crate": "web_ui_primitives",
       "source": {
-        "kind": "version",
-        "version": "0.1.0"
+        "kind": "git",
+        "url": "https://github.com/triesap/web_ui_primitives",
+        "rev": "a7ad19e203c08be19040154fa6bce909701d402f"
       },
       "features": [
+        "core",
         "leptos"
       ],
       "required": true

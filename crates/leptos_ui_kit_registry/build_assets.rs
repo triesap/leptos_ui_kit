@@ -60,7 +60,7 @@ impl AssetSpec {
     }
 }
 
-pub const ASSET_SPECS: [AssetSpec; 68] = [
+pub const ASSET_SPECS: [AssetSpec; 72] = [
     AssetSpec::same("registry/contracts/theme-v1.json", AssetKind::Json),
     AssetSpec::same("registry/foundation/tokens.json", AssetKind::Json),
     AssetSpec::same("registry/registry.json", AssetKind::Json),
@@ -105,6 +105,8 @@ pub const ASSET_SPECS: [AssetSpec; 68] = [
     AssetSpec::same("registry/ui/field/text_area_field.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/field/text_field.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/field/text_input.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/identity.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/identity.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/menu.json", AssetKind::Json),
     AssetSpec::same("registry/ui/menu/content.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/menu/item.rs", AssetKind::Rust),
@@ -125,6 +127,11 @@ pub const ASSET_SPECS: [AssetSpec; 68] = [
     AssetSpec::same("registry/ui/tabs/panel.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/tabs/root.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/tabs/trigger.rs", AssetKind::Rust),
+    AssetSpec::same(
+        "schema/0.2.0/theme-integration.schema.json",
+        AssetKind::Json,
+    ),
+    AssetSpec::same("schema/0.2.0/token-contract.schema.json", AssetKind::Json),
     AssetSpec::same("schema/0.9.0-alpha/kit.schema.json", AssetKind::Json),
     AssetSpec::same(
         "schema/0.9.0-alpha/registry-item.schema.json",

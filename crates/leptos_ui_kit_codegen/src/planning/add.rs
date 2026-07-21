@@ -3,15 +3,15 @@ use std::path::Path;
 use leptos_ui_kit_registry::{
     DEFAULT_KIT_CONFIG_PATH, KitConfig, RegistryError, desired_builtin_anchor_item,
     desired_builtin_button_item, desired_builtin_collapsible_item, desired_builtin_dialog_item,
-    desired_builtin_field_item, desired_builtin_menu_item, desired_builtin_router_link_item,
-    desired_builtin_spinner_item, desired_builtin_status_item, desired_builtin_tabs_item,
-    desired_builtin_tokens_item, kit_config_for_write, kit_config_to_json,
-    kit_config_with_desired_item, load_built_in_registry_item, parse_kit_json_str,
-    resolve_built_in_registry_items,
+    desired_builtin_field_item, desired_builtin_identity_item, desired_builtin_menu_item,
+    desired_builtin_router_link_item, desired_builtin_spinner_item, desired_builtin_status_item,
+    desired_builtin_tabs_item, desired_builtin_tokens_item, kit_config_for_write,
+    kit_config_to_json, kit_config_with_desired_item, load_built_in_registry_item,
+    parse_kit_json_str, resolve_built_in_registry_items,
 };
 
 use super::{
-    KitConfigWriter, built_in_item_id, plan_init_with_context, plan_sync_from_config,
+    KitConfigWriter, built_in_item_id, plan_add_prerequisites_with_context, plan_sync_from_config,
     planned_or_existing_kit_config_content, prepare_kit_config_write, upsert_planned_file,
 };
 use crate::path_safety::PlanningContext;
@@ -45,7 +45,8 @@ pub(crate) fn plan_add_with_context(
     let item_id = built_in_item_id(&item.item.name);
     let item_name = item.item.name.clone();
     let content_hash = item.content_hash.clone();
-    let init_plan = plan_init_with_context(context, project_root, kit_config_to_canonical_json)?;
+    let init_plan =
+        plan_add_prerequisites_with_context(context, project_root, kit_config_to_canonical_json)?;
     let existing_config_content =
         planned_or_existing_kit_config_content(context, &init_plan.files)?;
     let config = parse_kit_json_str(&existing_config_content)?;
@@ -115,6 +116,7 @@ pub(crate) fn desired_builtin_item(
         "collapsible" => Ok(desired_builtin_collapsible_item()),
         "dialog" => Ok(desired_builtin_dialog_item()),
         "field" => Ok(desired_builtin_field_item()),
+        "identity" => Ok(desired_builtin_identity_item()),
         "menu" => Ok(desired_builtin_menu_item()),
         "router-link" => Ok(desired_builtin_router_link_item()),
         "spinner" => Ok(desired_builtin_spinner_item()),

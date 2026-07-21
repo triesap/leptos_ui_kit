@@ -1,15 +1,50 @@
-use std::{ops::Range, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
+
+use syn::{Item, ItemMod, ItemUse, UseTree, Visibility};
 
 use super::unsafe_patch;
 use crate::{CodegenError, UiModuleExport};
 
-type GroupedPubUseRanges = Vec<(Range<usize>, Vec<String>)>;
+const MAX_MODULE_SOURCE_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UseBinding {
+    source: Vec<String>,
+    exported: String,
+    public: bool,
+}
+
+#[derive(Debug, Default)]
+struct ModuleFacts {
+    modules: Vec<ModuleDeclaration>,
+    uses: Vec<UseBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleDeclaration {
+    name: String,
+    public: bool,
+    external: bool,
+}
 
 pub fn patch_components_mod(existing: Option<&str>) -> Result<String, CodegenError> {
-    patch_module_lines(
+    patch_components_mod_at_path(existing, "src/components/mod.rs", "ui")
+}
+
+pub(crate) fn patch_components_mod_at_path(
+    existing: Option<&str>,
+    logical_path: &str,
+    ui_module_name: &str,
+) -> Result<String, CodegenError> {
+    validate_patch_identifier(ui_module_name, "UI module name", Path::new(logical_path))?;
+    patch_module_file(
         existing.unwrap_or_default(),
-        "src/components/mod.rs",
-        &["pub mod ui;"],
+        logical_path,
+        &[ui_module_name],
+        &[],
     )
 }
 
@@ -17,264 +52,295 @@ pub fn patch_ui_mod(
     existing: Option<&str>,
     exports: &[UiModuleExport],
 ) -> Result<String, CodegenError> {
-    let mut lines = Vec::new();
+    patch_ui_mod_at_path(existing, exports, "src/components/ui/mod.rs")
+}
 
+pub(crate) fn patch_ui_mod_at_path(
+    existing: Option<&str>,
+    exports: &[UiModuleExport],
+    logical_path: &str,
+) -> Result<String, CodegenError> {
     for export in exports {
-        validate_patch_identifier(
-            &export.module,
-            "UI module name",
-            Path::new("src/components/ui/mod.rs"),
-        )?;
-        validate_module_path(
-            &export.path,
-            "UI export path",
-            Path::new("src/components/ui/mod.rs"),
-        )?;
+        validate_patch_identifier(&export.module, "UI module name", Path::new(logical_path))?;
+        validate_module_path(&export.path, "UI export path", Path::new(logical_path))?;
         for symbol in &export.symbols {
-            validate_patch_identifier(
-                symbol,
-                "UI export symbol",
-                Path::new("src/components/ui/mod.rs"),
-            )?;
-        }
-
-        lines.push(format!("pub mod {};", export.module));
-        if !export.symbols.is_empty() {
-            if let [symbol] = export.symbols.as_slice() {
-                lines.push(format!("pub use {}::{};", export.path, symbol));
-            } else {
-                lines.push(format_grouped_pub_use(&export.path, &export.symbols));
-            }
+            validate_patch_identifier(symbol, "UI export symbol", Path::new(logical_path))?;
         }
     }
 
-    let borrowed = lines.iter().map(String::as_str).collect::<Vec<_>>();
-    patch_module_lines(
+    let required_modules = exports
+        .iter()
+        .map(|export| export.module.as_str())
+        .collect::<Vec<_>>();
+    patch_module_file(
         existing.unwrap_or_default(),
-        "src/components/ui/mod.rs",
-        &borrowed,
+        logical_path,
+        &required_modules,
+        exports,
     )
 }
 
-fn patch_module_lines(
+fn patch_module_file(
     existing: &str,
     logical_path: &str,
-    required_lines: &[&str],
+    required_modules: &[&str],
+    required_exports: &[UiModuleExport],
 ) -> Result<String, CodegenError> {
-    let mut output = existing.to_owned();
+    let facts = inspect_module_file(existing, logical_path)?;
+    let mut appended = Vec::new();
+    let mut seen_modules = BTreeSet::new();
+    let mut satisfied_bindings = facts
+        .uses
+        .iter()
+        .filter(|binding| binding.public)
+        .map(|binding| (binding.source.clone(), binding.exported.clone()))
+        .collect::<BTreeSet<_>>();
 
-    for line in required_lines {
-        if line.trim() != *line || line.is_empty() {
-            return unsafe_patch(logical_path, "module patch line must be normalized");
-        }
-        if let Some(patched) = consolidate_grouped_pub_use(&output, line)? {
-            output = patched;
-            continue;
-        }
-        if module_line_exists(&output, line)? {
-            continue;
-        }
-        if detects_private_module_conflict(&output, line) {
-            return unsafe_patch(
+    if required_exports.is_empty() {
+        for module_name in required_modules {
+            plan_required_module(
+                &facts,
+                &mut seen_modules,
+                &mut appended,
                 logical_path,
-                format!("private module declaration conflicts with required line `{line}`"),
-            );
+                module_name,
+            )?;
         }
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
+    }
+
+    for export in required_exports {
+        plan_required_module(
+            &facts,
+            &mut seen_modules,
+            &mut appended,
+            logical_path,
+            &export.module,
+        )?;
+        let source_prefix = export.path.split("::").collect::<Vec<_>>();
+        let missing = export
+            .symbols
+            .iter()
+            .filter_map(|symbol| {
+                let mut required_source = source_prefix
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect::<Vec<_>>();
+                required_source.push(symbol.clone());
+
+                if satisfied_bindings.contains(&(required_source.clone(), symbol.clone())) {
+                    return None;
+                }
+
+                Some((symbol, required_source))
+            })
+            .collect::<Vec<_>>();
+
+        for (symbol, required_source) in &missing {
+            if facts.uses.iter().any(|binding| {
+                binding.exported.as_str() == symbol.as_str()
+                    && (!binding.public || binding.source.as_slice() != required_source.as_slice())
+            }) {
+                return unsafe_patch(
+                    logical_path,
+                    format!(
+                        "private or incompatible use declaration blocks required public export `{}`",
+                        symbol
+                    ),
+                );
+            }
         }
+
+        let missing_symbols = missing
+            .iter()
+            .map(|(symbol, _)| (*symbol).clone())
+            .collect::<Vec<_>>();
+        match missing_symbols.as_slice() {
+            [] => {}
+            [symbol] => appended.push(format!("pub use {}::{symbol};", export.path)),
+            symbols => appended.push(format_grouped_pub_use(&export.path, symbols)),
+        }
+        for (symbol, source) in missing {
+            satisfied_bindings.insert((source, symbol.clone()));
+        }
+    }
+
+    append_module_lines(existing, logical_path, &appended)
+}
+
+fn plan_required_module(
+    facts: &ModuleFacts,
+    seen_modules: &mut BTreeSet<String>,
+    appended: &mut Vec<String>,
+    logical_path: &str,
+    module_name: &str,
+) -> Result<(), CodegenError> {
+    if !seen_modules.insert(module_name.to_owned()) {
+        return Ok(());
+    }
+    match module_declaration_state(facts, module_name) {
+        DeclarationState::Present => Ok(()),
+        DeclarationState::Missing => {
+            appended.push(format!("pub mod {module_name};"));
+            Ok(())
+        }
+        DeclarationState::Conflict => unsafe_patch(
+            logical_path,
+            format!(
+                "private or incompatible module declaration blocks required public module `{module_name}`"
+            ),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclarationState {
+    Present,
+    Missing,
+    Conflict,
+}
+
+fn module_declaration_state(facts: &ModuleFacts, required: &str) -> DeclarationState {
+    let matching = facts
+        .modules
+        .iter()
+        .filter(|declaration| declaration.name == required)
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        DeclarationState::Missing
+    } else if matching
+        .iter()
+        .all(|declaration| declaration.public && declaration.external)
+    {
+        DeclarationState::Present
+    } else {
+        DeclarationState::Conflict
+    }
+}
+
+fn inspect_module_file(existing: &str, logical_path: &str) -> Result<ModuleFacts, CodegenError> {
+    if existing.len() > MAX_MODULE_SOURCE_BYTES {
+        return unsafe_patch(
+            logical_path,
+            format!(
+                "module source exceeds the {MAX_MODULE_SOURCE_BYTES}-byte additive inspection limit"
+            ),
+        );
+    }
+    let syntax = syn::parse_file(existing).map_err(|error| CodegenError::UnsafePatch {
+        path: PathBuf::from(logical_path),
+        reason: format!("module source must parse as Rust before additive patching: {error}"),
+    })?;
+    let mut facts = ModuleFacts::default();
+
+    for item in syntax.items {
+        match item {
+            Item::Mod(item_mod) => facts.modules.push(module_declaration(item_mod)),
+            Item::Use(item_use) => collect_item_use(item_use, &mut facts.uses),
+            _ => {}
+        }
+    }
+
+    Ok(facts)
+}
+
+fn module_declaration(item: ItemMod) -> ModuleDeclaration {
+    ModuleDeclaration {
+        name: item.ident.to_string(),
+        public: is_public(&item.vis),
+        external: item.content.is_none(),
+    }
+}
+
+fn collect_item_use(item: ItemUse, bindings: &mut Vec<UseBinding>) {
+    let mut prefix = Vec::new();
+    if item.leading_colon.is_some() {
+        prefix.push(String::new());
+    }
+    collect_use_tree(&item.tree, &mut prefix, is_public(&item.vis), bindings);
+}
+
+fn collect_use_tree(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    public: bool,
+    bindings: &mut Vec<UseBinding>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree(&path.tree, prefix, public, bindings);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            let name = name.ident.to_string();
+            let (source, exported) = if name == "self" {
+                (
+                    prefix.clone(),
+                    prefix.last().cloned().unwrap_or_else(|| "self".to_owned()),
+                )
+            } else {
+                let mut source = prefix.clone();
+                source.push(name.clone());
+                (source, name)
+            };
+            bindings.push(UseBinding {
+                source,
+                exported,
+                public,
+            });
+        }
+        UseTree::Rename(rename) => {
+            let mut source = prefix.clone();
+            let source_name = rename.ident.to_string();
+            if source_name != "self" {
+                source.push(source_name);
+            }
+            bindings.push(UseBinding {
+                source,
+                exported: rename.rename.to_string(),
+                public,
+            });
+        }
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_tree(tree, prefix, public, bindings);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn is_public(visibility: &Visibility) -> bool {
+    matches!(visibility, Visibility::Public(_))
+}
+
+fn append_module_lines(
+    existing: &str,
+    logical_path: &str,
+    lines: &[String],
+) -> Result<String, CodegenError> {
+    if lines.is_empty() {
+        return Ok(existing.to_owned());
+    }
+    if lines
+        .iter()
+        .any(|line| line.is_empty() || line.trim() != line)
+    {
+        return unsafe_patch(logical_path, "module patch line must be normalized");
+    }
+
+    let mut output = String::with_capacity(
+        existing.len() + lines.iter().map(String::len).sum::<usize>() + lines.len() + 1,
+    );
+    output.push_str(existing);
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    for line in lines {
         output.push_str(line);
         output.push('\n');
     }
-
     Ok(output)
-}
-
-fn consolidate_grouped_pub_use(
-    existing: &str,
-    required_line: &str,
-) -> Result<Option<String>, CodegenError> {
-    let Some((path, required_symbols)) = parse_grouped_pub_use(required_line)? else {
-        return Ok(None);
-    };
-    let grouped_ranges = grouped_pub_use_ranges(existing, path)?;
-    let single_ranges = single_pub_use_ranges(existing, path)?;
-    if grouped_ranges.is_empty() && single_ranges.is_empty() {
-        return Ok(None);
-    }
-    let symbols = required_symbols
-        .iter()
-        .map(|symbol| (*symbol).to_owned())
-        .collect::<Vec<_>>();
-    if grouped_ranges.len() == 1 && single_ranges.is_empty() && grouped_ranges[0].1 == symbols {
-        return Ok(None);
-    }
-
-    let replacement = format_grouped_pub_use(path, &symbols);
-    let mut ranges = grouped_ranges
-        .into_iter()
-        .map(|(range, _)| range)
-        .chain(single_ranges.into_iter().map(|(range, _)| range))
-        .collect::<Vec<_>>();
-    ranges.sort_by_key(|range| range.start);
-
-    let mut output = String::new();
-    let mut last = 0;
-    for (index, range) in ranges.iter().enumerate() {
-        output.push_str(&existing[last..range.start]);
-        if index == 0 {
-            output.push_str(&replacement);
-            if existing[range.clone()].ends_with('\n') && !replacement.ends_with('\n') {
-                output.push('\n');
-            }
-        }
-        last = range.end;
-    }
-    output.push_str(&existing[last..]);
-
-    Ok(Some(output))
-}
-
-fn single_pub_use_ranges(
-    existing: &str,
-    path: &str,
-) -> Result<Vec<(Range<usize>, String)>, CodegenError> {
-    let prefix = format!("pub use {path}::");
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-
-    for line in existing.split_inclusive('\n') {
-        let line_start = offset;
-        let line_end = line_start + line.len();
-        offset = line_end;
-
-        let trimmed = line.trim();
-        let Some(symbol) = trimmed
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(';'))
-        else {
-            continue;
-        };
-        if symbol.contains('{') || symbol.contains(',') {
-            continue;
-        }
-
-        validate_patch_identifier(
-            symbol,
-            "UI export symbol",
-            Path::new("src/components/ui/mod.rs"),
-        )?;
-        ranges.push((line_start..line_end, symbol.to_owned()));
-    }
-
-    Ok(ranges)
-}
-
-fn module_line_exists(existing: &str, required_line: &str) -> Result<bool, CodegenError> {
-    if existing
-        .lines()
-        .any(|existing_line| existing_line.trim() == required_line)
-    {
-        return Ok(true);
-    }
-
-    let Some((path, symbols)) = parse_grouped_pub_use(required_line)? else {
-        return Ok(false);
-    };
-
-    let marker = format!("pub use {path}::{{");
-    let mut offset = 0;
-    while let Some(relative_start) = existing[offset..].find(&marker) {
-        let start = offset + relative_start + marker.len();
-        let Some(relative_end) = existing[start..].find("};") else {
-            return Ok(false);
-        };
-        let end = start + relative_end;
-        if grouped_pub_use_contains(&existing[start..end], &symbols) {
-            return Ok(true);
-        }
-        offset = end + 2;
-    }
-
-    Ok(false)
-}
-
-fn grouped_pub_use_ranges(existing: &str, path: &str) -> Result<GroupedPubUseRanges, CodegenError> {
-    let marker = format!("pub use {path}::{{");
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    while let Some(relative_start) = existing[offset..].find(&marker) {
-        let start = offset + relative_start;
-        let body_start = start + marker.len();
-        let Some(relative_end) = existing[body_start..].find("};") else {
-            break;
-        };
-        let body_end = body_start + relative_end;
-        let end = body_end + 2;
-        let symbols = existing[body_start..body_end]
-            .split(',')
-            .map(str::trim)
-            .filter(|symbol| !symbol.is_empty())
-            .map(|symbol| {
-                validate_patch_identifier(
-                    symbol,
-                    "UI export symbol",
-                    Path::new("src/components/ui/mod.rs"),
-                )?;
-                Ok(symbol.to_owned())
-            })
-            .collect::<Result<Vec<_>, CodegenError>>()?;
-        ranges.push((start..end, symbols));
-        offset = end;
-    }
-
-    Ok(ranges)
-}
-
-fn parse_grouped_pub_use(required_line: &str) -> Result<Option<(&str, Vec<&str>)>, CodegenError> {
-    let Some(body) = required_line
-        .strip_prefix("pub use ")
-        .and_then(|line| line.strip_suffix("};"))
-    else {
-        return Ok(None);
-    };
-    let Some((path, symbols)) = body.split_once("::{") else {
-        return Ok(None);
-    };
-    validate_module_path(
-        path,
-        "UI export path",
-        Path::new("src/components/ui/mod.rs"),
-    )?;
-    let symbols = symbols
-        .split(',')
-        .map(str::trim)
-        .filter(|symbol| !symbol.is_empty())
-        .collect::<Vec<_>>();
-    if symbols.is_empty() {
-        return Ok(None);
-    }
-    for symbol in &symbols {
-        validate_patch_identifier(
-            symbol,
-            "UI export symbol",
-            Path::new("src/components/ui/mod.rs"),
-        )?;
-    }
-
-    Ok(Some((path, symbols)))
-}
-
-fn grouped_pub_use_contains(existing_symbols: &str, required_symbols: &[&str]) -> bool {
-    let existing_symbols = existing_symbols
-        .split(',')
-        .map(str::trim)
-        .filter(|symbol| !symbol.is_empty())
-        .collect::<Vec<_>>();
-
-    required_symbols
-        .iter()
-        .all(|symbol| existing_symbols.iter().any(|existing| existing == symbol))
 }
 
 fn format_grouped_pub_use(path: &str, symbols: &[String]) -> String {
@@ -308,19 +374,6 @@ fn format_grouped_pub_use(path: &str, symbols: &[String]) -> String {
     }
     output.push_str("};");
     output
-}
-
-fn detects_private_module_conflict(existing: &str, required_line: &str) -> bool {
-    let Some(module_name) = required_line
-        .strip_prefix("pub mod ")
-        .and_then(|line| line.strip_suffix(';'))
-    else {
-        return false;
-    };
-    let private_line = format!("mod {module_name};");
-    existing
-        .lines()
-        .any(|existing_line| existing_line.trim() == private_line)
 }
 
 fn validate_patch_identifier(value: &str, label: &str, path: &Path) -> Result<(), CodegenError> {

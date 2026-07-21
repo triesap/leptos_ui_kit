@@ -15,13 +15,26 @@ use tempfile::tempdir;
 mod package_workspace_support;
 
 use package_workspace_support::{
-    PACKAGE_NAMES, assert_full_revision, assert_local_package_metadata, assert_success,
-    cargo_command, contains_bytes, extract_workspace, package_workspace,
+    PACKAGE_NAMES, PACKAGE_WORKSPACE_LOCK, assert_full_revision, assert_local_package_metadata,
+    assert_success, cargo_command, contains_bytes, extract_workspace, package_workspace,
     sanitize_command_environment, source_head, workspace_root,
 };
 
 const CONFIG_PATH: &str = "src/components/ui/_kit/kit.json";
 const LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+const BUILT_IN_CATALOG: [(&str, &str, &str); 11] = [
+    ("anchor", "ui", "ui/anchor.json"),
+    ("button", "ui", "ui/button.json"),
+    ("collapsible", "ui", "ui/collapsible.json"),
+    ("dialog", "ui", "ui/dialog.json"),
+    ("field", "ui", "ui/field.json"),
+    ("menu", "ui", "ui/menu.json"),
+    ("router-link", "ui", "ui/router-link.json"),
+    ("spinner", "ui", "ui/spinner.json"),
+    ("status", "ui", "ui/status.json"),
+    ("tabs", "ui", "ui/tabs.json"),
+    ("tokens", "foundation", "foundation/tokens.json"),
+];
 
 #[derive(Clone, Copy)]
 enum EntryPoint {
@@ -85,11 +98,11 @@ fn installed_binaries_run_after_package_source_and_build_state_are_deleted() {
     let extracted_packages = extract_workspace(&archives, &extracted_workspace);
     assert_package_revisions(&extracted_packages, &expected_rev);
 
-    let lock = cargo_command(&extracted_workspace, &cargo_home, &target_dir)
-        .args(["generate-lockfile"])
-        .output()
-        .expect("generate extracted workspace lockfile");
-    assert_success("generate extracted workspace lockfile", &lock);
+    fs::write(
+        extracted_workspace.join("Cargo.lock"),
+        PACKAGE_WORKSPACE_LOCK,
+    )
+    .expect("seed extracted package-only lockfile");
     assert_local_package_metadata(
         "source-deletion installation",
         &extracted_workspace,
@@ -346,45 +359,44 @@ fn run_deleted_source_workflow(
         &["ui/button.rs", "styles/button.css"],
     );
 
+    assert_catalog_views(&runtime);
+
     let direct_info = runtime.run_json(EntryPoint::Direct, &["info", "--json"]);
     let cargo_info = runtime.run_json(EntryPoint::Cargo, &["info", "--json"]);
     assert_eq!(direct_info.stdout, cargo_info.stdout);
-    assert_envelope(&direct_info.value, "info", "success");
+    assert_info(&direct_info.value, false);
 
     let init = runtime.run_json(EntryPoint::Direct, &["init", "--json"]);
     assert_envelope(&init.value, "init", "success");
+    assert_object_keys(&init.value["data"], "init data", &[]);
     assert_nonempty_changes(&init.value, "init");
 
     let add_tokens = runtime.run_json(EntryPoint::Cargo, &["add", "tokens", "--json"]);
-    assert_envelope(&add_tokens.value, "add", "success");
+    assert_add(&add_tokens.value, "builtin:tokens", "tokens");
     assert_nonempty_changes(&add_tokens.value, "add tokens");
 
     let add_button = runtime.run_json(EntryPoint::Direct, &["add", "button", "--json"]);
-    assert_envelope(&add_button.value, "add", "success");
+    assert_add(&add_button.value, "builtin:button", "button");
     assert_nonempty_changes(&add_button.value, "add button");
 
     let first_sync = runtime.run_json(EntryPoint::Cargo, &["sync", "--json"]);
-    assert_eq!(first_sync.value["command"], "sync");
-    assert!(
-        matches!(
-            first_sync.value["status"].as_str(),
-            Some("success" | "no_change")
-        ),
-        "first sync status: {}",
-        first_sync.value["status"]
-    );
+    assert_sync(&first_sync.value, "no_change");
+    assert_eq!(first_sync.value["changes"], Value::Array(Vec::new()));
 
     let config_before =
         fs::read(app_root.join(CONFIG_PATH)).expect("read config before idempotency");
     let lock_before = fs::read(app_root.join(LOCK_PATH)).expect("read lock before idempotency");
     let tree_before = snapshot_tree(app_root);
     let second_sync = runtime.run_json(EntryPoint::Direct, &["sync", "--json"]);
-    assert_envelope(&second_sync.value, "sync", "no_change");
+    assert_sync(&second_sync.value, "no_change");
     assert_eq!(second_sync.value["changes"], Value::Array(Vec::new()));
-    assert_eq!(second_sync.value["data"]["files"], Value::Array(Vec::new()));
-    assert_eq!(
-        second_sync.value["data"]["changes"],
-        Value::Array(Vec::new())
+    assert!(
+        second_sync.value["data"].get("files").is_none(),
+        "public sync DTO must not expose planned files"
+    );
+    assert!(
+        second_sync.value["data"].get("changes").is_none(),
+        "changes must exist only at the envelope level"
     );
     assert_eq!(
         fs::read(app_root.join(CONFIG_PATH)).expect("read config after idempotency"),
@@ -397,20 +409,10 @@ fn run_deleted_source_workflow(
     assert_eq!(snapshot_tree(app_root), tree_before);
 
     let doctor = runtime.run_json(EntryPoint::Cargo, &["doctor", "--strict", "--json"]);
-    assert_envelope(&doctor.value, "doctor", "success");
-    assert_eq!(doctor.value["diagnostics"], Value::Array(Vec::new()));
-    assert!(
-        doctor.value["data"]["checks"]
-            .as_array()
-            .expect("doctor checks")
-            .iter()
-            .all(|check| check["status"] == "pass"),
-        "strict doctor checks: {}",
-        doctor.value["data"]["checks"]
-    );
+    assert_doctor(&doctor.value);
 
     let installed_info = runtime.run_json(EntryPoint::Direct, &["info", "--json"]);
-    assert_envelope(&installed_info.value, "info", "success");
+    assert_info(&installed_info.value, true);
 
     assert_generated_state(app_root, expected_rev, forbidden);
     assert_eq!(
@@ -454,6 +456,11 @@ impl RuntimeHarness<'_> {
         assert_no_path_leaks("runtime stdout", &stdout, self.forbidden);
         assert_no_path_leaks("runtime stderr", &stderr, self.forbidden);
         assert!(
+            stderr.is_empty(),
+            "{} {args:?} emitted unexpected JSON-mode stderr:\n{stderr}",
+            entry_point.label()
+        );
+        assert!(
             !self.deleted_cargo_home.exists(),
             "{} {args:?} recreated deleted Cargo home",
             entry_point.label()
@@ -471,6 +478,20 @@ impl RuntimeHarness<'_> {
 
 fn assert_version(value: &Value, expected_rev: &str) {
     assert_envelope(value, "version", "success");
+    assert_object_keys(
+        &value["data"],
+        "version data",
+        &["binary", "package", "schemaVersion", "source", "version"],
+    );
+    assert_eq!(value["data"]["package"], "leptos_ui_kit_cli");
+    assert_eq!(value["data"]["binary"], "leptos_ui_kit");
+    assert_eq!(value["data"]["version"], "0.1.0");
+    assert_eq!(value["data"]["schemaVersion"], "0.9.0-alpha");
+    assert_object_keys(
+        &value["data"]["source"],
+        "version source",
+        &["kind", "rev", "url"],
+    );
     assert_eq!(value["data"]["source"]["kind"], "git");
     assert_eq!(
         value["data"]["source"]["url"],
@@ -486,33 +507,406 @@ fn assert_version(value: &Value, expected_rev: &str) {
 
 fn assert_source_view(value: &Value, source_path: &str, expected_sources: &[&str]) {
     assert_envelope(value, "view", "success");
-    assert_eq!(value["data"]["resolved"]["source_path"], source_path);
+    assert_object_keys(&value["data"], "source view data", &["resolved", "sources"]);
+    let expected_name = source_path
+        .rsplit('/')
+        .next()
+        .expect("registry manifest name")
+        .strip_suffix(".json")
+        .expect("registry manifest extension");
+    let expected_kind = if source_path.starts_with("foundation/") {
+        "foundation"
+    } else {
+        "ui"
+    };
+    assert_registry_item(
+        &value["data"]["resolved"],
+        expected_name,
+        expected_kind,
+        source_path,
+    );
     let actual = value["data"]["sources"]
         .as_array()
         .expect("source view sources")
         .iter()
-        .map(|source| source["path"].as_str().expect("source view logical path"))
-        .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected_sources.iter().copied().collect());
+        .map(|source| {
+            assert_object_keys(source, "source view source", &["content", "kind", "path"]);
+            let path = source["path"].as_str().expect("source view logical path");
+            assert_logical_path(path);
+            assert_eq!(
+                source["kind"],
+                if path.ends_with(".rs") { "rust" } else { "css" }
+            );
+            assert!(
+                source["content"]
+                    .as_str()
+                    .is_some_and(|content| !content.is_empty()),
+                "source view content for {path}"
+            );
+            path
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected_sources);
 }
 
 fn assert_envelope(value: &Value, command: &str, status: &str) {
+    assert_object_keys(
+        value,
+        "command envelope",
+        &[
+            "changes",
+            "command",
+            "data",
+            "diagnostics",
+            "schemaVersion",
+            "status",
+        ],
+    );
     assert_eq!(value["schemaVersion"], "0.9.0-alpha");
     assert_eq!(value["command"], command);
     assert_eq!(value["status"], status);
-    assert!(value["diagnostics"].is_array());
+    assert_eq!(value["diagnostics"], Value::Array(Vec::new()));
     assert!(value["changes"].is_array());
     assert!(value.get("data").is_some());
 }
 
 fn assert_nonempty_changes(value: &Value, label: &str) {
-    assert!(
-        !value["changes"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{label} envelope changes"))
-            .is_empty(),
-        "{label} must report its writes"
+    let changes = value["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} envelope changes"));
+    assert!(!changes.is_empty(), "{label} must report its writes");
+    for change in changes {
+        let expected_keys = if change.get("item").is_some() {
+            &["item", "kind", "path", "tracked"][..]
+        } else {
+            &["kind", "path", "tracked"][..]
+        };
+        assert_object_keys(change, &format!("{label} change"), expected_keys);
+        let path = change["path"].as_str().expect("change logical path");
+        assert_logical_path(path);
+        assert!(change["kind"].is_string(), "{label} change kind");
+        assert!(change["tracked"].is_boolean(), "{label} tracked flag");
+    }
+}
+
+fn assert_catalog_views(runtime: &RuntimeHarness<'_>) {
+    let mut observed = BTreeSet::new();
+    for (index, (name, kind, source_path)) in BUILT_IN_CATALOG.iter().enumerate() {
+        let entry_point = if index % 2 == 0 {
+            EntryPoint::Direct
+        } else {
+            EntryPoint::Cargo
+        };
+        let output = runtime.run_json(entry_point, &["view", name, "--json"]);
+        assert_envelope(&output.value, "view", "success");
+        assert_registry_item(&output.value["data"], name, kind, source_path);
+        observed.insert(
+            output.value["data"]["name"]
+                .as_str()
+                .expect("catalog item name")
+                .to_owned(),
+        );
+    }
+    assert_eq!(
+        observed,
+        BUILT_IN_CATALOG
+            .iter()
+            .map(|(name, _, _)| (*name).to_owned())
+            .collect(),
+        "source-independent embedded catalog"
     );
+}
+
+fn assert_registry_item(value: &Value, name: &str, kind: &str, source_path: &str) {
+    assert_object_keys(
+        value,
+        &format!("registry item {name}"),
+        &[
+            "cargoPlan",
+            "contentHash",
+            "description",
+            "kind",
+            "name",
+            "registryDependencies",
+            "sourceKind",
+            "sourcePath",
+            "targets",
+            "title",
+            "version",
+        ],
+    );
+    assert_eq!(value["sourceKind"], "built-in");
+    assert_eq!(value["sourcePath"], source_path);
+    assert_logical_path(
+        value["sourcePath"]
+            .as_str()
+            .expect("registry item source path"),
+    );
+    assert_eq!(value["name"], name);
+    assert_eq!(value["kind"], kind);
+    assert_eq!(value["version"], "0.9.0-alpha");
+    assert_sha256_hash(&value["contentHash"], &format!("{name}.contentHash"));
+    assert!(
+        value["title"]
+            .as_str()
+            .is_some_and(|title| !title.is_empty()),
+        "{name} title"
+    );
+    assert!(
+        value["description"]
+            .as_str()
+            .is_some_and(|description| !description.is_empty()),
+        "{name} description"
+    );
+    assert!(
+        value["registryDependencies"]
+            .as_array()
+            .is_some_and(|dependencies| dependencies.iter().all(Value::is_string)),
+        "{name} registry dependencies"
+    );
+
+    assert_object_keys(
+        &value["targets"],
+        &format!("{name} targets"),
+        &["styleBlocks", "uiFiles"],
+    );
+    for file in value["targets"]["uiFiles"]
+        .as_array()
+        .expect("registry UI targets")
+    {
+        assert_object_keys(file, &format!("{name} UI target"), &["path", "source"]);
+        assert_logical_path(file["source"].as_str().expect("registry UI source"));
+        assert_logical_path(file["path"].as_str().expect("registry UI target path"));
+    }
+    for block in value["targets"]["styleBlocks"]
+        .as_array()
+        .expect("registry style targets")
+    {
+        assert_object_keys(block, &format!("{name} style target"), &["id", "source"]);
+        assert_logical_path(block["source"].as_str().expect("registry style source"));
+        assert!(
+            block["id"].as_str().is_some_and(|id| !id.is_empty()),
+            "{name} style block ID"
+        );
+    }
+    for dependency in value["cargoPlan"].as_array().expect("registry Cargo plan") {
+        assert_cargo_requirement(dependency);
+    }
+}
+
+fn assert_cargo_requirement(value: &Value) {
+    assert_object_keys(
+        value,
+        "Cargo requirement",
+        &["crate", "features", "required", "source"],
+    );
+    assert!(
+        value["crate"]
+            .as_str()
+            .is_some_and(|crate_name| !crate_name.is_empty()),
+        "Cargo requirement crate"
+    );
+    assert!(
+        value["features"]
+            .as_array()
+            .is_some_and(|features| features.iter().all(Value::is_string)),
+        "Cargo requirement features"
+    );
+    assert!(value["required"].is_boolean(), "Cargo requirement required");
+    match value["source"]["kind"].as_str() {
+        Some("version") => {
+            assert_object_keys(&value["source"], "version source", &["kind", "version"]);
+            assert!(value["source"]["version"].is_string());
+        }
+        Some("git") => {
+            assert_object_keys(&value["source"], "Git source", &["kind", "rev", "url"]);
+            assert!(value["source"]["url"].is_string());
+            assert_full_revision(
+                value["source"]["rev"]
+                    .as_str()
+                    .expect("Git requirement revision"),
+            );
+        }
+        source => panic!("unsupported Cargo requirement source: {source:?}"),
+    }
+}
+
+fn assert_add(value: &Value, item_id: &str, item_name: &str) {
+    assert_envelope(value, "add", "success");
+    assert_object_keys(
+        &value["data"],
+        "add data",
+        &["contentHash", "dependencies", "itemId", "itemName"],
+    );
+    assert_eq!(value["data"]["itemId"], item_id);
+    assert_eq!(value["data"]["itemName"], item_name);
+    assert_sha256_hash(
+        &value["data"]["contentHash"],
+        &format!("{item_name}.contentHash"),
+    );
+    for dependency in value["data"]["dependencies"]
+        .as_array()
+        .expect("add dependencies")
+    {
+        assert_cargo_requirement(dependency);
+    }
+}
+
+fn assert_sync(value: &Value, status: &str) {
+    assert_envelope(value, "sync", status);
+    assert_object_keys(&value["data"], "sync data", &["dependencies", "itemIds"]);
+    let item_ids = value["data"]["itemIds"]
+        .as_array()
+        .expect("sync item IDs")
+        .iter()
+        .map(|item| item.as_str().expect("sync item ID"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        item_ids,
+        BTreeSet::from(["builtin:button", "builtin:spinner", "builtin:tokens"])
+    );
+    for dependency in value["data"]["dependencies"]
+        .as_array()
+        .expect("sync dependencies")
+    {
+        assert_cargo_requirement(dependency);
+    }
+}
+
+fn assert_info(value: &Value, installed: bool) {
+    assert_envelope(value, "info", "success");
+    assert_object_keys(
+        &value["data"],
+        "info data",
+        &[
+            "cargoManifest",
+            "configPath",
+            "indexHtml",
+            "installed",
+            "projectKind",
+            "projectRoot",
+            "registryAvailable",
+            "renderMode",
+            "renderModeContract",
+            "renderModeSelection",
+            "sourceRoot",
+            "stylesheet",
+            "workspaceMode",
+        ],
+    );
+    assert_eq!(value["data"]["projectRoot"], ".");
+    assert_eq!(value["data"]["projectKind"], "single-crate-trunk-csr");
+    assert_eq!(
+        value["data"]["workspaceMode"],
+        "single-package-workspace-root"
+    );
+    assert_eq!(value["data"]["cargoManifest"], "Cargo.toml");
+    assert_eq!(value["data"]["sourceRoot"], "src");
+    assert_eq!(value["data"]["indexHtml"], "index.html");
+    assert_eq!(value["data"]["stylesheet"], "styles/kit.css");
+    assert_eq!(value["data"]["renderMode"], "csr");
+    assert_eq!(
+        value["data"]["renderModeContract"],
+        serde_json::json!({"kind": "selected", "mode": "csr"})
+    );
+    assert_eq!(
+        value["data"]["renderModeSelection"],
+        serde_json::json!({"kind": "selected", "mode": "csr"})
+    );
+    assert_eq!(value["data"]["registryAvailable"], true);
+    if installed {
+        assert_eq!(value["data"]["configPath"], CONFIG_PATH);
+        let summary = &value["data"]["installed"];
+        assert_object_keys(
+            summary,
+            "installed summary",
+            &["filePaths", "itemIds", "lockPath", "styleBlockIds"],
+        );
+        assert_eq!(summary["lockPath"], LOCK_PATH);
+        assert_string_set(
+            &summary["itemIds"],
+            &["builtin:button", "builtin:spinner", "builtin:tokens"],
+            "installed item IDs",
+        );
+        assert_string_set(
+            &summary["filePaths"],
+            &[
+                "src/components/ui/button.rs",
+                "src/components/ui/spinner.rs",
+            ],
+            "installed file paths",
+        );
+        assert_string_set(
+            &summary["styleBlockIds"],
+            &["button", "spinner", "tokens"],
+            "installed style block IDs",
+        );
+    } else {
+        assert!(value["data"]["configPath"].is_null());
+        assert!(value["data"]["installed"].is_null());
+    }
+}
+
+fn assert_doctor(value: &Value) {
+    assert_envelope(value, "doctor", "success");
+    assert_object_keys(
+        &value["data"],
+        "doctor data",
+        &["check", "checks", "projectRoot", "strict", "trunkBuild"],
+    );
+    assert_eq!(value["data"]["projectRoot"], ".");
+    assert_eq!(value["data"]["strict"], true);
+    assert_eq!(value["data"]["check"], false);
+    assert_eq!(value["data"]["trunkBuild"], false);
+    let checks = value["data"]["checks"].as_array().expect("doctor checks");
+    assert!(!checks.is_empty(), "strict doctor must report its checks");
+    for check in checks {
+        let expected_keys = if check.get("path").is_some() {
+            &["message", "name", "path", "status"][..]
+        } else {
+            &["message", "name", "status"][..]
+        };
+        assert_object_keys(check, "doctor check", expected_keys);
+        assert_eq!(check["status"], "pass");
+        assert!(check["name"].is_string());
+        assert!(check["message"].is_string());
+        if let Some(path) = check.get("path").and_then(Value::as_str) {
+            assert_logical_path(path);
+        }
+    }
+    let registry_checks = checks
+        .iter()
+        .filter(|check| check["name"] == "registry")
+        .collect::<Vec<_>>();
+    assert_eq!(registry_checks.len(), 1, "embedded registry health check");
+    assert_eq!(
+        registry_checks[0]["message"],
+        "built-in registry runtime health is valid"
+    );
+}
+
+fn assert_string_set(value: &Value, expected: &[&str], label: &str) {
+    let actual = value
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} must be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{label} entry must be a string"))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected.iter().copied().collect(), "{label}");
+}
+
+fn assert_object_keys(value: &Value, label: &str, expected: &[&str]) {
+    let actual = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{label} must be an object"))
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected.iter().copied().collect(), "{label} keys");
 }
 
 fn assert_generated_state(app_root: &Path, expected_rev: &str, forbidden: &[PathBuf]) {

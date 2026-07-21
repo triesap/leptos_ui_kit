@@ -287,14 +287,7 @@ fn sha256(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "point lookup is retained for the injected provider seam"
-    )
-)]
-fn validate_logical_path(logical_path: &str) -> Result<(), AssetProviderError> {
+pub(crate) fn validate_logical_path(logical_path: &str) -> Result<(), AssetProviderError> {
     if logical_path.is_empty() || logical_path.starts_with('/') || logical_path.contains('\\') {
         return Err(invalid_logical_path(
             logical_path,
@@ -491,7 +484,7 @@ mod tests {
 
     #[test]
     fn generated_catalog_is_exact_sorted_and_content_addressed() {
-        assert_eq!(EMBEDDED_ASSET_COUNT, 68);
+        assert_eq!(EMBEDDED_ASSET_COUNT, 72);
         assert_eq!(EMBEDDED_ASSETS.len(), EMBEDDED_ASSET_COUNT);
         assert!(EMBEDDED_CATALOG_HASH.starts_with("sha256:"));
         assert_eq!(EMBEDDED_CATALOG_HASH.len(), "sha256:".len() + 64);
@@ -538,7 +531,7 @@ mod tests {
                 EmbeddedAssetKind::Css => kinds[2] += 1,
             }
         }
-        assert_eq!(kinds, [17, 41, 10]);
+        assert_eq!(kinds, [20, 42, 10]);
     }
 
     #[test]

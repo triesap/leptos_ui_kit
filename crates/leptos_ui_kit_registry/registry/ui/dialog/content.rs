@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use leptos::html;
 use leptos::prelude::*;
 use web_ui_primitives::leptos::{
-    DialogLayerOptions, DismissibleReason, Portal, PortalMount, use_dialog_layer_with_node_ref,
+    DialogLayerOptions, DismissibleReason, Portal, PortalMount, PortalProps,
+    use_dialog_layer_with_node_ref,
 };
 
 use super::root::{DialogContext, class_with_base};
@@ -27,6 +30,7 @@ pub fn DialogContent(
     #[prop(optional, into)] label: Option<String>,
     #[prop(optional, into)] class: String,
     #[prop(optional)] portal_mount: Option<PortalMount>,
+    #[prop(default = true)] portal_reparent: bool,
     children: ChildrenFn,
 ) -> impl IntoView {
     let context =
@@ -67,7 +71,9 @@ pub fn DialogContent(
     let data_layer = layer.clone();
     let data_state = Signal::derive(move || data_layer.data_state());
     let transition_end = layer.transition_end_handler();
+    let transition_cancel = layer.transition_cancel_handler();
     let animation_end = layer.animation_end_handler();
+    let animation_cancel = layer.animation_cancel_handler();
 
     view! {
         {move || {
@@ -75,51 +81,31 @@ pub fn DialogContent(
                 return ().into_any();
             }
 
-            if let Some(portal_mount) = portal_mount.clone() {
-                view! {
-                    <Portal mount=portal_mount>
-                        {move || {
-                            dialog_surface(
-                                node_ref,
-                                content_id,
-                                content_class,
-                                role,
-                                modal,
-                                label,
-                                labelled_by,
-                                described_by,
-                                data_state,
-                                transition_end.clone(),
-                                animation_end.clone(),
-                                children,
-                            )
-                        }}
-                    </Portal>
-                }
+            let portal_children: ChildrenFn = Arc::new(move || {
+                dialog_surface(
+                    node_ref,
+                    content_id,
+                    content_class,
+                    role,
+                    modal,
+                    label,
+                    labelled_by,
+                    described_by,
+                    data_state,
+                    transition_end.clone(),
+                    transition_cancel.clone(),
+                    animation_end.clone(),
+                    animation_cancel.clone(),
+                    children,
+                )
                 .into_any()
-            } else {
-                view! {
-                    <Portal>
-                        {move || {
-                            dialog_surface(
-                                node_ref,
-                                content_id,
-                                content_class,
-                                role,
-                                modal,
-                                label,
-                                labelled_by,
-                                described_by,
-                                data_state,
-                                transition_end.clone(),
-                                animation_end.clone(),
-                                children,
-                            )
-                        }}
-                    </Portal>
-                }
-                .into_any()
-            }
+            });
+            Portal(PortalProps {
+                mount: portal_mount.clone(),
+                reparent: portal_reparent,
+                children: portal_children,
+            })
+            .into_any()
         }}
     }
 }
@@ -135,7 +121,9 @@ fn dialog_surface(
     described_by: Signal<Option<String>>,
     data_state: Signal<&'static str>,
     transition_end: Callback<leptos::ev::TransitionEvent>,
+    transition_cancel: Callback<leptos::ev::TransitionEvent>,
     animation_end: Callback<leptos::ev::AnimationEvent>,
+    animation_cancel: Callback<leptos::ev::AnimationEvent>,
     children: StoredValue<ChildrenFn>,
 ) -> impl IntoView {
     view! {
@@ -151,7 +139,9 @@ fn dialog_surface(
             aria-labelledby=move || labelled_by.get()
             aria-describedby=move || described_by.get()
             on:transitionend=move |event| transition_end.run(event)
+            on:transitioncancel=move |event| transition_cancel.run(event)
             on:animationend=move |event| animation_end.run(event)
+            on:animationcancel=move |event| animation_cancel.run(event)
         >
             {children.with_value(|children| children())}
         </div>

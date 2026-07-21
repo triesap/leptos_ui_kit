@@ -1,9 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use leptos::prelude::*;
 use web_ui_primitives::core::CollapsibleModel;
+use web_ui_primitives::leptos::{DomAttribute, DomAttributeValue};
 
-static NEXT_COLLAPSIBLE_ID: AtomicUsize = AtomicUsize::new(1);
+use super::super::identity::use_kit_id;
 
 #[derive(Clone)]
 pub(crate) struct CollapsibleContext {
@@ -21,7 +20,7 @@ pub fn CollapsibleRoot(
     children: Children,
 ) -> impl IntoView {
     let model = RwSignal::new(CollapsibleModel::new(default_open));
-    let content_id = content_id.unwrap_or_else(next_content_id);
+    let content_id = content_id.unwrap_or_else(|| use_kit_id("kit-collapsible-content"));
     provide_context(CollapsibleContext {
         model,
         disabled,
@@ -43,7 +42,25 @@ pub(crate) fn class_with_base(base: &str, class: &str) -> String {
     }
 }
 
-fn next_content_id() -> String {
-    let id = NEXT_COLLAPSIBLE_ID.fetch_add(1, Ordering::Relaxed);
-    format!("kit-collapsible-content-{id}")
+pub(crate) fn attr_string(attrs: &[DomAttribute], name: &str) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if attr.name() != name {
+            return None;
+        }
+        match attr.value() {
+            DomAttributeValue::String(value) => Some(value.clone()),
+            DomAttributeValue::Bool(true) => Some(String::new()),
+            DomAttributeValue::Bool(false) => None,
+        }
+    })
+}
+
+pub(crate) fn attr_bool(attrs: &[DomAttribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.name() == name && matches!(attr.value(), DomAttributeValue::Bool(true)))
+}
+
+pub(crate) fn data_attr(active: bool) -> Option<&'static str> {
+    active.then_some("")
 }

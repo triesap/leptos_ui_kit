@@ -1,35 +1,55 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
-use leptos_ui_kit_registry::{KitConfig, SCHEMA_VERSION};
-use serde::{Deserialize, Serialize};
+use leptos_ui_kit_registry::{
+    KitConfig, ProjectKind, RegistryItemKind, SCHEMA_VERSION, validate_registry_item_name,
+};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{Error as _, MapAccess, Visitor},
+};
 
-use crate::CodegenError;
+use crate::{CodegenError, validate_logical_write_path};
 
 pub const DEFAULT_KIT_LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
+pub const TOKEN_CONTRACT_PATH: &str = "src/components/ui/_kit/token-contract.json";
+pub const THEME_CAPABILITY_PATH: &str = "src/components/ui/_kit/theme-integration.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InstallLock {
     pub schema_version: String,
     pub kit_version: String,
     pub project: InstallLockProject,
+    #[serde(deserialize_with = "deserialize_string_map_without_duplicates")]
     pub items: BTreeMap<String, InstalledItem>,
+    #[serde(deserialize_with = "deserialize_string_map_without_duplicates")]
     pub files_by_path: BTreeMap<String, String>,
+    #[serde(deserialize_with = "deserialize_string_map_without_duplicates")]
     pub style_blocks_by_id: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_integration: Option<InstalledThemeIntegration>,
 }
 
 impl InstallLock {
     pub fn empty(config_hash: String) -> Self {
+        Self::empty_for_project(config_hash, ProjectKind::SingleCrateTrunkCsr)
+    }
+
+    pub fn empty_for_project(config_hash: String, project_kind: ProjectKind) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
             kit_version: SCHEMA_VERSION.to_owned(),
             project: InstallLockProject {
                 config_hash,
                 crate_root: ".".to_owned(),
-                kind: "single-crate-trunk-csr".to_owned(),
+                kind: project_kind.as_str().to_owned(),
             },
             items: BTreeMap::new(),
             files_by_path: BTreeMap::new(),
             style_blocks_by_id: BTreeMap::new(),
+            theme_integration: None,
         }
     }
 
@@ -41,60 +61,249 @@ impl InstallLock {
         if self.schema_version != SCHEMA_VERSION {
             return invalid_lock(path, format!("schemaVersion must be {SCHEMA_VERSION}"));
         }
+        if self.kit_version != SCHEMA_VERSION {
+            return invalid_lock(path, format!("kitVersion must be {SCHEMA_VERSION}"));
+        }
         if self.project.crate_root != "." {
             return invalid_lock(path, "project.crateRoot must be .");
         }
-        if self.project.kind != "single-crate-trunk-csr" {
-            return invalid_lock(path, "project.kind must be single-crate-trunk-csr");
+        if !matches!(
+            self.project.kind.as_str(),
+            "single-crate-trunk-csr"
+                | "single-crate-native-ssr"
+                | "single-crate-browser-hydration"
+                | "shared-library-crate"
+        ) {
+            return invalid_lock(
+                path,
+                "project.kind must be single-crate-trunk-csr, single-crate-native-ssr, single-crate-browser-hydration, or shared-library-crate",
+            );
         }
         validate_lock_hash(path, "project.configHash", &self.project.config_hash)?;
 
+        let mut item_names = BTreeSet::new();
+        let mut expected_files_by_path = BTreeMap::new();
+        let mut expected_style_blocks_by_id = BTreeMap::new();
+        let mut folded_file_paths = BTreeMap::<String, String>::new();
+
         for (key, item) in &self.items {
+            let item_path = format!("items[{key:?}]");
             if key != &item.id {
-                return invalid_lock(path, format!("item key {key} does not match item id"));
+                return invalid_lock(
+                    path,
+                    format!("{item_path}.id must equal its map key {key:?}"),
+                );
+            }
+            validate_registry_item_name(&item.name).map_err(|error| CodegenError::InvalidLock {
+                path: path.to_path_buf(),
+                reason: format!("{item_path}.name is invalid: {error}"),
+            })?;
+            let expected_id = format!("builtin:{}", item.name);
+            if item.id != expected_id {
+                return invalid_lock(
+                    path,
+                    format!(
+                        "{item_path}.id must be {expected_id:?} for item name {:?}",
+                        item.name
+                    ),
+                );
+            }
+            if !item_names.insert(item.name.as_str()) {
+                return invalid_lock(
+                    path,
+                    format!("{item_path}.name duplicates installed item {:?}", item.name),
+                );
             }
             if item.source != "builtin" {
-                return invalid_lock(path, "only builtin item lock entries are supported");
+                return invalid_lock(path, format!("{item_path}.source must be \"builtin\""));
             }
             if item.version != SCHEMA_VERSION {
-                return invalid_lock(path, format!("item version must be {SCHEMA_VERSION}"));
+                return invalid_lock(
+                    path,
+                    format!("{item_path}.version must be {SCHEMA_VERSION}"),
+                );
             }
-            validate_lock_hash(path, "items[].contentHash", &item.content_hash)?;
-            for file in &item.files {
-                validate_lock_hash(path, "items[].files[].generatedHash", &file.generated_hash)?;
+            validate_lock_hash(
+                path,
+                &format!("{item_path}.contentHash"),
+                &item.content_hash,
+            )?;
+            for (index, file) in item.files.iter().enumerate() {
+                let file_path = format!("{item_path}.files[{index}]");
+                validate_lock_target_path(path, &format!("{file_path}.path"), &file.path, "rs")?;
+                if file.kind != "rust" {
+                    return invalid_lock(path, format!("{file_path}.kind must be \"rust\""));
+                }
                 validate_lock_hash(
                     path,
-                    "items[].files[].localHashAtInstall",
+                    &format!("{file_path}.generatedHash"),
+                    &file.generated_hash,
+                )?;
+                validate_lock_hash(
+                    path,
+                    &format!("{file_path}.localHashAtInstall"),
                     &file.local_hash_at_install,
                 )?;
+                if let Some(existing_owner) =
+                    expected_files_by_path.insert(file.path.clone(), item.id.clone())
+                {
+                    return invalid_lock(
+                        path,
+                        format!(
+                            "{file_path}.path {:?} duplicates a file target owned by {existing_owner}",
+                            file.path
+                        ),
+                    );
+                }
+                let folded = file.path.to_ascii_lowercase();
+                if let Some(existing) = folded_file_paths.insert(folded, file.path.clone()) {
+                    return invalid_lock(
+                        path,
+                        format!(
+                            "{file_path}.path {:?} collides under ASCII case folding with {existing:?}",
+                            file.path
+                        ),
+                    );
+                }
             }
-            for block in &item.style_blocks {
+            for (index, block) in item.style_blocks.iter().enumerate() {
+                let block_path = format!("{item_path}.styleBlocks[{index}]");
+                validate_lock_target_path(
+                    path,
+                    &format!("{block_path}.cssPath"),
+                    &block.css_path,
+                    "css",
+                )?;
+                validate_kebab_name(path, &format!("{block_path}.blockId"), &block.block_id)?;
                 validate_lock_hash(
                     path,
-                    "items[].styleBlocks[].generatedHash",
+                    &format!("{block_path}.generatedHash"),
                     &block.generated_hash,
                 )?;
+                if let Some(existing_owner) =
+                    expected_style_blocks_by_id.insert(block.block_id.clone(), item.id.clone())
+                {
+                    return invalid_lock(
+                        path,
+                        format!(
+                            "{block_path}.blockId {:?} duplicates a managed CSS block owned by {existing_owner}",
+                            block.block_id
+                        ),
+                    );
+                }
             }
+            validate_item_target_shape(path, &item_path, item)?;
         }
 
-        for (file_path, item_id) in &self.files_by_path {
-            if !self.items.contains_key(item_id) {
-                return invalid_lock(
-                    path,
-                    format!("filesByPath entry {file_path} references missing item {item_id}"),
-                );
-            }
+        validate_reverse_index(
+            path,
+            "filesByPath",
+            &expected_files_by_path,
+            &self.files_by_path,
+        )?;
+        validate_reverse_index(
+            path,
+            "styleBlocksById",
+            &expected_style_blocks_by_id,
+            &self.style_blocks_by_id,
+        )?;
+        if let Some(integration) = &self.theme_integration {
+            integration.validate(path)?;
         }
 
-        for (block_id, item_id) in &self.style_blocks_by_id {
-            if !self.items.contains_key(item_id) {
-                return invalid_lock(
-                    path,
-                    format!("styleBlocksById entry {block_id} references missing item {item_id}"),
-                );
-            }
-        }
+        Ok(())
+    }
+}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledThemeIntegration {
+    pub producer_package: String,
+    pub producer_version: String,
+    pub producer_checksum: Option<String>,
+    pub primitives_package: String,
+    pub primitives_requirement: String,
+    pub primitives_version: String,
+    pub primitives_checksum: String,
+    pub presence_abi_version: u32,
+    pub contract_path: String,
+    pub contract_id: String,
+    pub contract_abi_version: u32,
+    pub contract_revision: u32,
+    pub contract_canonical_digest: String,
+    pub contract_bytes_digest: String,
+    pub capability_path: String,
+    pub capability_bytes_digest: String,
+    pub stylesheet_path: String,
+    pub stylesheet_bytes_digest: String,
+    pub layer_abi_version: u32,
+    pub layer_order: Vec<String>,
+    pub portal_abi_version: u32,
+    pub portal_mount_type: String,
+    pub portal_body_host: bool,
+}
+
+impl InstalledThemeIntegration {
+    fn validate(&self, path: &Path) -> Result<(), CodegenError> {
+        let valid_constants = self.producer_package == "leptos_ui_kit_cli"
+            && !self.producer_version.is_empty()
+            && self.producer_checksum.is_none()
+            && self.primitives_package == "web_ui_primitives"
+            && self.primitives_requirement == ">=0.2.0,<0.3.0"
+            && self.primitives_version == "0.2.0"
+            && !self.primitives_checksum.is_empty()
+            && self.presence_abi_version == 2
+            && self.contract_id == "leptos-ui-kit"
+            && self.contract_abi_version == 1
+            && self.contract_revision == 2
+            && self.layer_abi_version == 1
+            && self.layer_order
+                == [
+                    "leptos-ui-kit.tokens",
+                    "leptos-ui-kit.themes",
+                    "leptos-ui-kit.components",
+                ]
+            && self.portal_abi_version == 1
+            && self.portal_mount_type == "web_ui_primitives::leptos::PortalMount"
+            && self.portal_body_host;
+        if !valid_constants {
+            return invalid_lock(path, "themeIntegration constants are invalid");
+        }
+        for (field, value) in [
+            (
+                "themeIntegration.contractCanonicalDigest",
+                &self.contract_canonical_digest,
+            ),
+            (
+                "themeIntegration.contractBytesDigest",
+                &self.contract_bytes_digest,
+            ),
+            (
+                "themeIntegration.capabilityBytesDigest",
+                &self.capability_bytes_digest,
+            ),
+            (
+                "themeIntegration.stylesheetBytesDigest",
+                &self.stylesheet_bytes_digest,
+            ),
+        ] {
+            validate_lock_hash(path, field, value)?;
+        }
+        for (field, value, extension) in [
+            ("themeIntegration.contractPath", &self.contract_path, "json"),
+            (
+                "themeIntegration.capabilityPath",
+                &self.capability_path,
+                "json",
+            ),
+            (
+                "themeIntegration.stylesheetPath",
+                &self.stylesheet_path,
+                "css",
+            ),
+        ] {
+            validate_lock_target_path(path, field, value, extension)?;
+        }
         Ok(())
     }
 }
@@ -112,6 +321,7 @@ pub struct InstallLockProject {
 pub struct InstalledItem {
     pub id: String,
     pub name: String,
+    pub kind: RegistryItemKind,
     pub source: String,
     pub version: String,
     pub content_hash: String,
@@ -194,15 +404,201 @@ pub fn lock_to_json_at_path(lock: &InstallLock, path: &Path) -> Result<String, C
     Ok(output)
 }
 
-fn validate_lock_hash(path: &Path, field: &'static str, value: &str) -> Result<(), CodegenError> {
-    if value
-        .strip_prefix("sha256:")
-        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
+fn validate_lock_hash(path: &Path, field: &str, value: &str) -> Result<(), CodegenError> {
+    if value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }) {
         Ok(())
     } else {
-        invalid_lock(path, format!("{field} must be a sha256 hash"))
+        invalid_lock(path, format!("{field} must be a lowercase sha256 hash"))
     }
+}
+
+fn validate_lock_target_path(
+    lock_path: &Path,
+    field: &str,
+    value: &str,
+    extension: &str,
+) -> Result<(), CodegenError> {
+    if Path::new(value)
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some(extension)
+    {
+        return invalid_lock(lock_path, format!("{field} must end in .{extension}"));
+    }
+    if let Err(error) = validate_logical_write_path(value) {
+        return invalid_lock(
+            lock_path,
+            format!("{field} must be a safe writable project path: {error}"),
+        );
+    }
+    Ok(())
+}
+
+fn validate_kebab_name(lock_path: &Path, field: &str, value: &str) -> Result<(), CodegenError> {
+    let valid = value.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    });
+    if valid {
+        Ok(())
+    } else {
+        invalid_lock(
+            lock_path,
+            format!("{field} must be an ASCII lowercase kebab-case name beginning with a letter"),
+        )
+    }
+}
+
+fn validate_reverse_index(
+    lock_path: &Path,
+    index_name: &str,
+    expected: &BTreeMap<String, String>,
+    actual: &BTreeMap<String, String>,
+) -> Result<(), CodegenError> {
+    for (target, expected_owner) in expected {
+        match actual.get(target) {
+            Some(actual_owner) if actual_owner == expected_owner => {}
+            Some(actual_owner) => {
+                return invalid_lock(
+                    lock_path,
+                    format!(
+                        "{index_name}[{target:?}] is owned by {actual_owner:?}; expected {expected_owner:?}"
+                    ),
+                );
+            }
+            None => {
+                return invalid_lock(
+                    lock_path,
+                    format!(
+                        "{index_name}[{target:?}] is missing for forward target owned by {expected_owner:?}"
+                    ),
+                );
+            }
+        }
+    }
+    for (target, owner) in actual {
+        if !expected.contains_key(target) {
+            return invalid_lock(
+                lock_path,
+                format!("{index_name}[{target:?}] is an extra reverse entry owned by {owner:?}"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_item_target_shape(
+    lock_path: &Path,
+    item_path: &str,
+    item: &InstalledItem,
+) -> Result<(), CodegenError> {
+    match item.kind {
+        RegistryItemKind::Ui => {
+            if item.style_blocks.len() > 1 {
+                return invalid_lock(
+                    lock_path,
+                    format!("{item_path}.styleBlocks must contain at most one UI style block"),
+                );
+            }
+            if item
+                .style_blocks
+                .first()
+                .is_some_and(|block| block.block_id != item.name)
+            {
+                return invalid_lock(
+                    lock_path,
+                    format!(
+                        "{item_path}.styleBlocks[0].blockId must equal {:?}",
+                        item.name
+                    ),
+                );
+            }
+        }
+        RegistryItemKind::Foundation => {
+            if !item.files.is_empty() {
+                return invalid_lock(
+                    lock_path,
+                    format!("{item_path}.files must be empty for a foundation item"),
+                );
+            }
+            let Some(first) = item.style_blocks.first() else {
+                return invalid_lock(
+                    lock_path,
+                    format!(
+                        "{item_path}.styleBlocks must contain at least one foundation style block"
+                    ),
+                );
+            };
+            if first.block_id != item.name {
+                return invalid_lock(
+                    lock_path,
+                    format!(
+                        "{item_path}.styleBlocks[0].blockId must equal {:?}",
+                        item.name
+                    ),
+                );
+            }
+            let prefix = format!("{}-", item.name);
+            for (index, block) in item.style_blocks.iter().enumerate().skip(1) {
+                let Some(suffix) = block.block_id.strip_prefix(&prefix) else {
+                    return invalid_lock(
+                        lock_path,
+                        format!(
+                            "{item_path}.styleBlocks[{index}].blockId must begin with {prefix:?}"
+                        ),
+                    );
+                };
+                validate_kebab_name(
+                    lock_path,
+                    &format!("{item_path}.styleBlocks[{index}].blockId suffix"),
+                    suffix,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn deserialize_string_map_without_duplicates<'de, D, V>(
+    deserializer: D,
+) -> Result<BTreeMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct UniqueStringMapVisitor<V>(std::marker::PhantomData<V>);
+
+    impl<'de, V> Visitor<'de> for UniqueStringMapVisitor<V>
+    where
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<String, V>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with unique string keys")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut output = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, V>()? {
+                if output.insert(key.clone(), value).is_some() {
+                    return Err(A::Error::custom(format!("duplicate object key {key:?}")));
+                }
+            }
+            Ok(output)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueStringMapVisitor(std::marker::PhantomData))
 }
 
 fn invalid_lock<T>(path: &Path, reason: impl Into<String>) -> Result<T, CodegenError> {

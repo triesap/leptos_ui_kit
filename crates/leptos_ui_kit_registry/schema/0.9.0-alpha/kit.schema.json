@@ -54,7 +54,7 @@
             },
             "rev": {
               "type": "string",
-              "pattern": "^[0-9a-fA-F]{40}$"
+              "pattern": "^[0-9a-f]{40}$"
             }
           }
         }
@@ -66,12 +66,16 @@
       "required": [
         "kind",
         "crateRoot",
-        "srcDir",
-        "indexHtml"
+        "srcDir"
       ],
       "properties": {
         "kind": {
-          "const": "single-crate-trunk-csr"
+          "enum": [
+            "single-crate-trunk-csr",
+            "single-crate-native-ssr",
+            "single-crate-browser-hydration",
+            "shared-library-crate"
+          ]
         },
         "crateRoot": {
           "const": "."
@@ -82,15 +86,56 @@
         "indexHtml": {
           "const": "index.html"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-trunk-csr"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "indexHtml"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "single-crate-native-ssr",
+                  "single-crate-browser-hydration",
+                  "shared-library-crate"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "indexHtml"
+              ]
+            }
+          }
+        }
+      ]
     },
     "leptos": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "version",
-        "routerVersion",
-        "renderMode"
+        "routerVersion"
       ],
       "properties": {
         "version": {
@@ -100,7 +145,11 @@
           "const": "0.9.0-alpha"
         },
         "renderMode": {
-          "const": "csr"
+          "enum": [
+            "csr",
+            "hydrate",
+            "ssr"
+          ]
         }
       }
     },
@@ -114,13 +163,28 @@
       ],
       "properties": {
         "uiDir": {
-          "const": "src/components/ui"
+          "type": "string",
+          "default": "src/components/ui",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+[A-Za-z_][A-Za-z0-9_]*$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)(?:/|$)"
+          }
         },
         "uiMod": {
-          "const": "src/components/ui/mod.rs"
+          "type": "string",
+          "default": "src/components/ui/mod.rs",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/){2,}mod\\.rs$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)/"
+          }
         },
         "componentsMod": {
-          "const": "src/components/mod.rs"
+          "type": "string",
+          "default": "src/components/mod.rs",
+          "pattern": "^src/(?:[A-Za-z_][A-Za-z0-9_]*/)+mod\\.rs$",
+          "not": {
+            "pattern": "(?:^|/)(?:Self|_kit|abstract|as|async|await|become|box|break|const|continue|crate|do|dyn|else|enum|extern|false|final|fn|for|gen|if|impl|in|let|loop|macro|macro_rules|match|mod|move|mut|override|priv|pub|raw|ref|return|safe|self|static|struct|super|trait|true|try|type|typeof|union|unsafe|unsized|use|virtual|where|while|yield)/"
+          }
         }
       }
     },
@@ -172,6 +236,7 @@
               "collapsible",
               "dialog",
               "field",
+              "identity",
               "menu",
               "router-link",
               "spinner",
@@ -186,5 +251,112 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-trunk-csr"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "csr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-native-ssr"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "ssr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "single-crate-browser-hydration"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "required": [
+              "renderMode"
+            ],
+            "properties": {
+              "renderMode": {
+                "const": "hydrate"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "project": {
+            "properties": {
+              "kind": {
+                "const": "shared-library-crate"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leptos": {
+            "not": {
+              "required": [
+                "renderMode"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

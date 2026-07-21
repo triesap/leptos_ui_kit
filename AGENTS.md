@@ -6,7 +6,8 @@ This is the public `triesap/leptos_ui_kit` Rust workspace.
 
 `leptos_ui_kit` is a source-first, pure-CSS UI kit for Leptos `0.9.0-alpha`.
 Its primary product is the `leptos_ui_kit` CLI, which installs editable,
-app-owned Leptos component source into supported Trunk CSR apps.
+app-owned Leptos component source into supported CSR, SSR, hydration, and
+shared-library consumers.
 
 Treat generated components as app-owned source, not as runtime imports from this
 crate family.
@@ -44,9 +45,13 @@ crate family.
   TSX, and legacy config fields are not supported.
 - The CLI does not mutate `Cargo.toml`; it emits and verifies dependency plans.
 - Built-in registry items are the only supported registry source.
-- The supported app may be a single crate or a single-package workspace root.
-- SSR, hydration, islands, multi-member workspace installs, and remote
-  registries are future work.
+- The supported target may be a Trunk CSR single crate, a native SSR/browser
+  hydration delivery, a single-package workspace root, or a shared library
+  crate invoked from its package root.
+- Shared-library targets are render-mode neutral. Final delivery targets
+  select exactly one of CSR, hydration, or SSR.
+- Islands, multi-member workspace installs, and remote registries remain
+  future work.
 - Generated CSS classes use `.kit-*`; CSS custom properties use `--kit-*`.
 
 ## CLI Contract
@@ -85,6 +90,7 @@ Generated source must compile against Leptos `0.9.0-alpha` and Rust 1.92.
 Generated components should:
 
 - use `leptos::prelude::*`
+- preserve identical SSR/hydration DOM structure and stable component IDs
 - render ordinary HTML elements where possible
 - keep props explicit and small
 - make native HTML behavior explicit for form-capable components
@@ -92,6 +98,8 @@ Generated components should:
 - avoid hidden runtime dependencies
 - avoid Tailwind classes and framework-specific CSS tooling
 - preserve accessibility semantics
+- avoid process-global native state for browser-only effects
+- support strict CSP without inline style attributes where placement is used
 - keep CSS in managed blocks delimited by `leptos-ui-kit:start` and
   `leptos-ui-kit:end`
 
@@ -103,8 +111,6 @@ Use these root files for public project documentation:
 
 - `README.md`
 - `CONTRIBUTING.md`
-- `CHANGELOG.md`
-- `SECURITY.md`
 - `AGENTS.md`
 
 Do not add repo-local coordination database state.

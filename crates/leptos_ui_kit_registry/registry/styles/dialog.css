@@ -1,4 +1,5 @@
 /* leptos-ui-kit:start dialog */
+@layer leptos-ui-kit.components {
 .kit-dialog-trigger,
 .kit-dialog-close {
   display: inline-flex;
@@ -120,5 +121,6 @@
   color: var(--kit-dialog-description-color, var(--kit-color-text-muted));
   font-size: var(--kit-dialog-description-font-size, 0.9375rem);
   line-height: var(--kit-dialog-description-line-height, 1.5);
+}
 }
 /* leptos-ui-kit:end dialog */

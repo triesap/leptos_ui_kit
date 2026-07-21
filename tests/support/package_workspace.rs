@@ -24,6 +24,9 @@ pub const PACKAGE_NAMES: [&str; 6] = [
     "leptos_ui_kit_registry",
 ];
 
+pub const PACKAGE_WORKSPACE_LOCK: &[u8] =
+    include_bytes!("../fixtures/package_workspace.Cargo.lock");
+
 const PATCHED_PACKAGE_NAMES: [&str; 4] = [
     "leptos_ui_kit_registry",
     "leptos_ui_kit_codegen",
@@ -276,7 +279,7 @@ fn write_synthetic_manifest(workspace: &Path) {
     fs::write(
         workspace.join("Cargo.toml"),
         format!(
-            "[workspace]\nresolver = \"2\"\nmembers = [\n{members}\n]\n\n[patch.crates-io]\n{patches}\n"
+            "[workspace]\nresolver = \"2\"\nmembers = [\n{members}\n]\n\n[patch.crates-io]\n{patches}\n\n[profile.test.package.sha2]\nopt-level = 3\n"
         ),
     )
     .expect("write synthetic package workspace manifest");

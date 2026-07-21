@@ -8,11 +8,11 @@ use super::{
     empty_lock_json, planned_or_existing_kit_config_content, push_file_plan,
     read_canonical_install_lock, upsert_planned_install_lock,
 };
-use crate::patch::plan_index_html;
+use crate::patch::{patch_components_mod_at_path, plan_index_html};
 use crate::path_safety::PlanningContext;
 use crate::{
     ChangeKind, ChangeRecord, CodegenError, InitPlan, PlannedFile, PlannedFileAction,
-    install_lock_path, patch_components_mod,
+    install_lock_path,
 };
 
 pub fn plan_init(project_root: &Path) -> Result<InitPlan, CodegenError> {
@@ -39,6 +39,29 @@ pub(crate) fn plan_init_with_context<F>(
 where
     F: FnOnce() -> Result<String, ConfigError>,
 {
+    plan_project_prerequisites_with_context(context, project_root, canonical_config, true)
+}
+
+pub(crate) fn plan_add_prerequisites_with_context<F>(
+    context: &PlanningContext,
+    project_root: &Path,
+    canonical_config: F,
+) -> Result<InitPlan, CodegenError>
+where
+    F: FnOnce() -> Result<String, ConfigError>,
+{
+    plan_project_prerequisites_with_context(context, project_root, canonical_config, false)
+}
+
+fn plan_project_prerequisites_with_context<F>(
+    context: &PlanningContext,
+    project_root: &Path,
+    canonical_config: F,
+    include_component_modules: bool,
+) -> Result<InitPlan, CodegenError>
+where
+    F: FnOnce() -> Result<String, ConfigError>,
+{
     let mut files = Vec::new();
     let mut changes = Vec::new();
 
@@ -47,7 +70,9 @@ where
     let config = parse_kit_json_str(&config_content)?;
     plan_stylesheet(context, &mut files, &mut changes, &config)?;
     plan_index_html(context, &mut files, &mut changes, &config)?;
-    plan_component_modules(context, &mut files, &mut changes)?;
+    if include_component_modules {
+        plan_component_modules(context, &mut files, &mut changes, &config)?;
+    }
     plan_empty_state(context, &mut files, &mut changes)?;
 
     Ok(InitPlan {
@@ -109,15 +134,25 @@ fn plan_component_modules(
     context: &PlanningContext,
     files: &mut Vec<PlannedFile>,
     changes: &mut Vec<ChangeRecord>,
+    config: &KitConfig,
 ) -> Result<(), CodegenError> {
-    let components_mod = context.read_optional_string("src/components/mod.rs")?;
+    let components_mod_path = config.install.components_mod.as_str();
+    let ui_mod_path = config.install.ui_mod.as_str();
+    let ui_module_name = config
+        .install
+        .ui_dir
+        .rsplit('/')
+        .next()
+        .expect("validated UI directory has a final segment");
+    let components_mod = context.read_optional_string(components_mod_path)?;
     if let Some(existing) = components_mod {
-        let patched = patch_components_mod(Some(&existing))?;
+        let patched =
+            patch_components_mod_at_path(Some(&existing), components_mod_path, ui_module_name)?;
         if patched != existing {
             push_file_plan(
                 files,
                 changes,
-                "src/components/mod.rs",
+                components_mod_path,
                 PlannedFileAction::Update,
                 patched,
                 ChangeKind::UpdateFile,
@@ -127,21 +162,18 @@ fn plan_component_modules(
         push_file_plan(
             files,
             changes,
-            "src/components/mod.rs",
+            components_mod_path,
             PlannedFileAction::Create,
-            patch_components_mod(None)?,
+            patch_components_mod_at_path(None, components_mod_path, ui_module_name)?,
             ChangeKind::CreateFile,
         );
     }
 
-    if context
-        .read_optional_string("src/components/ui/mod.rs")?
-        .is_none()
-    {
+    if context.read_optional_string(ui_mod_path)?.is_none() {
         push_file_plan(
             files,
             changes,
-            "src/components/ui/mod.rs",
+            ui_mod_path,
             PlannedFileAction::Create,
             String::new(),
             ChangeKind::CreateFile,

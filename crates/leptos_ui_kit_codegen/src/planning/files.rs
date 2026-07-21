@@ -21,12 +21,12 @@ pub(crate) fn read_canonical_install_lock(
     let Some(input) = context.read_optional_string(lock_path)? else {
         return Ok(None);
     };
-    let path = context.project_root().join(lock_path);
-    let lock = parse_install_lock_str_at_path(&input, &path)?;
-    let canonical = lock_to_json_at_path(&lock, &path)?;
+    let path = Path::new(lock_path);
+    let lock = parse_install_lock_str_at_path(&input, path)?;
+    let canonical = lock_to_json_at_path(&lock, path)?;
     if input != canonical {
         return Err(CodegenError::InvalidLock {
-            path,
+            path: path.to_path_buf(),
             reason: "install lock must use its canonical JSON serialization".to_owned(),
         });
     }
@@ -39,8 +39,7 @@ pub(crate) fn load_or_empty_lock(
     lock_path: &str,
     config_hash: String,
 ) -> Result<InstallLock, CodegenError> {
-    if let Some((mut lock, _)) = read_canonical_install_lock(context, lock_path)? {
-        lock.project.config_hash = config_hash;
+    if let Some((lock, _)) = read_canonical_install_lock(context, lock_path)? {
         return Ok(lock);
     }
 
@@ -94,8 +93,14 @@ pub(crate) fn plan_generated_source_file(
         );
     }
 
-    if context.read_optional_string(logical_path)?.is_some() {
-        return unsafe_patch(logical_path, "target exists but is not tracked in lock");
+    if let Some(current) = context.read_optional_string(logical_path)? {
+        if current == generated {
+            return Ok(());
+        }
+        return unsafe_patch(
+            logical_path,
+            "target is application-owned and differs from the current registry source; reconcile or move it before re-adding the item",
+        );
     }
 
     upsert_planned_file(
@@ -389,8 +394,9 @@ pub(crate) fn empty_lock_json(
     config_content: &str,
     state_path: &str,
 ) -> Result<String, CodegenError> {
+    let config = leptos_ui_kit_registry::parse_kit_json_str(config_content)?;
     lock_to_json_at_path(
-        &InstallLock::empty(hash_bytes(config_content.as_bytes())),
+        &InstallLock::empty_for_project(hash_bytes(config_content.as_bytes()), config.project.kind),
         Path::new(state_path),
     )
 }

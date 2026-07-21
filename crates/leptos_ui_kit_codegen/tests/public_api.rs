@@ -137,6 +137,11 @@ fn root_symbols_and_function_signatures_remain_available_downstream() {
         extract_managed_css_block_at_path;
     let _: fn(&str, &str) -> Result<BTreeMap<String, ManagedCssBlockRange>, CodegenError> =
         inspect_managed_css_blocks_at_path;
+    let _: fn(&str) -> Result<HtmlInspection, HtmlInspectionError> = inspect_html;
+    let _: fn(&str, &str) -> Result<HtmlStylesheetState, HtmlInspectionError> =
+        inspect_html_stylesheet;
+    let _: fn(&str, &str) -> Result<Option<String>, HtmlInspectionError> =
+        patch_html_stylesheet_link;
     let _: fn(
         &str,
         &str,
@@ -188,6 +193,14 @@ fn public_traits_associated_methods_and_fields_remain_available() {
     assert_partial_ord::<ManagedCssDependency>();
     assert_ord::<ManagedCssDependency>();
     assert_owned_traits::<ManagedCssBlockRange>();
+    assert_serde_owned_traits::<HtmlSpan>();
+    assert_serde_owned_traits::<HtmlHeadInspection>();
+    assert_serde_owned_traits::<HtmlLinkInspection>();
+    assert_serde_owned_traits::<HtmlInspection>();
+    assert_serde_owned_traits::<HtmlStylesheetState>();
+    assert_owned_traits::<HtmlInspectionError>();
+    assert_display::<HtmlInspectionError>();
+    assert_error::<HtmlInspectionError>();
     assert_owned_traits::<UiModuleExport>();
     assert_debug::<WriteLock>();
     assert_auto_traits::<WriteLock>();
@@ -307,6 +320,7 @@ fn project_lock_fields(
 
     let _: &String = &item.id;
     let _: &String = &item.name;
+    let _: leptos_ui_kit_registry::RegistryItemKind = item.kind;
     let _: &String = &item.source;
     let _: &String = &item.version;
     let _: &String = &item.content_hash;
@@ -548,6 +562,7 @@ fn public_plan_and_nested_lock_serialized_names_remain_stable() {
         &[
             "id",
             "name",
+            "kind",
             "source",
             "version",
             "contentHash",

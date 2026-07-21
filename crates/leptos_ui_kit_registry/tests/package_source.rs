@@ -34,7 +34,7 @@ const PACKAGE_BASE: [&str; 5] = [
 
 const REGISTRY_SUPPORT: [&str; 3] = ["build.rs", "build_assets.rs", "build_provenance.rs"];
 
-const REGISTRY_SOURCES: [&str; 8] = [
+const REGISTRY_SOURCES: [&str; 9] = [
     "src/builtin_registry.rs",
     "src/config.rs",
     "src/detect.rs",
@@ -43,6 +43,7 @@ const REGISTRY_SOURCES: [&str; 8] = [
     "src/lib.rs",
     "src/registry_health.rs",
     "src/theme_contract.rs",
+    "src/token_abi.rs",
 ];
 
 const REGISTRY_TESTS: [&str; 7] = [
@@ -117,31 +118,37 @@ const PACKAGES: [PackageSpec; 6] = [
         name: "leptos_ui_kit",
         path_in_vcs: "crates/leptos_ui_kit",
         files: &FACADE_FILES,
+        expected_file_count: 6,
     },
     PackageSpec {
         name: "leptos_ui_kit_cli",
         path_in_vcs: "crates/leptos_ui_kit_cli",
         files: &CLI_FILES,
+        expected_file_count: 16,
     },
     PackageSpec {
         name: "leptos_ui_kit_codegen",
         path_in_vcs: "crates/leptos_ui_kit_codegen",
         files: &CODEGEN_FILES,
+        expected_file_count: 40,
     },
     PackageSpec {
         name: "leptos_ui_kit_codegen_platform",
         path_in_vcs: "crates/leptos_ui_kit_codegen_platform",
         files: &CODEGEN_PLATFORM_FILES,
+        expected_file_count: 7,
     },
     PackageSpec {
         name: "leptos_ui_kit_primitives",
         path_in_vcs: "crates/leptos_ui_kit_primitives",
         files: &PRIMITIVES_FILES,
+        expected_file_count: 6,
     },
     PackageSpec {
         name: "leptos_ui_kit_registry",
         path_in_vcs: "crates/leptos_ui_kit_registry",
         files: &[],
+        expected_file_count: 96,
     },
 ];
 
@@ -150,6 +157,7 @@ struct PackageSpec {
     name: &'static str,
     path_in_vcs: &'static str,
     files: &'static [&'static str],
+    expected_file_count: usize,
 }
 
 #[test]
@@ -160,8 +168,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
     let archive_target = temporary.path().join("archive-target");
     let archives = package_workspace(&source_root, &archive_target);
     let approved_rev = source_head(&source_root);
-    let approved_lock = fs::read(source_root.join("Cargo.lock"))
-        .expect("read the tracked package-source dependency lock");
+    let approved_lock = package_workspace_support::PACKAGE_WORKSPACE_LOCK;
 
     let clean_workspace = temporary.path().join("clean/workspace");
     let clean_revisions = extract_workspace(&archives, &clean_workspace, &source_root);
@@ -178,8 +185,8 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
 
     let cargo_home = temporary.path().join("isolated-cargo-home");
     fs::create_dir_all(&cargo_home).expect("create isolated Cargo home");
-    seed_extracted_lock(&clean_workspace, &approved_lock);
-    seed_extracted_lock(&hostile_workspace, &approved_lock);
+    seed_extracted_lock(&clean_workspace, approved_lock);
+    seed_extracted_lock(&hostile_workspace, approved_lock);
     run_extracted_suite(
         "clean extracted workspace",
         &clean_workspace,
@@ -187,6 +194,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
         &temporary.path().join("clean-target"),
         &approved_rev,
         &[temporary.path()],
+        true,
     );
     run_extracted_suite(
         "hostile-parent extracted workspace",
@@ -195,6 +203,7 @@ fn packaged_sources_build_with_cargo_vcs_provenance_outside_and_inside_hostile_g
         &temporary.path().join("hostile-target"),
         &approved_rev,
         &[temporary.path()],
+        false,
     );
     for (label, workspace) in [("clean", &clean_workspace), ("hostile", &hostile_workspace)] {
         assert_eq!(
@@ -230,7 +239,33 @@ fn extract_workspace(
                 "{} archive leaks source checkout path in {path}",
                 spec.name
             );
+            if path.ends_with(".rs") {
+                for forbidden in [
+                    b"../../schema".as_slice(),
+                    b"../../tests/fixtures".as_slice(),
+                ] {
+                    assert!(
+                        !contains_bytes(&bytes, forbidden),
+                        "{} archive reaches into a workspace-only input from {path}",
+                        spec.name
+                    );
+                }
+            }
         }
+        let readme = fs::read_to_string(extracted.join("README.md"))
+            .unwrap_or_else(|error| panic!("read {} archive README: {error}", spec.name));
+        assert!(
+            readme.contains(
+                "Licensed under either the MIT License or the Apache License, Version 2.0"
+            ),
+            "{} archive README must state the self-contained dual-license terms",
+            spec.name
+        );
+        assert!(
+            !readme.contains("See `LICENSE-MIT`") && !readme.contains("See `LICENSE-APACHE`"),
+            "{} archive README references license files outside the archive",
+            spec.name
+        );
 
         let vcs_path = extracted.join(".cargo_vcs_info.json");
         let vcs: Value = serde_json::from_slice(
@@ -270,8 +305,13 @@ fn expected_inventory(spec: PackageSpec) -> BTreeSet<String> {
         expected.extend(REGISTRY_SOURCES.map(str::to_owned));
         expected.extend(REGISTRY_TESTS.map(str::to_owned));
         expected.extend(ASSET_SPECS.map(|asset| asset.source_path.to_owned()));
-        assert_eq!(expected.len(), 91);
     }
+    assert_eq!(
+        expected.len(),
+        spec.expected_file_count,
+        "intentional {} archive cardinality",
+        spec.name
+    );
     expected
 }
 
@@ -399,14 +439,20 @@ fn run_extracted_suite(
     target_dir: &Path,
     expected_rev: &str,
     forbidden_paths: &[&Path],
+    execute_tests: bool,
 ) {
     assert_local_package_metadata(label, workspace, cargo_home, target_dir);
 
-    let tests = extracted_cargo(workspace, cargo_home, target_dir)
-        .args(["test", "--workspace", "--all-targets", "--locked"])
+    let validation = extracted_cargo(workspace, cargo_home, target_dir)
+        .args([
+            if execute_tests { "test" } else { "check" },
+            "--workspace",
+            "--all-targets",
+            "--locked",
+        ])
         .output()
-        .unwrap_or_else(|error| panic!("run {label} all-target tests: {error}"));
-    assert_success(&format!("{label} all-target tests"), &tests);
+        .unwrap_or_else(|error| panic!("run {label} all-target validation: {error}"));
+    assert_success(&format!("{label} all-target validation"), &validation);
 
     let direct = run_version(workspace, cargo_home, target_dir, "leptos_ui_kit", &[]);
     let cargo_wrapper = run_version(
@@ -426,7 +472,8 @@ fn run_extracted_suite(
 
 fn seed_extracted_lock(workspace: &Path, approved_lock: &[u8]) {
     // Cargo packages carry closure-specific locks. The combined extracted
-    // workspace must use the tracked all-package graph validated by --locked.
+    // workspace uses its own tracked package-only graph, excluding
+    // source-workspace tests and their unpublished development dependencies.
     fs::write(workspace.join("Cargo.lock"), approved_lock)
         .unwrap_or_else(|error| panic!("seed {} workspace lock: {error}", workspace.display()));
 }
