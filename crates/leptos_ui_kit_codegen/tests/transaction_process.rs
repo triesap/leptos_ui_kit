@@ -24,7 +24,7 @@ const WORKER_ID_ENV: &str = "LEPTOS_UI_KIT_TRANSACTION_PROCESS_ID";
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(20);
 const BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ADVISORY_LOCK_MARKER: &[u8] = b"leptos-ui-kit advisory lock v1\n";
-const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n";
+const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 const INDEX_HTML: &[u8] = b"<html><head></head><body></body></html>\n";
 
 #[test]

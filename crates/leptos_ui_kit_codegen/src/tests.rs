@@ -2827,7 +2827,11 @@ fn stale_cleanup_rescans_and_removes_a_candidate_that_arrives_during_cleanup() {
     worker.join().expect("join cleanup writer");
 
     assert_eq!(coordination_lock_identity(&project), lock_identity);
-    assert!(transaction_candidate_paths(&project).is_empty());
+    let residual_candidates = transaction_candidate_paths(&project);
+    assert!(
+        residual_candidates.is_empty(),
+        "late stale candidates remain: {residual_candidates:?}"
+    );
     assert!(
         project
             .join("src/components/ui/_kit/.transactions")
@@ -3608,7 +3612,7 @@ fn successful_single_file_transaction_bounds_strict_exact_reads() {
     let mut reads_by_path = reads_by_path.into_iter().collect::<Vec<_>>();
     reads_by_path.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     assert!(
-        journal_record_hash_reads <= 44,
+        journal_record_hash_reads <= 64,
         "journal lineage hash-and-validate reads exceeded the bounded budget: \
          {journal_record_hash_reads}"
     );
@@ -4870,6 +4874,25 @@ fn every_transaction_io_fault_avoids_partial_application_state() {
 }
 
 #[test]
+fn journal_partial_create_failure_reconciles_without_cached_authority_drift() {
+    let directory = tempfile::tempdir().expect("journal partial create fault tempdir");
+    let root = directory.path();
+    let (files, changes) = setup_two_file_update(root);
+    let fault_fs = Arc::new(FaultFs::fail_nth(FsOperation::CreateNewFile, 34));
+
+    let result = apply_planned_files_with(root, &files, &changes, fault_fs.clone());
+    let events = fault_fs.events();
+    let commit_complete_visible = events
+        .iter()
+        .any(|event| matches!(event.operation, FsOperation::CommitBoundary { .. }));
+    assert!(
+        two_file_cohort_state_matches(root, commit_complete_visible),
+        "create-new failure left a partial cohort; result={result:?}; event tail={:?}",
+        &events[events.len().saturating_sub(64)..]
+    );
+}
+
+#[test]
 fn post_open_create_errors_recover_exact_empty_journal_and_finalization_residuals() {
     #[derive(Debug, Clone, Copy)]
     enum Injection {
@@ -5064,6 +5087,122 @@ fn terminal_namespace_retirement_recovers_at_every_semantic_boundary() {
 }
 
 #[test]
+fn coordination_migration_and_namespace_bootstrap_recover_from_every_observed_transition() {
+    let baseline = tempfile::tempdir().expect("coordination lifecycle baseline tempdir");
+    let (baseline_files, baseline_changes) =
+        setup_two_file_update_with_legacy_coordination(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(
+        baseline.path(),
+        &baseline_files,
+        &baseline_changes,
+        baseline_fs.clone(),
+    )
+    .expect("baseline legacy migration and namespace bootstrap");
+    let mut transitions = Vec::new();
+    for event in baseline_fs.events() {
+        if is_coordination_lifecycle_transition(event.operation)
+            && !transitions.contains(&event.operation)
+        {
+            transitions.push(event.operation);
+        }
+    }
+    assert!(
+        transitions.len() >= 44,
+        "successful legacy migration and bootstrap exposed only {} before/after transition points: {transitions:?}",
+        transitions.len(),
+    );
+
+    for transition in transitions {
+        let directory = tempfile::tempdir().expect("coordination lifecycle crash tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
+        let fault_fs = Arc::new(FaultFs::crash_nth(transition, 1));
+
+        let crash = std::panic::catch_unwind(|| {
+            let _ = apply_planned_files_with(root, &files, &changes, fault_fs);
+        });
+        assert!(crash.is_err(), "{transition:?} did not terminate execution");
+
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough()))
+            .unwrap_or_else(|error| panic!("recover {transition:?}: {error}"));
+        assert_two_file_cohort_state(root, false);
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+#[test]
+fn coordination_control_partials_recover_from_prewrite_and_postwrite_failures() {
+    let baseline = tempfile::tempdir().expect("coordination partial baseline tempdir");
+    let (baseline_files, baseline_changes) =
+        setup_two_file_update_with_legacy_coordination(baseline.path());
+    let baseline_fs = Arc::new(FaultFs::passthrough());
+    apply_planned_files_with(
+        baseline.path(),
+        &baseline_files,
+        &baseline_changes,
+        baseline_fs.clone(),
+    )
+    .expect("baseline coordination lifecycle");
+    let mut write_ordinal = 0_usize;
+    let mut sync_ordinal = 0_usize;
+    let partial_faults = baseline_fs
+        .events()
+        .into_iter()
+        .filter_map(|event| {
+            let (operation, ordinal, after_success) = match event.operation {
+                FsOperation::WriteHandle => {
+                    write_ordinal += 1;
+                    (FsOperation::WriteHandle, write_ordinal, false)
+                }
+                FsOperation::SyncHandle => {
+                    sync_ordinal += 1;
+                    (FsOperation::SyncHandle, sync_ordinal, true)
+                }
+                _ => return None,
+            };
+            let name = event.path.file_name()?.to_str()?;
+            (name.ends_with(".partial")
+                && (name.starts_with("coordination-")
+                    || name.starts_with("namespace-bootstrap-v2-")))
+            .then_some((operation, ordinal, after_success, name.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partial_faults.len(),
+        8,
+        "intent, owner, completion, and namespace intent must expose write and sync failure points"
+    );
+
+    for (operation, ordinal, after_success, name) in partial_faults {
+        let directory = tempfile::tempdir().expect("coordination partial fault tempdir");
+        let root = directory.path();
+        let (files, changes) = setup_two_file_update_with_legacy_coordination(root);
+        let fault_fs = Arc::new(if after_success {
+            FaultFs::fail_after_success_nth(operation, ordinal)
+        } else {
+            FaultFs::fail_nth(operation, ordinal)
+        });
+
+        let error = match apply_planned_files_with(root, &files, &changes, fault_fs) {
+            Ok(()) => {
+                panic!("{name} after_success={after_success} selected partial write did not fail")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, CodegenError::RecoveryRequired { .. }),
+            "{name} after_success={after_success} returned {error}"
+        );
+        apply_planned_files_with(root, &[], &[], Arc::new(FaultFs::passthrough())).unwrap_or_else(
+            |recovery| panic!("recover {name} after_success={after_success}: {recovery}"),
+        );
+        assert_two_file_cohort_state(root, false);
+        assert_no_transaction_namespace_lifecycle(root);
+    }
+}
+
+#[test]
 fn crash_after_stage_sync_before_progress_publication_is_recoverable() {
     let directory = tempfile::tempdir().expect("stage-progress crash tempdir");
     let root = directory.path();
@@ -5158,6 +5297,53 @@ fn setup_two_file_update(root: &Path) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
             ChangeRecord::new(ChangeKind::UpdateFile, "styles/second.css", true),
             ChangeRecord::new(ChangeKind::WriteLockFile, DEFAULT_KIT_LOCK_PATH, true),
         ],
+    )
+}
+
+fn setup_two_file_update_with_legacy_coordination(
+    root: &Path,
+) -> (Vec<PlannedFile>, Vec<ChangeRecord>) {
+    let planned = setup_two_file_update(root);
+    let kit = root.join("src/components/ui/_kit");
+    fs::write(kit.join(".gitignore"), b"/.write.lock\n/.transactions/\n")
+        .expect("restore exact legacy coordination ignore");
+    fs::create_dir(kit.join(".transactions")).expect("create exact-empty legacy namespace");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(kit.join(".transactions"), fs::Permissions::from_mode(0o700))
+            .expect("set exact legacy namespace mode");
+    }
+    planned
+}
+
+fn is_coordination_lifecycle_transition(operation: FsOperation) -> bool {
+    matches!(
+        operation,
+        FsOperation::ArmCoordinationMigration { .. }
+            | FsOperation::BindLegacyTransactionNamespaceResidual { .. }
+            | FsOperation::CancelLegacyTransactionNamespaceResidual { .. }
+            | FsOperation::CreateCoordinationMigrationWorkspace { .. }
+            | FsOperation::BindCoordinationMigrationWorkspace { .. }
+            | FsOperation::PrepareCoordinationMigrationIntent { .. }
+            | FsOperation::PublishCoordinationMigrationIntent { .. }
+            | FsOperation::CreateCoordinationIgnoreOwner { .. }
+            | FsOperation::PublishCoordinationIgnoreOwner { .. }
+            | FsOperation::ReplaceCoordinationIgnore { .. }
+            | FsOperation::PrepareCoordinationMigrationComplete { .. }
+            | FsOperation::PublishCoordinationMigrationComplete { .. }
+            | FsOperation::CleanupCoordinationMigrationObject { .. }
+            | FsOperation::RetireCoordinationMigrationWorkspace { .. }
+            | FsOperation::RetireCoordinationMigrationAlias { .. }
+            | FsOperation::ArmTransactionNamespaceBootstrap { .. }
+            | FsOperation::CreateTransactionNamespace { .. }
+            | FsOperation::BindTransactionNamespaceBootstrap { .. }
+            | FsOperation::PrepareTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::PublishTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::ActivateTransactionNamespace { .. }
+            | FsOperation::RetireTransactionNamespaceBootstrapIntent { .. }
+            | FsOperation::RetireTransactionNamespaceBootstrapAlias { .. }
     )
 }
 

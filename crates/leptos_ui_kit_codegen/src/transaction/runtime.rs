@@ -15,6 +15,7 @@ use super::journal::ValidatedJournalEnvelopeV2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum EntropyPurpose {
     TransactionId,
+    CoordinationMigration,
     #[cfg(test)]
     LockBootstrapCandidate,
     #[cfg(test)]
@@ -27,6 +28,7 @@ impl fmt::Display for EntropyPurpose {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::TransactionId => "transaction identifier",
+            Self::CoordinationMigration => "coordination migration identifier",
             #[cfg(test)]
             Self::LockBootstrapCandidate => "write-lock bootstrap candidate",
             #[cfg(test)]
@@ -241,6 +243,84 @@ pub(crate) enum TransitionKey {
         generation: u64,
         window: TransitionWindow,
     },
+    ArmCoordinationMigration {
+        window: TransitionWindow,
+    },
+    BindLegacyTransactionNamespaceResidual {
+        window: TransitionWindow,
+    },
+    CancelLegacyTransactionNamespaceResidual {
+        window: TransitionWindow,
+    },
+    CreateCoordinationMigrationWorkspace {
+        window: TransitionWindow,
+    },
+    BindCoordinationMigrationWorkspace {
+        window: TransitionWindow,
+    },
+    PrepareCoordinationMigrationIntent {
+        window: TransitionWindow,
+    },
+    PublishCoordinationMigrationIntent {
+        window: TransitionWindow,
+    },
+    CreateCoordinationIgnoreOwner {
+        window: TransitionWindow,
+    },
+    PublishCoordinationIgnoreOwner {
+        window: TransitionWindow,
+    },
+    ReplaceCoordinationIgnore {
+        window: TransitionWindow,
+    },
+    PrepareCoordinationMigrationComplete {
+        window: TransitionWindow,
+    },
+    PublishCoordinationMigrationComplete {
+        window: TransitionWindow,
+    },
+    CleanupCoordinationMigrationObject {
+        window: TransitionWindow,
+    },
+    RetireCoordinationMigrationWorkspace {
+        window: TransitionWindow,
+    },
+    RetireCoordinationMigrationAlias {
+        window: TransitionWindow,
+    },
+    ArmTransactionNamespaceBootstrap {
+        window: TransitionWindow,
+    },
+    CreateTransactionNamespace {
+        window: TransitionWindow,
+    },
+    BindTransactionNamespaceBootstrap {
+        window: TransitionWindow,
+    },
+    PrepareTransactionNamespaceBootstrapIntent {
+        window: TransitionWindow,
+    },
+    PublishTransactionNamespaceBootstrapIntent {
+        window: TransitionWindow,
+    },
+    ActivateTransactionNamespace {
+        window: TransitionWindow,
+    },
+    CancelTransactionNamespaceBootstrapIntent {
+        window: TransitionWindow,
+    },
+    CleanupTransactionNamespaceBootstrapIntentPartial {
+        window: TransitionWindow,
+    },
+    CancelTransactionNamespaceBootstrap {
+        window: TransitionWindow,
+    },
+    RetireTransactionNamespaceBootstrapIntent {
+        window: TransitionWindow,
+    },
+    RetireTransactionNamespaceBootstrapAlias {
+        window: TransitionWindow,
+    },
     ArmNamespaceRetirementAuthority {
         window: TransitionWindow,
     },
@@ -395,8 +475,7 @@ impl TransactionRuntime {
         self.validated_journal_names
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(name)
-            .or_insert(envelope);
+            .insert(name, envelope);
     }
 }
 
@@ -1069,6 +1148,84 @@ mod tests {
                 generation,
                 window,
             },
+            TransitionKey::ArmCoordinationMigration { .. } => {
+                TransitionKey::ArmCoordinationMigration { window }
+            }
+            TransitionKey::BindLegacyTransactionNamespaceResidual { .. } => {
+                TransitionKey::BindLegacyTransactionNamespaceResidual { window }
+            }
+            TransitionKey::CancelLegacyTransactionNamespaceResidual { .. } => {
+                TransitionKey::CancelLegacyTransactionNamespaceResidual { window }
+            }
+            TransitionKey::CreateCoordinationMigrationWorkspace { .. } => {
+                TransitionKey::CreateCoordinationMigrationWorkspace { window }
+            }
+            TransitionKey::BindCoordinationMigrationWorkspace { .. } => {
+                TransitionKey::BindCoordinationMigrationWorkspace { window }
+            }
+            TransitionKey::PrepareCoordinationMigrationIntent { .. } => {
+                TransitionKey::PrepareCoordinationMigrationIntent { window }
+            }
+            TransitionKey::PublishCoordinationMigrationIntent { .. } => {
+                TransitionKey::PublishCoordinationMigrationIntent { window }
+            }
+            TransitionKey::CreateCoordinationIgnoreOwner { .. } => {
+                TransitionKey::CreateCoordinationIgnoreOwner { window }
+            }
+            TransitionKey::PublishCoordinationIgnoreOwner { .. } => {
+                TransitionKey::PublishCoordinationIgnoreOwner { window }
+            }
+            TransitionKey::ReplaceCoordinationIgnore { .. } => {
+                TransitionKey::ReplaceCoordinationIgnore { window }
+            }
+            TransitionKey::PrepareCoordinationMigrationComplete { .. } => {
+                TransitionKey::PrepareCoordinationMigrationComplete { window }
+            }
+            TransitionKey::PublishCoordinationMigrationComplete { .. } => {
+                TransitionKey::PublishCoordinationMigrationComplete { window }
+            }
+            TransitionKey::CleanupCoordinationMigrationObject { .. } => {
+                TransitionKey::CleanupCoordinationMigrationObject { window }
+            }
+            TransitionKey::RetireCoordinationMigrationWorkspace { .. } => {
+                TransitionKey::RetireCoordinationMigrationWorkspace { window }
+            }
+            TransitionKey::RetireCoordinationMigrationAlias { .. } => {
+                TransitionKey::RetireCoordinationMigrationAlias { window }
+            }
+            TransitionKey::ArmTransactionNamespaceBootstrap { .. } => {
+                TransitionKey::ArmTransactionNamespaceBootstrap { window }
+            }
+            TransitionKey::CreateTransactionNamespace { .. } => {
+                TransitionKey::CreateTransactionNamespace { window }
+            }
+            TransitionKey::BindTransactionNamespaceBootstrap { .. } => {
+                TransitionKey::BindTransactionNamespaceBootstrap { window }
+            }
+            TransitionKey::PrepareTransactionNamespaceBootstrapIntent { .. } => {
+                TransitionKey::PrepareTransactionNamespaceBootstrapIntent { window }
+            }
+            TransitionKey::PublishTransactionNamespaceBootstrapIntent { .. } => {
+                TransitionKey::PublishTransactionNamespaceBootstrapIntent { window }
+            }
+            TransitionKey::ActivateTransactionNamespace { .. } => {
+                TransitionKey::ActivateTransactionNamespace { window }
+            }
+            TransitionKey::CancelTransactionNamespaceBootstrapIntent { .. } => {
+                TransitionKey::CancelTransactionNamespaceBootstrapIntent { window }
+            }
+            TransitionKey::CleanupTransactionNamespaceBootstrapIntentPartial { .. } => {
+                TransitionKey::CleanupTransactionNamespaceBootstrapIntentPartial { window }
+            }
+            TransitionKey::CancelTransactionNamespaceBootstrap { .. } => {
+                TransitionKey::CancelTransactionNamespaceBootstrap { window }
+            }
+            TransitionKey::RetireTransactionNamespaceBootstrapIntent { .. } => {
+                TransitionKey::RetireTransactionNamespaceBootstrapIntent { window }
+            }
+            TransitionKey::RetireTransactionNamespaceBootstrapAlias { .. } => {
+                TransitionKey::RetireTransactionNamespaceBootstrapAlias { window }
+            }
             TransitionKey::ArmNamespaceRetirementAuthority { .. } => {
                 TransitionKey::ArmNamespaceRetirementAuthority { window }
             }
@@ -1090,6 +1247,32 @@ mod tests {
     fn protocol_transition_points() -> Vec<TransitionKey> {
         let before = TransitionWindow::Before;
         let mut points = vec![
+            TransitionKey::ArmCoordinationMigration { window: before },
+            TransitionKey::BindLegacyTransactionNamespaceResidual { window: before },
+            TransitionKey::CancelLegacyTransactionNamespaceResidual { window: before },
+            TransitionKey::CreateCoordinationMigrationWorkspace { window: before },
+            TransitionKey::BindCoordinationMigrationWorkspace { window: before },
+            TransitionKey::PrepareCoordinationMigrationIntent { window: before },
+            TransitionKey::PublishCoordinationMigrationIntent { window: before },
+            TransitionKey::CreateCoordinationIgnoreOwner { window: before },
+            TransitionKey::PublishCoordinationIgnoreOwner { window: before },
+            TransitionKey::ReplaceCoordinationIgnore { window: before },
+            TransitionKey::PrepareCoordinationMigrationComplete { window: before },
+            TransitionKey::PublishCoordinationMigrationComplete { window: before },
+            TransitionKey::CleanupCoordinationMigrationObject { window: before },
+            TransitionKey::RetireCoordinationMigrationWorkspace { window: before },
+            TransitionKey::RetireCoordinationMigrationAlias { window: before },
+            TransitionKey::ArmTransactionNamespaceBootstrap { window: before },
+            TransitionKey::CreateTransactionNamespace { window: before },
+            TransitionKey::BindTransactionNamespaceBootstrap { window: before },
+            TransitionKey::PrepareTransactionNamespaceBootstrapIntent { window: before },
+            TransitionKey::PublishTransactionNamespaceBootstrapIntent { window: before },
+            TransitionKey::ActivateTransactionNamespace { window: before },
+            TransitionKey::CancelTransactionNamespaceBootstrapIntent { window: before },
+            TransitionKey::CleanupTransactionNamespaceBootstrapIntentPartial { window: before },
+            TransitionKey::CancelTransactionNamespaceBootstrap { window: before },
+            TransitionKey::RetireTransactionNamespaceBootstrapIntent { window: before },
+            TransitionKey::RetireTransactionNamespaceBootstrapAlias { window: before },
             TransitionKey::ArmNamespaceRetirementAuthority { window: before },
             TransitionKey::MoveTransactionNamespaceToRetirement { window: before },
             TransitionKey::RemoveInternalFinalizationLease { window: before },
@@ -1275,7 +1458,7 @@ mod tests {
     #[test]
     fn transition_key_surface_covers_every_protocol_mutation_before_and_after() {
         let points = protocol_transition_points();
-        assert_eq!(points.len(), 76);
+        assert_eq!(points.len(), 102);
 
         let expected = points
             .into_iter()
@@ -1293,7 +1476,7 @@ mod tests {
 
         assert_eq!(observer.wait_for_count(expected.len()), expected);
         assert_eq!(observer.events(), expected);
-        assert_eq!(expected.len(), 152);
+        assert_eq!(expected.len(), 204);
         for pair in expected.chunks_exact(2) {
             assert_eq!(pair[0], at_window(pair[0], TransitionWindow::Before));
             assert_eq!(pair[1], at_window(pair[0], TransitionWindow::After));

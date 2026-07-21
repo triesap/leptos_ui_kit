@@ -1026,6 +1026,33 @@ pub(super) fn probe_volume(root: AdoptedRootDirectory) -> io::Result<QualifiedVo
     })
 }
 
+pub(super) fn qualify_peer_directory(
+    qualified: &DirectoryCapability,
+    peer: AdoptedRootDirectory,
+) -> io::Result<DirectoryCapability> {
+    let peer = probe_volume(peer)?;
+    let qualified_info = refresh_verified(&qualified.0)?;
+    let peer_info = refresh_verified(&peer.root.0)?;
+    let qualified_volume = &qualified.0.qualification.capabilities;
+    let peer_volume = &peer.root.0.qualification.capabilities;
+    if qualified_info.identity.volume_serial_number != peer_info.identity.volume_serial_number
+        || !qualified_volume
+            .file_system_name
+            .eq_ignore_ascii_case(&peer_volume.file_system_name)
+        || qualified_volume.maximum_component_length != peer_volume.maximum_component_length
+        || qualified_volume.supports_hard_links != peer_volume.supports_hard_links
+        || qualified_volume.supports_reparse_points != peer_volume.supports_reparse_points
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the adopted peer directory is not on the same qualified transaction volume",
+        ));
+    }
+    let mut peer_inner = peer.root.0;
+    peer_inner.qualification = Arc::clone(&qualified.0.qualification);
+    Ok(DirectoryCapability(peer_inner))
+}
+
 fn preflight_move(
     source: &ObjectCapability,
     source_parent: &DirectoryCapability,

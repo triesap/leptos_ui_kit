@@ -6,6 +6,9 @@ use cap_std::fs::Metadata;
 use crate::path_safety::{ObjectIdentity, PlanningContext};
 use crate::{CodegenError, PreservedFileMode};
 
+use super::coordination_migration::{
+    check_coordination_migration_pending, recover_coordination_migration,
+};
 use super::engine::{
     BoundedRecoveryStep, RecoveryBarrierCertificate, derive_recovery_adoption_plan,
     recover_loaded_transaction_step,
@@ -13,6 +16,7 @@ use super::engine::{
 use super::fs::{DirectoryEndpoint, ExactDirectoryObservation, HardLinkEndpoint};
 use super::journal::{FinalizationOutcomeV2, TransactionId, canonical_root_hash};
 use super::lock::{DEFAULT_KIT_WRITE_LOCK_PATH, KIT_ADVISORY_LOCK_CONTENT, WriteLock};
+use super::namespace_bootstrap::{check_namespace_bootstrap_pending, recover_namespace_bootstrap};
 use super::namespace_lifecycle::{
     NamespaceRetirementStep, arm_retirement_authority, check_retirement_pending,
     recover_retirement_step,
@@ -87,7 +91,9 @@ impl RecoveryProgressBudget {
 pub fn check_pending_recovery(project_root: &Path) -> Result<(), CodegenError> {
     let context = PlanningContext::open(project_root)?;
     let runtime = TransactionRuntime::system();
+    check_coordination_migration_pending(&context, &runtime)?;
     check_retirement_pending(&context, &runtime)?;
+    check_namespace_bootstrap_pending(&context, &runtime)?;
     let kit_parent = match context.open_directory(KIT_PARENT_LOGICAL_PATH) {
         Ok(parent) => parent,
         Err(CodegenError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
@@ -209,11 +215,14 @@ pub(crate) fn recover_pending_locked(
     recover_pending_locked_with_runtime(context, lock, &runtime)
 }
 
-fn recover_pending_locked_with_runtime(
+pub(crate) fn recover_pending_locked_with_runtime(
     context: &PlanningContext,
     lock: &WriteLock,
     runtime: &TransactionRuntime,
 ) -> Result<(), CodegenError> {
+    lock.validate_lifecycle_context(context)?;
+    recover_coordination_migration(context, lock, runtime)?;
+    recover_namespace_bootstrap(context, lock, runtime)?;
     lock.validate_context(context)?;
     let mut budget = RecoveryProgressBudget::new(MAX_RECOVERY_MUTATION_PASSES);
     let mut barrier_certificate = None;

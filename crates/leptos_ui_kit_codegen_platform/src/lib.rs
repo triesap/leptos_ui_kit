@@ -1202,6 +1202,29 @@ pub fn probe_volume(root: AdoptedRootDirectory) -> io::Result<QualifiedVolume> {
     }
 }
 
+/// Attaches another adopted directory to an existing qualified transaction
+/// volume.
+///
+/// The peer is independently reopened and volume-probed, then required to
+/// report the same complete volume identifier and transaction capabilities as
+/// `qualified`. The returned capability shares `qualified`'s private
+/// qualification lineage, allowing exact operations whose two parents were
+/// supplied as separate already-open directory handles.
+pub fn qualify_peer_directory(
+    qualified: &DirectoryCapability,
+    peer: AdoptedRootDirectory,
+) -> io::Result<DirectoryCapability> {
+    #[cfg(windows)]
+    {
+        windows::qualify_peer_directory(qualified, peer)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (qualified, peer);
+        Err(unsupported("peer directory volume qualification"))
+    }
+}
+
 fn validate_direct_name(name: &OsStr) -> io::Result<()> {
     #[cfg(windows)]
     {

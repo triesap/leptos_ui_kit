@@ -1682,6 +1682,18 @@ impl WorkspaceBootstrapIntentEnvelopeV2 {
         Ok(bytes)
     }
 
+    pub(super) fn transaction_id(&self) -> &TransactionId {
+        &self.transaction_id
+    }
+
+    pub(super) fn canonical_root_hash(&self) -> &Sha256Digest {
+        &self.canonical_root_hash
+    }
+
+    pub(super) fn workspace_parent_preimage(&self) -> &ExactDirectoryStateV2 {
+        &self.workspace_parent_preimage
+    }
+
     fn validate(&self) -> Result<(), JournalModelError> {
         if self.magic != BOOTSTRAP_INTENT_MAGIC
             || self.version != JOURNAL_VERSION

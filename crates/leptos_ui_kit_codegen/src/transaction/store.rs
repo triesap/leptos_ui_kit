@@ -1250,6 +1250,7 @@ impl<'a> JournalRecoveryStore<'a> {
         let removal = match self.remove_exact_file(
             workspace,
             &partial_entry.name,
+            Some(&published_entry.name),
             &partial_exact,
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::JournalPartial {
@@ -1417,6 +1418,7 @@ impl<'a> JournalRecoveryStore<'a> {
         let removal = self.remove_exact_file(
             workspace,
             &partial_name,
+            None,
             &partial_exact,
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::JournalPartial { sequence },
@@ -2863,6 +2865,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             self.capabilities.workspace_parent,
             &name,
+            None,
             lease.bootstrap().intent().exact(),
             MAX_CONTROL_ENVELOPE_BYTES,
             RemovalObject::BootstrapIntent,
@@ -2889,6 +2892,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             workspace,
             &name,
+            None,
             lease.bootstrap().exact(),
             MAX_CONTROL_ENVELOPE_BYTES,
             RemovalObject::BootstrapOwner,
@@ -2919,6 +2923,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             workspace,
             record.name(),
+            None,
             record.exact(),
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::JournalRecord {
@@ -2951,6 +2956,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             workspace,
             partial.name(),
+            None,
             partial.exact(),
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::JournalPartial {
@@ -2976,6 +2982,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             self.capabilities.workspace_parent,
             &record.name,
+            None,
             &record.exact,
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::Finalization {
@@ -3039,6 +3046,7 @@ impl<'a> JournalRecoveryStore<'a> {
                 Path::new(&partial.name),
                 &partial_path,
             ),
+            &partial.observation,
             HardLinkEndpoint::new(
                 self.capabilities.workspace_parent.directory,
                 Path::new(&partial.lease.record_name()),
@@ -3283,9 +3291,11 @@ impl<'a> JournalRecoveryStore<'a> {
                 "finalization-partial removal record has a noncanonical transaction/name binding",
             ));
         }
+        let published_name = record.lease.record_name();
         self.remove_exact_file(
             self.capabilities.workspace_parent,
             &record.name,
+            Some(&published_name),
             &record.exact,
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::FinalizationPartial {
@@ -3326,6 +3336,7 @@ impl<'a> JournalRecoveryStore<'a> {
         self.remove_exact_file(
             self.capabilities.workspace_parent,
             &incomplete.name,
+            None,
             &incomplete.exact,
             MAX_RECORD_ENVELOPE_BYTES,
             RemovalObject::FinalizationPartial {
@@ -3340,6 +3351,7 @@ impl<'a> JournalRecoveryStore<'a> {
         &self,
         parent: DirectoryEndpoint<'_>,
         name: &str,
+        surviving_alias_name: Option<&str>,
         expected: &ExactFileStateV2,
         max_bytes: u64,
         object: RemovalObject,
@@ -3380,17 +3392,56 @@ impl<'a> JournalRecoveryStore<'a> {
                 "cleanup object does not match its exact immutable manifest binding",
             ));
         }
+        let surviving_alias = if let Some(surviving_name) = surviving_alias_name {
+            require_child_name(Path::new(surviving_name), &parent.path.join(surviving_name))?;
+            let surviving_path = parent.path.join(surviving_name);
+            let surviving = self
+                .runtime
+                .fs()
+                .read_regular_file_exact(
+                    parent.directory,
+                    Path::new(surviving_name),
+                    &surviving_path,
+                    max_bytes,
+                )
+                .map_err(|source| {
+                    JournalStoreError::io(
+                        &surviving_path,
+                        "read exact surviving hard-link authority",
+                        source,
+                    )
+                })?;
+            if surviving.observation != before.observation || surviving.bytes != before.bytes {
+                return Err(JournalStoreError::invalid(
+                    &surviving_path,
+                    "hard-link retirement aliases are not the same exact two-link authority",
+                ));
+            }
+            Some((surviving_name, surviving_path))
+        } else {
+            None
+        };
         self.runtime.observe(removal_transition(
             object,
             outcome,
             TransitionWindow::Before,
         ));
-        if let Err(error) = self.runtime.fs().remove_file_exact(
-            parent.directory,
-            Path::new(name),
-            &path,
-            &before.observation,
-        ) && !error.mutation_may_have_completed()
+        let removal = if let Some((surviving_name, surviving_path)) = surviving_alias.as_ref() {
+            self.runtime.fs().retire_hard_link_alias(
+                HardLinkEndpoint::new(parent.directory, Path::new(surviving_name), surviving_path),
+                HardLinkEndpoint::new(parent.directory, Path::new(name), &path),
+                &before.observation,
+            )
+        } else {
+            self.runtime.fs().remove_file_exact(
+                parent.directory,
+                Path::new(name),
+                &path,
+                &before.observation,
+            )
+        };
+        if let Err(error) = removal
+            && !error.mutation_may_have_completed()
         {
             return Ok(ExactRemovalDisposition::ReconcileRequired(
                 RemovalReconciliation {
@@ -3993,6 +4044,7 @@ impl<'a> JournalRecoveryStore<'a> {
         let link_result = self.runtime.fs().hard_link(
             &[],
             HardLinkEndpoint::new(workspace.directory, Path::new(&partial_name), &partial_path),
+            &prepared.observation,
             HardLinkEndpoint::new(workspace.directory, Path::new(&record_name), &record_path),
         );
         match self.load_active() {
@@ -5528,6 +5580,21 @@ impl<'a> JournalRecoveryStore<'a> {
         if let Some(expected) = self.runtime.cached_journal_envelope_by_name(&entry.name) {
             let read = self.read_inventory_file_bytes(parent, entry, max_bytes)?;
             if read.bytes != expected.envelope_bytes() {
+                let is_incomplete_partial = parse_journal_file_name(&entry.name)
+                    .is_ok_and(|name| name.kind() == JournalFileKindV2::Partial)
+                    && is_strict_canonical_prefix(expected.envelope_bytes(), &read.bytes);
+                if is_incomplete_partial {
+                    return Ok(ExactFileRead {
+                        observation: ExactFileObservation {
+                            identity: read.observation.identity,
+                            byte_len: read.observation.byte_len,
+                            content_hash: crate::hash_content_bytes(&read.bytes),
+                            mode: read.observation.mode,
+                            link_count: read.observation.link_count,
+                        },
+                        bytes: read.bytes,
+                    });
+                }
                 return Err(JournalStoreError::invalid(
                     &entry.path,
                     "journal name no longer contains its cached canonical envelope bytes",
@@ -7496,6 +7563,7 @@ mod tests {
             .remove_exact_file(
                 namespace_endpoint,
                 &victim_name,
+                None,
                 &exact,
                 MAX_CONTROL_ENVELOPE_BYTES,
                 RemovalObject::Finalization { generation: 0 },
@@ -7507,6 +7575,7 @@ mod tests {
                 .remove_exact_file(
                     namespace_endpoint,
                     &victim_name,
+                    None,
                     &exact,
                     MAX_CONTROL_ENVELOPE_BYTES,
                     RemovalObject::Finalization { generation: 0 },

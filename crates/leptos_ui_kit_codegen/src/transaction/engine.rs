@@ -148,6 +148,7 @@ fn execute_ordered(
     ordered: Vec<OrderedFile<'_>>,
 ) -> Result<(), CodegenError> {
     let build_runtime = runtime.clone();
+    let recovery_runtime = runtime.clone();
     let mut store = ImmutableJournalStore::create(
         context,
         lock,
@@ -214,7 +215,11 @@ fn execute_ordered(
             // This keeps an ordinary I/O error from bypassing the bounded
             // crash-recovery protocol merely because it happened in-process.
             drop(store);
-            let recovery = super::recovery::recover_pending_locked(context, lock);
+            let recovery = super::recovery::recover_pending_locked_with_runtime(
+                context,
+                lock,
+                &recovery_runtime,
+            );
             match (finish_only, recovery) {
                 // Once CommitComplete is durable, successful finish-only
                 // reconciliation proves the requested cohort is installed.

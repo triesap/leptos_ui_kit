@@ -185,6 +185,7 @@ pub(super) fn arm_retirement_authority(
             Path::new(terminal.name()),
             &namespace_path.join(terminal.name()),
         ),
+        terminal.observation(),
         HardLinkEndpoint::new(&kit_parent, Path::new(&authority_name), &authority_path),
     );
     lock.validate_context(context)?;
@@ -441,10 +442,17 @@ fn remove_internal_lease(
     runtime.observe(TransitionKey::RemoveInternalFinalizationLease {
         window: TransitionWindow::Before,
     });
-    let removal = runtime.fs().remove_file_exact(
-        &retiring.directory,
-        Path::new(&internal_name),
-        &internal_path,
+    let removal = runtime.fs().retire_hard_link_alias(
+        HardLinkEndpoint::new(
+            &discovery.kit,
+            Path::new(&discovery.authority.authority_name),
+            &kit_path.join(&discovery.authority.authority_name),
+        ),
+        HardLinkEndpoint::new(
+            &retiring.directory,
+            Path::new(&internal_name),
+            &internal_path,
+        ),
         &internal.observation,
     );
     lock.validate_context(context)?;

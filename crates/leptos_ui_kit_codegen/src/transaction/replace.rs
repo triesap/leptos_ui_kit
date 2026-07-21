@@ -64,7 +64,7 @@ mod test_seam {
         fs::FsOps,
         journal::JournalOperationV2,
         lock::WriteLock,
-        recovery::recover_pending_locked,
+        recovery::recover_pending_locked_with_runtime,
         runtime::{NoopTransitionObserver, SystemEntropy, TransactionRuntime},
     };
 
@@ -87,13 +87,13 @@ mod test_seam {
     ) -> Result<(), CodegenError> {
         let context = PlanningContext::open(project_root)?;
         let lock = WriteLock::acquire_with_context_and_fs(&context, Arc::clone(&fs))?;
-        lock.validate_context(&context)?;
-        recover_pending_locked(&context, &lock)?;
+        lock.validate_lifecycle_context(&context)?;
         let runtime = TransactionRuntime::new(
             fs,
             Arc::new(SystemEntropy),
             Arc::new(NoopTransitionObserver),
         );
+        recover_pending_locked_with_runtime(&context, &lock, &runtime)?;
         apply_exact_transaction(
             &context,
             &lock,

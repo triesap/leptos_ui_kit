@@ -19,13 +19,16 @@ use crate::path_safety::{ObjectIdentity, PlanningContext};
 
 use super::fs::{CreatedFile, ExclusiveCreateFailure, FsOps, HardLinkEndpoint, SystemFs};
 use super::journal::{
-    parse_bootstrap_intent_name, parse_finalization_file_name, parse_transaction_directory_name,
+    TransactionId, parse_bootstrap_intent_name, parse_finalization_file_name,
+    parse_transaction_directory_name,
 };
+use super::runtime::TransactionRuntime;
 
 pub const DEFAULT_KIT_WRITE_LOCK_PATH: &str = "src/components/ui/_kit/.write.lock";
 pub(crate) const DEFAULT_KIT_COORDINATION_IGNORE_PATH: &str = "src/components/ui/_kit/.gitignore";
 pub(crate) const KIT_ADVISORY_LOCK_CONTENT: &[u8] = b"leptos-ui-kit advisory lock v1\n";
-pub(crate) const KIT_COORDINATION_IGNORE_CONTENT: &[u8] = b"/.write.lock\n/.transactions/\n";
+pub(crate) const LEGACY_KIT_COORDINATION_IGNORE_CONTENT: &[u8] = b"/.write.lock\n/.transactions/\n";
+pub(crate) const KIT_COORDINATION_IGNORE_CONTENT: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 
 const LEGACY_WRITE_LOCK_CONTENT: &[u8] = b"locked\n";
 const TRANSACTIONS_DIRECTORY_NAME: &str = ".transactions";
@@ -280,6 +283,14 @@ impl WriteLock {
     }
 
     pub(crate) fn validate_context(&self, context: &PlanningContext) -> Result<(), CodegenError> {
+        self.validate_context_link_count(context, 1)
+    }
+
+    pub(super) fn validate_context_link_count(
+        &self,
+        context: &PlanningContext,
+        expected_links: u64,
+    ) -> Result<(), CodegenError> {
         let (project_root, project_identity) = context.project_identity();
         if project_root != self.project_root || project_identity != self.project_identity {
             return Err(CodegenError::ProjectRootChanged {
@@ -312,7 +323,51 @@ impl WriteLock {
         validate_cap_file_mode(&held, 0o600, DEFAULT_KIT_WRITE_LOCK_PATH)?;
         let marker = read_bounded_cap_file(&mut held, &self.path)?;
         validate_lock_marker(&marker)?;
-        validate_single_link_lock(context, &held, held_identity, &self.path)
+        validate_lock_link_count_exact(&held, &self.path, expected_links)?;
+        context.revalidate_auxiliary_identity(DEFAULT_KIT_WRITE_LOCK_PATH, held_identity)?;
+        let current = context.open_auxiliary_file(DEFAULT_KIT_WRITE_LOCK_PATH, true)?;
+        if file_identity(&current, &self.path)? != held_identity {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+                reason: "persistent advisory lock changed during lifecycle validation".to_owned(),
+            });
+        }
+        validate_lock_link_count_exact(&current, &self.path, expected_links)
+    }
+
+    pub(super) fn validate_lifecycle_context(
+        &self,
+        context: &PlanningContext,
+    ) -> Result<u64, CodegenError> {
+        let held = self
+            .file
+            .as_ref()
+            .ok_or_else(|| CodegenError::InvalidCoordinationState {
+                path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+                reason: "the held advisory-lock handle is no longer available".to_owned(),
+            })?;
+        let held_capability =
+            File::from_std(held.try_clone().map_err(|source| CodegenError::Io {
+                path: self.path.clone(),
+                source,
+            })?);
+        let links = held_capability
+            .metadata()
+            .map_err(|source| CodegenError::Io {
+                path: self.path.clone(),
+                source,
+            })?
+            .nlink();
+        if !matches!(links, 1 | 2) {
+            return Err(CodegenError::InvalidCoordinationState {
+                path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+                reason: format!(
+                    "persistent advisory lock has an unsupported lifecycle link count: {links}"
+                ),
+            });
+        }
+        self.validate_context_link_count(context, links)?;
+        Ok(links)
     }
 
     pub(crate) fn identity(&self) -> ObjectIdentity {
@@ -322,13 +377,15 @@ impl WriteLock {
     pub(super) fn open_or_create_transaction_namespace(
         &self,
         context: &PlanningContext,
-        fs: &dyn FsOps,
+        runtime: &TransactionRuntime,
+        transaction_id: &TransactionId,
     ) -> Result<Dir, CodegenError> {
-        self.validate_context(context)?;
-        let kit = context.open_directory(KIT_DIRECTORY_PATH)?;
-        let transactions = open_or_create_transactions_directory(context, fs, &kit)?;
-        self.validate_context(context)?;
-        Ok(transactions.directory)
+        super::namespace_bootstrap::ensure_transaction_namespace(
+            context,
+            self,
+            runtime,
+            transaction_id,
+        )
     }
 }
 
@@ -392,20 +449,34 @@ fn validate_single_link_lock(
 }
 
 fn validate_lock_link_count(file: &File, path: &Path) -> Result<(), CodegenError> {
+    validate_lock_link_count_exact(file, path, 1)
+}
+
+fn validate_lock_link_count_exact(
+    file: &File,
+    path: &Path,
+    expected_links: u64,
+) -> Result<(), CodegenError> {
     let metadata = file.metadata().map_err(|source| CodegenError::Io {
         path: path.to_path_buf(),
         source,
     })?;
     ensure_safe_regular_metadata(DEFAULT_KIT_WRITE_LOCK_PATH, &metadata)?;
     let links = metadata.nlink();
-    if links == 1 {
+    if links == expected_links {
         return Ok(());
     }
     Err(CodegenError::InvalidCoordinationState {
         path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
-        reason: format!(
-            "persistent advisory lock must have exactly one hard link after bootstrap cleanup; found {links}"
-        ),
+        reason: if expected_links == 1 {
+            format!(
+                "persistent advisory lock must have exactly one hard link in this lifecycle phase; found {links}"
+            )
+        } else {
+            format!(
+                "persistent advisory lock must have exactly {expected_links} hard links in this lifecycle phase; found {links}"
+            )
+        },
     })
 }
 
@@ -420,10 +491,73 @@ fn complete_coordination_bootstrap(
     // this point, so the initial validation intentionally checks identity,
     // marker, and mode without enforcing the completed-state link invariant.
     validate_opened_lock(context, fs, &mut opened)?;
+    let links = opened
+        .file
+        .metadata()
+        .map_err(|source| CodegenError::Io {
+            path: opened.path.clone(),
+            source,
+        })?
+        .nlink();
+    if links == 2 {
+        if coordination_ignore_requires_migration(context, fs)? {
+            super::coordination_migration::validate_acquisition_alias(
+                context,
+                fs,
+                kit_directory,
+                opened.identity,
+            )?;
+            validate_opened_lock(context, fs, &mut opened)?;
+            return Ok(opened);
+        }
+        if super::namespace_bootstrap::validate_acquisition_alias_if_present(
+            context,
+            fs,
+            kit_directory,
+            opened.identity,
+        )? {
+            bootstrap_coordination_ignore(context, fs, pinned_kit, kit_directory)?;
+            validate_opened_lock(context, fs, &mut opened)?;
+            return Ok(opened);
+        }
+    }
     opened = cleanup_stale_candidates_before_planning(context, fs, kit_directory, opened)?;
     bootstrap_coordination_ignore(context, fs, pinned_kit, kit_directory)?;
-    opened = cleanup_stale_candidates_before_planning(context, fs, kit_directory, opened)?;
-    validate_completed_opened_lock(context, fs, &mut opened)?;
+    if coordination_ignore_requires_migration(context, fs)? {
+        let links = opened
+            .file
+            .metadata()
+            .map_err(|source| CodegenError::Io {
+                path: opened.path.clone(),
+                source,
+            })?
+            .nlink();
+        if links == 2 {
+            super::coordination_migration::validate_acquisition_alias(
+                context,
+                fs,
+                kit_directory,
+                opened.identity,
+            )?;
+            validate_opened_lock(context, fs, &mut opened)?;
+        } else {
+            validate_completed_opened_lock(context, fs, &mut opened)?;
+        }
+        return Ok(opened);
+    }
+    let links = opened
+        .file
+        .metadata()
+        .map_err(|source| CodegenError::Io {
+            path: opened.path.clone(),
+            source,
+        })?
+        .nlink();
+    if links == 2 {
+        validate_opened_lock(context, fs, &mut opened)?;
+    } else {
+        validate_completed_opened_lock(context, fs, &mut opened)?;
+    }
     Ok(opened)
 }
 
@@ -659,6 +793,34 @@ fn publish_initialized_lock(
         let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
         return Err(error);
     }
+    let candidate_source = match fs
+        .read_regular_file_exact(
+            &transactions.directory,
+            Path::new(&candidate.name),
+            &candidate.path,
+            KIT_ADVISORY_LOCK_CONTENT.len() as u64,
+        )
+        .map_err(|source| CodegenError::Io {
+            path: candidate.path.clone(),
+            source,
+        }) {
+        Ok(source) => source,
+        Err(error) => {
+            let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
+            return Err(error);
+        }
+    };
+    if candidate_source.bytes != KIT_ADVISORY_LOCK_CONTENT
+        || candidate_source.observation.identity != candidate.identity
+        || candidate_source.observation.link_count != Some(1)
+    {
+        let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_WRITE_LOCK_PATH.to_owned(),
+            reason: "lock publication candidate is not the exact single-link prepared owner"
+                .to_owned(),
+        });
+    }
     match fs.hard_link(
         pinned_kit.all(),
         HardLinkEndpoint::new(
@@ -666,6 +828,7 @@ fn publish_initialized_lock(
             Path::new(&candidate.name),
             &candidate.path,
         ),
+        &candidate_source.observation,
         HardLinkEndpoint::new(kit_directory, Path::new(lock_name), &lock_path),
     ) {
         Ok(()) => {
@@ -1896,6 +2059,35 @@ fn cleanup_stale_lock_candidates(
             });
         }
 
+        require_current_transactions_directory(context, fs, kit_directory, &transactions)?;
+        let mut candidate_remains = false;
+        for entry in transactions
+            .directory
+            .entries()
+            .map_err(|source| CodegenError::Io {
+                path: transactions.path.clone(),
+                source,
+            })?
+        {
+            let entry = entry.map_err(|source| CodegenError::Io {
+                path: transactions.path.clone(),
+                source,
+            })?;
+            let name = entry.file_name();
+            if candidate_kind(&name).is_some() {
+                candidate_remains = true;
+                continue;
+            }
+            if !transaction_journal_name(&name)
+                && !journal_update_name(&name)
+                && !journal_v2_authority_name(&name)
+            {
+                return Err(invalid_transactions_entry(&name));
+            }
+        }
+        if candidate_remains {
+            continue 'quiescence;
+        }
         return Ok(StaleCandidateCleanupOutcome::Complete);
     }
 
@@ -2195,7 +2387,7 @@ fn try_cleanup_claimed_candidate_alias(
                 reason: "coordination candidate changed before handle-relative cleanup".to_owned(),
             });
         }
-        return match fs.remove_file_by_handle(cleanup_file, &alias.path) {
+        match fs.remove_file_by_handle(cleanup_file, &alias.path) {
             Ok(()) => Ok(CandidateAliasCleanupAttempt::Removed),
             Err(error) if error.source.kind() == std::io::ErrorKind::NotFound => {
                 Ok(CandidateAliasCleanupAttempt::Absent)
@@ -2204,7 +2396,7 @@ fn try_cleanup_claimed_candidate_alias(
                 Ok(CandidateAliasCleanupAttempt::Retry)
             }
             Err(error) => Ok(CandidateAliasCleanupAttempt::Failed(error.source)),
-        };
+        }
     }
 
     #[cfg(not(windows))]
@@ -2424,6 +2616,34 @@ fn bootstrap_coordination_ignore(
         let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
         return Err(error);
     }
+    let candidate_source = match fs
+        .read_regular_file_exact(
+            &transactions.directory,
+            Path::new(&candidate.name),
+            &candidate.path,
+            KIT_COORDINATION_IGNORE_CONTENT.len() as u64,
+        )
+        .map_err(|source| CodegenError::Io {
+            path: candidate.path.clone(),
+            source,
+        }) {
+        Ok(source) => source,
+        Err(error) => {
+            let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
+            return Err(error);
+        }
+    };
+    if candidate_source.bytes != KIT_COORDINATION_IGNORE_CONTENT
+        || candidate_source.observation.identity != candidate.identity
+        || candidate_source.observation.link_count != Some(1)
+    {
+        let _ = abandon_candidate(context, fs, kit_directory, transactions, candidate);
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
+            reason: "ignore publication candidate is not the exact single-link prepared owner"
+                .to_owned(),
+        });
+    }
     match fs.hard_link(
         pinned_kit.all(),
         HardLinkEndpoint::new(
@@ -2431,6 +2651,7 @@ fn bootstrap_coordination_ignore(
             Path::new(&candidate.name),
             &candidate.path,
         ),
+        &candidate_source.observation,
         HardLinkEndpoint::new(kit_directory, Path::new(".gitignore"), &full_path),
     ) {
         Ok(()) => {
@@ -2952,13 +3173,63 @@ fn validate_coordination_ignore(
             source,
         })?;
     let content = read_bounded_cap_file(file, path)?;
-    if content != KIT_COORDINATION_IGNORE_CONTENT {
+    if content != KIT_COORDINATION_IGNORE_CONTENT
+        && content != LEGACY_KIT_COORDINATION_IGNORE_CONTENT
+    {
         return Err(CodegenError::InvalidCoordinationState {
             path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
             reason: "expected the exact installer-owned ignore rules".to_owned(),
         });
     }
+    let metadata = file.metadata().map_err(|source| CodegenError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.nlink() != 1 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
+            reason: "installer-owned ignore rules must have exactly one hard link".to_owned(),
+        });
+    }
     context.revalidate_auxiliary_file(DEFAULT_KIT_COORDINATION_IGNORE_PATH, file)
+}
+
+pub(super) fn coordination_ignore_requires_migration(
+    context: &PlanningContext,
+    fs: &dyn FsOps,
+) -> Result<bool, CodegenError> {
+    let path = context
+        .project_root()
+        .join(DEFAULT_KIT_COORDINATION_IGNORE_PATH);
+    let Some(mut file) = open_existing_coordination_file(context, fs)? else {
+        return Ok(false);
+    };
+    validate_cap_file_mode(&file, 0o644, DEFAULT_KIT_COORDINATION_IGNORE_PATH)?;
+    fs.before_read_handle(&path)
+        .map_err(|source| CodegenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    let content = read_bounded_cap_file(&mut file, &path)?;
+    let metadata = file.metadata().map_err(|source| CodegenError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    if metadata.nlink() != 1 {
+        return Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
+            reason: "installer-owned ignore rules must have exactly one hard link".to_owned(),
+        });
+    }
+    context.revalidate_auxiliary_file(DEFAULT_KIT_COORDINATION_IGNORE_PATH, &file)?;
+    match content.as_slice() {
+        KIT_COORDINATION_IGNORE_CONTENT => Ok(false),
+        LEGACY_KIT_COORDINATION_IGNORE_CONTENT => Ok(true),
+        _ => Err(CodegenError::InvalidCoordinationState {
+            path: DEFAULT_KIT_COORDINATION_IGNORE_PATH.to_owned(),
+            reason: "expected the exact installer-owned ignore rules".to_owned(),
+        }),
+    }
 }
 
 #[cfg(windows)]
@@ -3280,32 +3551,45 @@ mod held_lock_validation_tests {
             "lock acquisition must not create the transaction namespace",
         );
 
+        let runtime = TransactionRuntime::system();
+        let transaction_id =
+            TransactionId::parse("00112233445566778899aabbccddeeff").expect("transaction id");
         let namespace = lock
-            .open_or_create_transaction_namespace(&context, &SystemFs)
+            .open_or_create_transaction_namespace(&context, &runtime, &transaction_id)
             .expect("create the transaction namespace on first transactional write");
         assert!(namespace_path.is_dir());
         drop(namespace);
+        super::super::namespace_bootstrap::recover_namespace_bootstrap(&context, &lock, &runtime)
+            .expect("cancel namespace without ordinary workspace ownership");
+        assert!(!namespace_path.exists());
     }
 
     #[test]
-    fn reopening_the_namespace_preserves_nonempty_evidence() {
+    fn unattested_canonical_namespace_evidence_is_rejected() {
         let directory = tempfile::tempdir().expect("temporary project");
         let (context, lock) = acquire(directory.path());
         let namespace_path = directory
             .path()
             .join("src/components/ui/_kit/.transactions");
-        let namespace = lock
-            .open_or_create_transaction_namespace(&context, &SystemFs)
-            .expect("create transaction namespace explicitly");
-        namespace
-            .write("evidence", b"preserve")
-            .expect("write evidence");
-        drop(namespace);
+        fs::create_dir(&namespace_path).expect("create hostile canonical namespace");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
 
-        let reopened = lock
-            .open_or_create_transaction_namespace(&context, &SystemFs)
-            .expect("reopen nonempty transaction namespace");
-        drop(reopened);
+            fs::set_permissions(&namespace_path, fs::Permissions::from_mode(0o700))
+                .expect("set exact private namespace mode");
+        }
+        fs::write(namespace_path.join("evidence"), b"preserve").expect("write evidence");
+        let runtime = TransactionRuntime::system();
+        let transaction_id =
+            TransactionId::parse("00112233445566778899aabbccddeeff").expect("transaction id");
+        let error = lock
+            .open_or_create_transaction_namespace(&context, &runtime, &transaction_id)
+            .expect_err("unattested canonical namespace must fail closed");
+        assert!(
+            error.to_string().contains("without lifecycle"),
+            "unexpected unattested namespace diagnostic: {error:?}"
+        );
         assert_eq!(
             fs::read(namespace_path.join("evidence")).expect("preserved evidence"),
             b"preserve",
@@ -3410,7 +3694,14 @@ mod held_lock_validation_tests {
         let missing = lock
             .validate_context(&context)
             .expect_err("a missing lock path must fail closed");
-        assert!(matches!(missing, CodegenError::Io { .. }));
+        assert!(
+            matches!(
+                missing,
+                CodegenError::InvalidCoordinationState { ref reason, .. }
+                    if reason.contains("found 0")
+            ),
+            "unexpected missing-lock diagnostic: {missing:?}"
+        );
         assert!(lock.file.is_some());
 
         let referent = directory.path().join("replacement-lock");
@@ -3421,7 +3712,11 @@ mod held_lock_validation_tests {
         let symlinked = lock
             .validate_context(&context)
             .expect_err("a symlinked lock path must fail closed");
-        assert!(matches!(symlinked, CodegenError::UnsafePath { .. }));
+        assert!(matches!(
+            symlinked,
+            CodegenError::InvalidCoordinationState { ref reason, .. }
+                if reason.contains("found 0")
+        ));
         assert!(lock.file.is_some());
 
         fs::remove_file(&path).expect("remove lock symlink");
@@ -3431,7 +3726,11 @@ mod held_lock_validation_tests {
         let replaced = lock
             .validate_context(&context)
             .expect_err("a replaced lock inode must fail closed");
-        assert!(matches!(replaced, CodegenError::UnsafePath { .. }));
+        assert!(matches!(
+            replaced,
+            CodegenError::InvalidCoordinationState { ref reason, .. }
+                if reason.contains("found 0")
+        ));
         assert!(lock.file.is_some());
     }
 }

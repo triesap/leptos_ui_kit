@@ -16,7 +16,7 @@ const KIT_COORDINATION_DIR: &str = "src/components/ui/_kit";
 const KIT_GITIGNORE_PATH: &str = "src/components/ui/_kit/.gitignore";
 const ADVISORY_LOCK_MARKER: &[u8] = b"leptos-ui-kit advisory lock v1\n";
 const LEGACY_SENTINEL_MARKER: &[u8] = b"locked\n";
-const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n";
+const KIT_GITIGNORE: &[u8] = b"/.write.lock\n/.transactions/\n/.transactions.bootstrap-v2-*/\n/.transactions.retirement-v2-*/\n";
 
 const INIT_OBSERVATIONS: [&str; 6] = [
     "index.html",
@@ -135,6 +135,56 @@ fn apply_and_no_change_commands_preserve_the_exact_coordination_residual() {
     );
     #[cfg(unix)]
     assert_eq!(coordination_modes(directory.path()), initial_modes);
+}
+
+#[test]
+fn exact_legacy_coordination_state_is_reported_read_only_and_migrated_before_apply() {
+    let directory = tempdir().expect("tempdir");
+    setup_project(directory.path());
+    let root = directory.path();
+    fs::create_dir_all(root.join(KIT_COORDINATION_DIR)).expect("create coordination directory");
+    fs::write(
+        root.join(KIT_GITIGNORE_PATH),
+        b"/.write.lock\n/.transactions/\n",
+    )
+    .expect("write exact legacy ignore");
+    fs::write(root.join(DEFAULT_KIT_WRITE_LOCK_PATH), ADVISORY_LOCK_MARKER)
+        .expect("write persistent lock");
+    fs::create_dir(root.join(KIT_COORDINATION_DIR).join(".transactions"))
+        .expect("create exact-empty legacy namespace residual");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(
+            root.join(KIT_COORDINATION_DIR),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("set coordination mode");
+        fs::set_permissions(
+            root.join(KIT_GITIGNORE_PATH),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("set ignore mode");
+        fs::set_permissions(
+            root.join(DEFAULT_KIT_WRITE_LOCK_PATH),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("set lock mode");
+        fs::set_permissions(
+            root.join(KIT_COORDINATION_DIR).join(".transactions"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("set legacy namespace mode");
+    }
+    let before = tree_snapshot(root);
+
+    let error = plan_init(root).expect_err("read-only planning must report migration");
+    assert!(error.to_string().contains("migration"));
+    assert_eq!(tree_snapshot(root), before);
+
+    apply_init(root).expect("mutating apply migrates before planning");
+    assert_exact_coordination_residual(root);
 }
 
 #[test]

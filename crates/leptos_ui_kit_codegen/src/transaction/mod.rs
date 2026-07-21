@@ -1,8 +1,10 @@
 mod authority;
+mod coordination_migration;
 mod engine;
 mod fs;
 mod journal;
 mod lock;
+mod namespace_bootstrap;
 mod namespace_lifecycle;
 mod recovery;
 mod recovery_capture;

@@ -130,7 +130,7 @@ impl<'a> ImmutableJournalStore<'a> {
         ))?;
 
         let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
-        let kit = lock.open_or_create_transaction_namespace(context, runtime.fs())?;
+        let kit = lock.open_or_create_transaction_namespace(context, &runtime, &transaction_id)?;
         let kit_path = context.project_root().join(KIT_LOGICAL_PATH);
         let kit_name = Path::new(".transactions");
         let kit_before_observation = runtime
@@ -158,6 +158,68 @@ impl<'a> ImmutableJournalStore<'a> {
         let root_hash = canonical_root_hash(&canonical_native_bytes(context.project_root()));
 
         let lock_path = context.project_root().join(DEFAULT_KIT_WRITE_LOCK_PATH);
+
+        let intent_envelope = WorkspaceBootstrapIntentEnvelopeV2::new(
+            transaction_id.clone(),
+            root_hash.clone(),
+            kit_before.clone(),
+        )
+        .map_err(model_error_at(&kit_path))?;
+        let intent_bytes = intent_envelope
+            .to_json_bytes()
+            .map_err(model_error_at(&kit_path))?;
+        let intent_name = bootstrap_intent_name(&transaction_id);
+        let intent_path = kit_path.join(&intent_name);
+        lock.validate_context_link_count(context, 2)?;
+        runtime.observe(TransitionKey::PublishWorkspaceOwnership {
+            window: TransitionWindow::Before,
+        });
+        let intent_observation = write_private_exact(
+            runtime.fs(),
+            &kit,
+            Path::new(&intent_name),
+            &intent_path,
+            &intent_bytes,
+        )?;
+        let mut kit_after_intent_observation = runtime
+            .fs()
+            .observe_directory(DirectoryEndpoint::new(
+                &kit_parent,
+                kit_name,
+                &kit,
+                &kit_path,
+            ))
+            .map_err(|source| {
+                transaction_io("inspect directory", KIT_LOGICAL_PATH, &kit_path, source)
+            })?;
+        let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
+        lock.validate_context_link_count(context, 2)?;
+        sync_exact_parent(
+            runtime.fs(),
+            DirectoryEndpoint::new(&kit_parent, kit_name, &kit, &kit_path),
+            &kit_after_intent_observation,
+            &intent_path,
+        )?;
+        let kit = super::namespace_bootstrap::finish_transaction_namespace_bootstrap(
+            context,
+            lock,
+            &runtime,
+            &transaction_id,
+        )?;
+        let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
+        kit_after_intent_observation = runtime
+            .fs()
+            .observe_directory(DirectoryEndpoint::new(
+                &kit_parent,
+                kit_name,
+                &kit,
+                &kit_path,
+            ))
+            .map_err(|source| {
+                transaction_io("inspect directory", KIT_LOGICAL_PATH, &kit_path, source)
+            })?;
+        let kit_after_intent =
+            exact_directory(&kit_after_intent_observation).map_err(model_error_at(&kit_path))?;
         let lock_observation = runtime
             .fs()
             .observe_regular_file_bounded(
@@ -181,61 +243,6 @@ impl<'a> ImmutableJournalStore<'a> {
             });
         }
         let lock_exact = exact_file(&lock_observation).map_err(model_error_at(&lock_path))?;
-
-        let intent_envelope = WorkspaceBootstrapIntentEnvelopeV2::new(
-            transaction_id.clone(),
-            root_hash.clone(),
-            kit_before.clone(),
-        )
-        .map_err(model_error_at(&kit_path))?;
-        let intent_bytes = intent_envelope
-            .to_json_bytes()
-            .map_err(model_error_at(&kit_path))?;
-        let intent_name = bootstrap_intent_name(&transaction_id);
-        let intent_path = kit_path.join(&intent_name);
-        let kit = authority.rebind_parent_for_mutation(
-            runtime.fs(),
-            KIT_LOGICAL_PATH,
-            &kit_before,
-            &intent_path,
-        )?;
-        runtime.observe(TransitionKey::PublishWorkspaceOwnership {
-            window: TransitionWindow::Before,
-        });
-        let intent_observation = write_private_exact(
-            runtime.fs(),
-            &kit,
-            Path::new(&intent_name),
-            &intent_path,
-            &intent_bytes,
-        )?;
-        let kit_after_intent_observation = runtime
-            .fs()
-            .observe_directory(DirectoryEndpoint::new(
-                &kit_parent,
-                kit_name,
-                &kit,
-                &kit_path,
-            ))
-            .map_err(|source| {
-                transaction_io("inspect directory", KIT_LOGICAL_PATH, &kit_path, source)
-            })?;
-        let kit_after_intent =
-            exact_directory(&kit_after_intent_observation).map_err(model_error_at(&kit_path))?;
-        let kit = authority.rebind_parent_for_mutation(
-            runtime.fs(),
-            KIT_LOGICAL_PATH,
-            &kit_after_intent,
-            &intent_path,
-        )?;
-        let kit_parent = context.open_directory(KIT_PARENT_LOGICAL_PATH)?;
-        authority.validate_lock()?;
-        sync_exact_parent(
-            runtime.fs(),
-            DirectoryEndpoint::new(&kit_parent, kit_name, &kit, &kit_path),
-            &kit_after_intent_observation,
-            &intent_path,
-        )?;
         let intent = WorkspaceBootstrapIntentBindingV2::new(
             intent_envelope,
             exact_file(&intent_observation).map_err(model_error_at(&intent_path))?,
