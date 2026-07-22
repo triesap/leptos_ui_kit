@@ -2230,6 +2230,17 @@ fn add_router_link_records_registry_dependencies_from_metadata() {
 }
 
 #[test]
+fn every_published_registry_item_has_a_desired_config_projection() {
+    let registry = leptos_ui_kit_registry::load_built_in_registry_root().expect("load registry");
+
+    for item in registry.items {
+        let desired = crate::desired_builtin_item(&item.name)
+            .unwrap_or_else(|error| panic!("project {}: {error}", item.name));
+        assert_eq!(desired.item_name(), item.name);
+    }
+}
+
+#[test]
 fn add_plan_rejects_untracked_existing_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();

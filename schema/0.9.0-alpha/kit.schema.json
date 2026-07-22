@@ -231,16 +231,26 @@
         "properties": {
           "name": {
             "enum": [
+              "alert",
               "anchor",
+              "avatar",
+              "badge",
               "button",
+              "card",
+              "checkbox",
               "collapsible",
               "dialog",
               "field",
               "identity",
               "menu",
+              "progress",
+              "radio",
               "router-link",
+              "separator",
+              "skeleton",
               "spinner",
               "status",
+              "switch",
               "tabs",
               "tokens"
             ]

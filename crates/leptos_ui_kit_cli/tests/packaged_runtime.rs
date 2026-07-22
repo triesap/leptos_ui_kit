@@ -22,16 +22,27 @@ use package_workspace_support::{
 
 const CONFIG_PATH: &str = "src/components/ui/_kit/kit.json";
 const LOCK_PATH: &str = "src/components/ui/_kit/kit.lock.json";
-const BUILT_IN_CATALOG: [(&str, &str, &str); 11] = [
+const BUILT_IN_CATALOG: [(&str, &str, &str); 22] = [
+    ("alert", "ui", "ui/alert.json"),
     ("anchor", "ui", "ui/anchor.json"),
+    ("avatar", "ui", "ui/avatar.json"),
+    ("badge", "ui", "ui/badge.json"),
     ("button", "ui", "ui/button.json"),
+    ("card", "ui", "ui/card.json"),
+    ("checkbox", "ui", "ui/checkbox.json"),
     ("collapsible", "ui", "ui/collapsible.json"),
     ("dialog", "ui", "ui/dialog.json"),
     ("field", "ui", "ui/field.json"),
+    ("identity", "ui", "ui/identity.json"),
     ("menu", "ui", "ui/menu.json"),
+    ("progress", "ui", "ui/progress.json"),
+    ("radio", "ui", "ui/radio.json"),
     ("router-link", "ui", "ui/router-link.json"),
+    ("separator", "ui", "ui/separator.json"),
+    ("skeleton", "ui", "ui/skeleton.json"),
     ("spinner", "ui", "ui/spinner.json"),
     ("status", "ui", "ui/status.json"),
+    ("switch", "ui", "ui/switch.json"),
     ("tabs", "ui", "ui/tabs.json"),
     ("tokens", "foundation", "foundation/tokens.json"),
 ];

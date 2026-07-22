@@ -396,16 +396,26 @@ pub struct DesiredItemConfig {
 impl DesiredItemConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         match (self.name, self.source) {
+            (DesiredItemName::Alert, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Anchor, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Avatar, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Badge, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Button, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Card, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Checkbox, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Collapsible, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Dialog, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Field, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Identity, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Menu, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Progress, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Radio, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::RouterLink, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Separator, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Skeleton, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Spinner, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Status, RegistrySource::Builtin) => Ok(()),
+            (DesiredItemName::Switch, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tabs, RegistrySource::Builtin) => Ok(()),
             (DesiredItemName::Tokens, RegistrySource::Builtin) => Ok(()),
         }
@@ -419,36 +429,85 @@ impl DesiredItemConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DesiredItemName {
+    Alert,
     Anchor,
+    Avatar,
+    Badge,
     Button,
+    Card,
+    Checkbox,
     Collapsible,
     Dialog,
     Field,
     Identity,
     Menu,
+    Progress,
+    Radio,
     RouterLink,
+    Separator,
+    Skeleton,
     Spinner,
     Status,
+    Switch,
     Tabs,
     Tokens,
 }
 
 impl DesiredItemName {
+    pub const ALL: [Self; 22] = [
+        Self::Alert,
+        Self::Anchor,
+        Self::Avatar,
+        Self::Badge,
+        Self::Button,
+        Self::Card,
+        Self::Checkbox,
+        Self::Collapsible,
+        Self::Dialog,
+        Self::Field,
+        Self::Identity,
+        Self::Menu,
+        Self::Progress,
+        Self::Radio,
+        Self::RouterLink,
+        Self::Separator,
+        Self::Skeleton,
+        Self::Spinner,
+        Self::Status,
+        Self::Switch,
+        Self::Tabs,
+        Self::Tokens,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Alert => "alert",
             Self::Anchor => "anchor",
+            Self::Avatar => "avatar",
+            Self::Badge => "badge",
             Self::Button => "button",
+            Self::Card => "card",
+            Self::Checkbox => "checkbox",
             Self::Collapsible => "collapsible",
             Self::Dialog => "dialog",
             Self::Field => "field",
             Self::Identity => "identity",
             Self::Menu => "menu",
+            Self::Progress => "progress",
+            Self::Radio => "radio",
             Self::RouterLink => "router-link",
+            Self::Separator => "separator",
+            Self::Skeleton => "skeleton",
             Self::Spinner => "spinner",
             Self::Status => "status",
+            Self::Switch => "switch",
             Self::Tabs => "tabs",
             Self::Tokens => "tokens",
         }
+    }
+
+    pub fn from_registry_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == name)
     }
 }
 
@@ -637,11 +696,31 @@ pub fn desired_builtin_anchor_item() -> DesiredItemConfig {
     }
 }
 
+pub fn desired_builtin_alert_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Alert)
+}
+
+pub fn desired_builtin_avatar_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Avatar)
+}
+
+pub fn desired_builtin_badge_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Badge)
+}
+
 pub fn desired_builtin_button_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Button,
         source: RegistrySource::Builtin,
     }
+}
+
+pub fn desired_builtin_card_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Card)
+}
+
+pub fn desired_builtin_checkbox_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Checkbox)
 }
 
 pub fn desired_builtin_collapsible_item() -> DesiredItemConfig {
@@ -679,11 +758,27 @@ pub fn desired_builtin_menu_item() -> DesiredItemConfig {
     }
 }
 
+pub fn desired_builtin_progress_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Progress)
+}
+
+pub fn desired_builtin_radio_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Radio)
+}
+
 pub fn desired_builtin_router_link_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::RouterLink,
         source: RegistrySource::Builtin,
     }
+}
+
+pub fn desired_builtin_separator_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Separator)
+}
+
+pub fn desired_builtin_skeleton_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Skeleton)
 }
 
 pub fn desired_builtin_spinner_item() -> DesiredItemConfig {
@@ -700,6 +795,10 @@ pub fn desired_builtin_status_item() -> DesiredItemConfig {
     }
 }
 
+pub fn desired_builtin_switch_item() -> DesiredItemConfig {
+    desired_builtin_item_config(DesiredItemName::Switch)
+}
+
 pub fn desired_builtin_tabs_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Tabs,
@@ -710,6 +809,13 @@ pub fn desired_builtin_tabs_item() -> DesiredItemConfig {
 pub fn desired_builtin_tokens_item() -> DesiredItemConfig {
     DesiredItemConfig {
         name: DesiredItemName::Tokens,
+        source: RegistrySource::Builtin,
+    }
+}
+
+pub fn desired_builtin_item_config(name: DesiredItemName) -> DesiredItemConfig {
+    DesiredItemConfig {
+        name,
         source: RegistrySource::Builtin,
     }
 }
@@ -1126,25 +1232,28 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("desired item name"))
             .collect::<BTreeSet<_>>();
-        let expected = [
-            DesiredItemName::Anchor,
-            DesiredItemName::Button,
-            DesiredItemName::Collapsible,
-            DesiredItemName::Dialog,
-            DesiredItemName::Field,
-            DesiredItemName::Identity,
-            DesiredItemName::Menu,
-            DesiredItemName::RouterLink,
-            DesiredItemName::Spinner,
-            DesiredItemName::Status,
-            DesiredItemName::Tabs,
-            DesiredItemName::Tokens,
-        ]
-        .into_iter()
-        .map(DesiredItemName::as_str)
-        .collect::<BTreeSet<_>>();
+        let expected = DesiredItemName::ALL
+            .into_iter()
+            .map(DesiredItemName::as_str)
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn desired_item_vocabulary_matches_the_published_registry() {
+        let registry = crate::load_built_in_registry_root().expect("load registry root");
+        let registry_names = registry
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let desired_names = DesiredItemName::ALL
+            .into_iter()
+            .map(DesiredItemName::as_str)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(desired_names, registry_names);
     }
 
     #[test]
@@ -1204,7 +1313,7 @@ mod tests {
     fn rejects_invalid_desired_item() {
         let input = valid_config_json().replace(
             "\"items\": []",
-            r#""items": [{"name":"card","source":"builtin"}]"#,
+            r#""items": [{"name":"unknown-component","source":"builtin"}]"#,
         );
 
         let error = parse_kit_json_str(&input).expect_err("item should fail");
