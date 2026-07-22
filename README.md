@@ -26,9 +26,20 @@ shared libraries. Final applications select one matching Leptos feature:
 `csr`, `ssr`, or `hydrate`. Shared libraries select none.
 
 The CLI reports the exact Cargo dependency plan but does not edit `Cargo.toml`.
-The registry includes `button`, `collapsible`, `tabs`, `dialog`, `menu`,
-`field`, `status`, `spinner`, `anchor`, `router-link`, and the CSS-only `tokens`
-foundation.
+The registry includes:
+
+- actions and navigation: `anchor`, `button`, `router-link`, and `tabs`;
+- disclosure and overlays: `collapsible`, `dialog`, and `menu`;
+- forms and selection: `field`, `checkbox`, `radio`, and `switch`;
+- surfaces and identity: `avatar`, `badge`, and `card`;
+- feedback and display: `alert`, `progress`, `separator`, `skeleton`, `spinner`,
+  and `status`;
+- foundations: `identity` and the CSS-only `tokens` item.
+
+Higher-level patterns stay compositional: an accordion is a set of
+`collapsible` items, notifications use `alert` or `status`, and breadcrumbs or
+pagination compose `anchor`, `router-link`, and `button`. Native semantic HTML
+remains the default for data tables and document structure.
 
 ## Themes
 
@@ -59,6 +70,19 @@ controls with `--kit-radius-control`, and still override one component with
 circular unless its exact component property is set explicitly. Component
 radius properties accept the complete CSS `border-radius` value, including
 multi-corner and elliptical forms.
+
+```css
+:root {
+  --kit-radius-default: 0.375rem;
+  --kit-radius-control: 0.25rem;
+  --kit-radius-overlay: 0.75rem;
+  --kit-button-radius: 999px;
+}
+```
+
+Unset properties preserve the pre-contract component shapes. Invalid custom
+property values follow normal CSS computed-value behavior; the kit does not
+register them with `@property`, so full `border-radius` grammar remains valid.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

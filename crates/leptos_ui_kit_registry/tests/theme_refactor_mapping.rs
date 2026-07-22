@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use leptos_ui_kit_registry::{
-    load_built_in_component_customization_contract, load_built_in_registry_item,
-    load_built_in_registry_root, load_built_in_theme_contract, read_built_in_registry_source,
+    ComponentCustomizationScope, load_built_in_component_customization_contract,
+    load_built_in_registry_item, load_built_in_registry_root, load_built_in_theme_contract,
+    read_built_in_registry_source,
 };
 use serde::Deserialize;
 
@@ -97,11 +98,30 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         .into_iter()
         .map(|token| token.name)
         .collect::<BTreeSet<_>>();
-    let customization_names = load_built_in_component_customization_contract()
-        .expect("load component customization contract")
+    let customization = load_built_in_component_customization_contract()
+        .expect("load component customization contract");
+    let customization_names = customization
         .properties
-        .into_iter()
-        .map(|property| property.name)
+        .iter()
+        .map(|property| property.name.clone())
+        .collect::<BTreeSet<_>>();
+    let component_radius_names = customization
+        .properties
+        .iter()
+        .filter(|property| property.scope == ComponentCustomizationScope::Component)
+        .map(|property| property.name.clone())
+        .collect::<BTreeSet<_>>();
+    let semantic_radius_names = customization
+        .properties
+        .iter()
+        .filter(|property| property.scope == ComponentCustomizationScope::Semantic)
+        .map(|property| property.name.clone())
+        .collect::<BTreeSet<_>>();
+    let geometry_critical_names = customization
+        .properties
+        .iter()
+        .filter(|property| property.geometry_critical)
+        .map(|property| property.name.clone())
         .collect::<BTreeSet<_>>();
 
     let missing_external = pinned_external
@@ -141,6 +161,20 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
     assert_eq!(current_names.len(), 250);
     assert!(current_names.contains("--kit-button-radius"));
     assert!(current_names.contains("--kit-spinner-radius"));
+
+    for row in actual.iter().filter(|row| row.property == "border-radius") {
+        let names = custom_property_names(&row.value);
+        assert!(
+            !names.is_disjoint(&component_radius_names),
+            "border-radius declaration lacks an exact component property: {row:?}"
+        );
+        if !names.is_disjoint(&geometry_critical_names) {
+            assert!(
+                names.is_disjoint(&semantic_radius_names),
+                "geometry-critical radius inherits a semantic/global radius: {row:?}"
+            );
+        }
+    }
 
     assert_required_corrected_rows(&actual);
     assert_runtime_geometry_rows(&actual, &runtime_geometry);
