@@ -7,7 +7,10 @@
   justify-content: center;
   border: var(--kit-border-width) solid
     var(--kit-dialog-trigger-border-color, var(--kit-color-border));
-  border-radius: var(--kit-dialog-trigger-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-dialog-trigger-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   min-height: var(--kit-dialog-trigger-min-height, 2.5rem);
   padding:
     var(--kit-dialog-trigger-padding-block, 0.5rem)
@@ -21,7 +24,10 @@
 
 .kit-dialog-close {
   border-color: var(--kit-dialog-close-border-color, var(--kit-color-border));
-  border-radius: var(--kit-dialog-close-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-dialog-close-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   min-height: var(--kit-dialog-close-min-height, 2.5rem);
   padding:
     var(--kit-dialog-close-padding-block, 0.5rem)
@@ -86,7 +92,10 @@
   overflow: auto;
   border: var(--kit-dialog-border-width, var(--kit-border-width)) solid
     var(--kit-dialog-border-color, var(--kit-color-border));
-  border-radius: var(--kit-dialog-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-dialog-radius,
+    var(--kit-radius-overlay, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   padding:
     var(--kit-dialog-padding-block, 1.25rem)
     var(--kit-dialog-padding-inline, 1.25rem);

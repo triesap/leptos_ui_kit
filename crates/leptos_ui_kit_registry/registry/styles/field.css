@@ -19,7 +19,13 @@
     var(--kit-field-surface-border-color, transparent);
   border-radius: var(
     --kit-field-surface-radius,
-    var(--kit-field-control-radius, var(--kit-radius-md))
+    var(
+      --kit-radius-surface,
+      var(
+        --kit-radius-default,
+        var(--kit-field-control-radius, var(--kit-radius-md))
+      )
+    )
   );
   padding:
     var(--kit-field-surface-padding-block, var(--kit-field-control-padding-block, 0.625rem))
@@ -58,7 +64,10 @@
   inline-size: 100%;
   border: var(--kit-field-control-border-width, var(--kit-border-width)) solid
     var(--kit-field-control-border-color, var(--kit-color-border));
-  border-radius: var(--kit-field-control-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-field-control-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   min-block-size: var(--kit-field-control-min-height, 2.75rem);
   padding:
     var(--kit-field-control-padding-block, 0.625rem)
@@ -74,6 +83,36 @@
       var(--kit-field-control-transition-timing, var(--kit-easing-standard)),
     box-shadow var(--kit-field-control-transition-duration, var(--kit-duration-fast))
       var(--kit-field-control-transition-timing, var(--kit-easing-standard));
+}
+
+.kit-text-input {
+  border-radius: var(
+    --kit-input-radius,
+    var(
+      --kit-field-control-radius,
+      var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+    )
+  );
+}
+
+.kit-native-select {
+  border-radius: var(
+    --kit-select-radius,
+    var(
+      --kit-field-control-radius,
+      var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+    )
+  );
+}
+
+.kit-text-area {
+  border-radius: var(
+    --kit-textarea-radius,
+    var(
+      --kit-field-control-radius,
+      var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+    )
+  );
 }
 
 .kit-field-control:focus-visible {

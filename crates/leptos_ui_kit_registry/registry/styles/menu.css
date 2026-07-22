@@ -11,7 +11,10 @@
   justify-content: center;
   border: var(--kit-border-width) solid
     var(--kit-menu-trigger-border-color, var(--kit-color-border));
-  border-radius: var(--kit-menu-trigger-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-menu-trigger-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   min-height: var(--kit-menu-trigger-min-height, 2.5rem);
   padding:
     var(--kit-menu-trigger-padding-block, 0.5rem)
@@ -49,7 +52,10 @@
   min-inline-size: var(--kit-menu-content-min-inline-size, 12rem);
   border: var(--kit-menu-content-border-width, var(--kit-border-width)) solid
     var(--kit-menu-content-border-color, var(--kit-color-border));
-  border-radius: var(--kit-menu-content-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-menu-content-radius,
+    var(--kit-radius-overlay, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   padding:
     var(--kit-menu-content-padding-block, 0.25rem)
     var(--kit-menu-content-padding-inline, 0.25rem);
@@ -95,7 +101,13 @@
   align-items: center;
   gap: var(--kit-menu-item-gap, 0.5rem);
   border: 0;
-  border-radius: var(--kit-menu-item-radius, calc(var(--kit-radius-md) - 2px));
+  border-radius: var(
+    --kit-menu-item-radius,
+    var(
+      --kit-radius-control,
+      var(--kit-radius-default, calc(var(--kit-radius-md) - 2px))
+    )
+  );
   min-height: var(--kit-menu-item-min-height, 2.25rem);
   padding:
     var(--kit-menu-item-padding-block, 0.5rem)

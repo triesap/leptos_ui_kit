@@ -1,12 +1,12 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 211,
+  "rowCount": 214,
   "rowsByStylesheet": {
     "anchor.css": 8,
     "button.css": 31,
     "collapsible.css": 13,
     "dialog.css": 48,
-    "field.css": 42,
+    "field.css": 45,
     "menu.css": 38,
     "spinner.css": 7,
     "status.css": 4,
@@ -71,7 +71,7 @@
       "stylesheet": "button.css",
       "selector": ".kit-button",
       "property": "border-radius",
-      "value": "var(--kit-radius-md)"
+      "value": "var( --kit-button-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "button.css",
@@ -275,7 +275,7 @@
       "stylesheet": "collapsible.css",
       "selector": ".kit-collapsible-trigger",
       "property": "border-radius",
-      "value": "var(--kit-collapsible-trigger-radius, var(--kit-radius-md))"
+      "value": "var( --kit-collapsible-trigger-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "collapsible.css",
@@ -353,13 +353,13 @@
       "stylesheet": "dialog.css",
       "selector": ".kit-dialog-close",
       "property": "border-radius",
-      "value": "var(--kit-dialog-close-radius, var(--kit-radius-md))"
+      "value": "var( --kit-dialog-close-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "dialog.css",
       "selector": ".kit-dialog-close",
       "property": "border-radius",
-      "value": "var(--kit-dialog-trigger-radius, var(--kit-radius-md))"
+      "value": "var( --kit-dialog-trigger-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "dialog.css",
@@ -449,7 +449,7 @@
       "stylesheet": "dialog.css",
       "selector": ".kit-dialog-content",
       "property": "border-radius",
-      "value": "var(--kit-dialog-radius, var(--kit-radius-md))"
+      "value": "var( --kit-dialog-radius, var(--kit-radius-overlay, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "dialog.css",
@@ -563,7 +563,7 @@
       "stylesheet": "dialog.css",
       "selector": ".kit-dialog-trigger",
       "property": "border-radius",
-      "value": "var(--kit-dialog-trigger-radius, var(--kit-radius-md))"
+      "value": "var( --kit-dialog-trigger-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "dialog.css",
@@ -635,7 +635,7 @@
       "stylesheet": "field.css",
       "selector": ".kit-field-control",
       "property": "border-radius",
-      "value": "var(--kit-field-control-radius, var(--kit-radius-md))"
+      "value": "var( --kit-field-control-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "field.css",
@@ -773,7 +773,7 @@
       "stylesheet": "field.css",
       "selector": ".kit-field-surface",
       "property": "border-radius",
-      "value": "var( --kit-field-surface-radius, var(--kit-field-control-radius, var(--kit-radius-md)) )"
+      "value": "var( --kit-field-surface-radius, var( --kit-radius-surface, var( --kit-radius-default, var(--kit-field-control-radius, var(--kit-radius-md)) ) ) )"
     },
     {
       "stylesheet": "field.css",
@@ -798,6 +798,12 @@
       "selector": ".kit-field[data-invalid] .kit-field-message",
       "property": "color",
       "value": "var(--kit-field-message-invalid-color, var(--kit-color-danger))"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-native-select",
+      "property": "border-radius",
+      "value": "var( --kit-select-radius, var( --kit-field-control-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) ) )"
     },
     {
       "stylesheet": "field.css",
@@ -862,8 +868,20 @@
     {
       "stylesheet": "field.css",
       "selector": ".kit-text-area",
+      "property": "border-radius",
+      "value": "var( --kit-textarea-radius, var( --kit-field-control-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) ) )"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-text-area",
       "property": "min-block-size",
       "value": "var(--kit-text-area-min-block-size, 7rem)"
+    },
+    {
+      "stylesheet": "field.css",
+      "selector": ".kit-text-input",
+      "property": "border-radius",
+      "value": "var( --kit-input-radius, var( --kit-field-control-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) ) )"
     },
     {
       "stylesheet": "menu.css",
@@ -893,7 +911,7 @@
       "stylesheet": "menu.css",
       "selector": ".kit-menu-content",
       "property": "border-radius",
-      "value": "var(--kit-menu-content-radius, var(--kit-radius-md))"
+      "value": "var( --kit-menu-content-radius, var(--kit-radius-overlay, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "menu.css",
@@ -983,7 +1001,7 @@
       "stylesheet": "menu.css",
       "selector": ".kit-menu-item",
       "property": "border-radius",
-      "value": "var(--kit-menu-item-radius, calc(var(--kit-radius-md) - 2px))"
+      "value": "var( --kit-menu-item-radius, var( --kit-radius-control, var(--kit-radius-default, calc(var(--kit-radius-md) - 2px)) ) )"
     },
     {
       "stylesheet": "menu.css",
@@ -1049,7 +1067,7 @@
       "stylesheet": "menu.css",
       "selector": ".kit-menu-trigger",
       "property": "border-radius",
-      "value": "var(--kit-menu-trigger-radius, var(--kit-radius-md))"
+      "value": "var( --kit-menu-trigger-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "menu.css",
@@ -1133,7 +1151,7 @@
       "stylesheet": "spinner.css",
       "selector": ".kit-spinner-mark",
       "property": "border-radius",
-      "value": "var(--kit-radius-full)"
+      "value": "var(--kit-spinner-radius, var(--kit-radius-full))"
     },
     {
       "stylesheet": "status.css",
@@ -1217,7 +1235,7 @@
       "stylesheet": "tabs.css",
       "selector": ".kit-tabs-trigger",
       "property": "border-radius",
-      "value": "var(--kit-tabs-trigger-radius, var(--kit-radius-md))"
+      "value": "var( --kit-tabs-trigger-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md))) )"
     },
     {
       "stylesheet": "tabs.css",

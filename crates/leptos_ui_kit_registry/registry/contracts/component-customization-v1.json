@@ -49,17 +49,6 @@
       "stability": "stable"
     },
     {
-      "name": "--kit-radius-indicator",
-      "scope": "semantic",
-      "cssProperty": "border-radius",
-      "valueKind": "border-radius",
-      "role": "indicator",
-      "fallback": ["--kit-radius-default", "--kit-radius-sm"],
-      "inherits": true,
-      "geometryCritical": false,
-      "stability": "stable"
-    },
-    {
       "name": "--kit-button-radius",
       "scope": "component",
       "owner": "button",
@@ -210,7 +199,7 @@
       "cssProperty": "border-radius",
       "valueKind": "border-radius",
       "role": "control",
-      "fallback": ["--kit-radius-control", "--kit-radius-default", "--kit-radius-md"],
+      "fallback": ["--kit-radius-control", "--kit-radius-default"],
       "naturalFallback": "calc(var(--kit-radius-md) - 2px)",
       "inherits": true,
       "geometryCritical": false,

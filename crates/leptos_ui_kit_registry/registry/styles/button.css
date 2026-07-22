@@ -6,7 +6,10 @@
   justify-content: center;
   gap: var(--kit-button-gap, 0.375rem);
   border: var(--kit-button-border-width, var(--kit-border-width)) solid transparent;
-  border-radius: var(--kit-radius-md);
+  border-radius: var(
+    --kit-button-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   font: inherit;
   font-weight: var(--kit-button-font-weight, 600);
   line-height: var(--kit-button-line-height, 1);

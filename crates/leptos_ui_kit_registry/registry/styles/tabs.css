@@ -22,7 +22,10 @@
   justify-content: center;
   border: var(--kit-border-width) solid
     var(--kit-tabs-trigger-border-color, var(--kit-color-border));
-  border-radius: var(--kit-tabs-trigger-radius, var(--kit-radius-md));
+  border-radius: var(
+    --kit-tabs-trigger-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))
+  );
   min-height: var(--kit-tabs-trigger-min-height, 2.5rem);
   padding:
     var(--kit-tabs-trigger-padding-block, 0.5rem)

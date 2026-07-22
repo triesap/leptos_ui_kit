@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use leptos_ui_kit_registry::{
-    load_built_in_registry_item, load_built_in_registry_root, load_built_in_theme_contract,
-    read_built_in_registry_source,
+    load_built_in_component_customization_contract, load_built_in_registry_item,
+    load_built_in_registry_root, load_built_in_theme_contract, read_built_in_registry_source,
 };
 use serde::Deserialize;
 
@@ -42,7 +42,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         serde_json::from_str(COMPATIBILITY_FIXTURE).expect("parse pinned compatibility fixture");
 
     assert_eq!(fixture.fixture_version, 1);
-    assert_eq!(fixture.row_count, 211);
+    assert_eq!(fixture.row_count, 214);
     assert_eq!(fixture.rows.len(), fixture.row_count);
     assert_eq!(
         fixture.rows_by_stylesheet,
@@ -51,7 +51,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
             ("button.css".to_owned(), 31),
             ("collapsible.css".to_owned(), 13),
             ("dialog.css".to_owned(), 48),
-            ("field.css".to_owned(), 42),
+            ("field.css".to_owned(), 45),
             ("menu.css".to_owned(), 38),
             ("spinner.css".to_owned(), 7),
             ("status.css".to_owned(), 4),
@@ -87,6 +87,12 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         .into_iter()
         .map(|token| token.name)
         .collect::<BTreeSet<_>>();
+    let customization_names = load_built_in_component_customization_contract()
+        .expect("load component customization contract")
+        .properties
+        .into_iter()
+        .map(|property| property.name)
+        .collect::<BTreeSet<_>>();
 
     let missing_external = pinned_external
         .difference(&current_names)
@@ -97,12 +103,22 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
     );
     assert!(runtime_geometry.is_disjoint(&contract_names));
     assert!(runtime_geometry.is_subset(&current_names));
+    let missing_customization = customization_names
+        .difference(&current_names)
+        .collect::<Vec<_>>();
+    assert!(
+        missing_customization.is_empty(),
+        "declared component customization properties missing from CSS: {missing_customization:?}"
+    );
 
     let approved_names = pinned_external
         .union(&runtime_geometry)
         .cloned()
         .collect::<BTreeSet<_>>()
         .union(&contract_names)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .union(&customization_names)
         .cloned()
         .collect::<BTreeSet<_>>();
     let unapproved = current_names
@@ -112,9 +128,9 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         unapproved.is_empty(),
         "unapproved component tokens: {unapproved:?}"
     );
-    assert_eq!(current_names.len(), 227);
-    assert!(!current_names.contains("--kit-button-radius"));
-    assert!(!current_names.contains("--kit-spinner-radius"));
+    assert_eq!(current_names.len(), 236);
+    assert!(current_names.contains("--kit-button-radius"));
+    assert!(current_names.contains("--kit-spinner-radius"));
 
     assert_required_corrected_rows(&actual);
     assert_runtime_geometry_rows(&actual, &runtime_geometry);
@@ -511,7 +527,7 @@ fn assert_required_corrected_rows(rows: &[MappingRow]) {
             stylesheet: "menu.css".to_owned(),
             selector: ".kit-menu-item".to_owned(),
             property: "border-radius".to_owned(),
-            value: "var(--kit-menu-item-radius, calc(var(--kit-radius-md) - 2px))".to_owned(),
+            value: "var( --kit-menu-item-radius, var( --kit-radius-control, var(--kit-radius-default, calc(var(--kit-radius-md) - 2px)) ) )".to_owned(),
         },
         border_row(
             "collapsible.css",

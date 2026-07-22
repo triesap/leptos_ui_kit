@@ -2947,7 +2947,10 @@ mod tests {
             "var(--kit-collapsible-trigger-disabled-opacity, var(--kit-disabled-opacity))"
         ));
         assert!(css.contains("var(--kit-collapsible-trigger-focus-ring, var(--kit-focus-ring))"));
-        assert!(css.contains("var(--kit-collapsible-trigger-radius, var(--kit-radius-md))"));
+        assert!(css.contains("--kit-collapsible-trigger-radius,"));
+        assert!(css.contains(
+            "var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-md)))"
+        ));
     }
 
     #[test]
@@ -3098,9 +3101,11 @@ mod tests {
         assert!(css.contains(
             "--kit-field-surface-background,\n    var(--kit-field-control-background, var(--kit-color-surface))"
         ));
-        assert!(css.contains(
-            "--kit-field-surface-radius,\n    var(--kit-field-control-radius, var(--kit-radius-md))"
-        ));
+        assert!(css.contains("--kit-field-surface-radius,\n    var(\n      --kit-radius-surface,"));
+        assert!(css.contains("var(--kit-field-control-radius, var(--kit-radius-md))"));
+        assert!(css.contains("--kit-input-radius,"));
+        assert!(css.contains("--kit-select-radius,"));
+        assert!(css.contains("--kit-textarea-radius,"));
         assert!(
             item.item
                 .accessibility
@@ -3286,7 +3291,7 @@ mod tests {
         assert!(!css.contains(":root"));
         assert!(css.contains("var(--kit-spinner-color, currentColor)"));
         assert!(css.contains("color-mix(in srgb, currentColor 20%, transparent)"));
-        assert!(css.contains("border-radius: var(--kit-radius-full)"));
+        assert!(css.contains("border-radius: var(--kit-spinner-radius, var(--kit-radius-full))"));
         assert!(css.contains("var(--kit-spinner-animation-duration, 900ms)"));
         assert!(
             item.item
