@@ -1,0 +1,12 @@
+/* leptos-ui-kit:start avatar */
+@layer leptos-ui-kit.components {
+.kit-avatar {
+  display: block;
+  box-sizing: border-box;
+  inline-size: 2.5rem;
+  block-size: 2.5rem;
+  border-radius: var(--kit-avatar-radius, var(--kit-radius-full));
+  object-fit: cover;
+}
+}
+/* leptos-ui-kit:end avatar */

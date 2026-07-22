@@ -2110,7 +2110,10 @@ mod tests {
             entries,
             [
                 ("anchor", "ui/anchor.json"),
+                ("avatar", "ui/avatar.json"),
+                ("badge", "ui/badge.json"),
                 ("button", "ui/button.json"),
+                ("card", "ui/card.json"),
                 ("collapsible", "ui/collapsible.json"),
                 ("dialog", "ui/dialog.json"),
                 ("field", "ui/field.json"),
@@ -2851,6 +2854,35 @@ mod tests {
             item.item.files[0].target.exports,
             ["Anchor", "AnchorTarget"]
         );
+    }
+
+    #[test]
+    fn avatar_badge_and_card_are_independently_installable_native_primitives() {
+        let root = built_in_registry_root();
+        for (name, rust_marker, css_marker, radius_property) in [
+            ("avatar", "<img", ".kit-avatar", "--kit-avatar-radius"),
+            ("badge", "<span", ".kit-badge", "--kit-badge-radius"),
+            ("card", "<section", ".kit-card", "--kit-card-radius"),
+        ] {
+            let item = load_built_in_registry_item(name)
+                .unwrap_or_else(|error| panic!("load {name}: {error}"));
+            assert_eq!(item.item.registry_dependencies, ["tokens"]);
+            assert_eq!(item.item.files.len(), 1);
+            assert_eq!(item.item.styles.len(), 1);
+
+            let source = fs::read_to_string(root.join(&item.item.files[0].source))
+                .unwrap_or_else(|error| panic!("read {name} source: {error}"));
+            let css = fs::read_to_string(root.join(&item.item.styles[0].source))
+                .unwrap_or_else(|error| panic!("read {name} CSS: {error}"));
+            assert!(source.contains(rust_marker), "{name}");
+            assert!(css.contains(css_marker), "{name}");
+            assert!(css.contains(radius_property), "{name}");
+            assert!(!css.contains(":root"), "{name}");
+        }
+
+        let avatar = fs::read_to_string(root.join("ui/avatar.rs")).expect("read avatar source");
+        assert!(avatar.contains("alt=alt"));
+        assert!(avatar.contains("src=src"));
     }
 
     #[test]
@@ -3920,7 +3952,10 @@ mod tests {
             styled,
             [
                 "anchor",
+                "avatar",
+                "badge",
                 "button",
+                "card",
                 "collapsible",
                 "dialog",
                 "field",

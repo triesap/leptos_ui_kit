@@ -790,7 +790,7 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
         .filter_map(|spec| spec.source_path.strip_prefix("registry/"))
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 67);
+    assert_eq!(actual.len(), 76);
     let mut case_folded = BTreeSet::new();
     for path in actual {
         assert!(!path.starts_with('/'));
@@ -801,13 +801,13 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
 }
 
 #[test]
-fn approved_embedded_inventory_has_74_unique_logical_assets() {
+fn approved_embedded_inventory_has_83_unique_logical_assets() {
     let logical_assets = ASSET_SPECS
         .iter()
         .map(|spec| spec.logical_path.to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(logical_assets.len(), 74);
+    assert_eq!(logical_assets.len(), 83);
     assert!(logical_assets.contains("registry/registry.json"));
     assert!(logical_assets.contains("registry/contracts/theme-v1.json"));
     assert!(logical_assets.contains("registry/contracts/component-customization-v1.json"));
@@ -856,7 +856,7 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 98);
+    assert_eq!(expected.len(), 107);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(actual.contains(schema), "missing packaged schema: {schema}");

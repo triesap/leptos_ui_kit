@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn generated_catalog_is_exact_sorted_and_content_addressed() {
-        assert_eq!(EMBEDDED_ASSET_COUNT, 74);
+        assert_eq!(EMBEDDED_ASSET_COUNT, 83);
         assert_eq!(EMBEDDED_ASSETS.len(), EMBEDDED_ASSET_COUNT);
         assert!(EMBEDDED_CATALOG_HASH.starts_with("sha256:"));
         assert_eq!(EMBEDDED_CATALOG_HASH.len(), "sha256:".len() + 64);
@@ -531,7 +531,7 @@ mod tests {
                 EmbeddedAssetKind::Css => kinds[2] += 1,
             }
         }
-        assert_eq!(kinds, [22, 42, 10]);
+        assert_eq!(kinds, [25, 45, 13]);
     }
 
     #[test]

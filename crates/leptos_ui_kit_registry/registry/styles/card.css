@@ -1,0 +1,16 @@
+/* leptos-ui-kit:start card */
+@layer leptos-ui-kit.components {
+.kit-card {
+  box-sizing: border-box;
+  border: var(--kit-border-width) solid var(--kit-color-border);
+  border-radius: var(
+    --kit-card-radius,
+    var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-lg)))
+  );
+  padding: 1rem;
+  background: var(--kit-color-surface-raised);
+  color: var(--kit-color-text);
+  box-shadow: var(--kit-shadow-sm);
+}
+}
+/* leptos-ui-kit:end card */

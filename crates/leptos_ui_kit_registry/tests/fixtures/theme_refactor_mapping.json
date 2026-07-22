@@ -1,9 +1,12 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 214,
+  "rowCount": 223,
   "rowsByStylesheet": {
     "anchor.css": 8,
+    "avatar.css": 1,
+    "badge.css": 3,
     "button.css": 31,
+    "card.css": 5,
     "collapsible.css": 13,
     "dialog.css": 48,
     "field.css": 45,
@@ -60,6 +63,30 @@
       "selector": ".kit-anchor:hover",
       "property": "color",
       "value": "var(--kit-anchor-color-hover, var(--kit-color-link-hover))"
+    },
+    {
+      "stylesheet": "avatar.css",
+      "selector": ".kit-avatar",
+      "property": "border-radius",
+      "value": "var(--kit-avatar-radius, var(--kit-radius-full))"
+    },
+    {
+      "stylesheet": "badge.css",
+      "selector": ".kit-badge",
+      "property": "background",
+      "value": "var(--kit-color-surface-hover)"
+    },
+    {
+      "stylesheet": "badge.css",
+      "selector": ".kit-badge",
+      "property": "border-radius",
+      "value": "var( --kit-badge-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
+    },
+    {
+      "stylesheet": "badge.css",
+      "selector": ".kit-badge",
+      "property": "color",
+      "value": "var(--kit-color-text)"
     },
     {
       "stylesheet": "button.css",
@@ -246,6 +273,36 @@
       "selector": ".kit-button:focus-visible",
       "property": "outline-offset",
       "value": "var(--kit-button-focus-outline-offset, 2px)"
+    },
+    {
+      "stylesheet": "card.css",
+      "selector": ".kit-card",
+      "property": "background",
+      "value": "var(--kit-color-surface-raised)"
+    },
+    {
+      "stylesheet": "card.css",
+      "selector": ".kit-card",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "card.css",
+      "selector": ".kit-card",
+      "property": "border-radius",
+      "value": "var( --kit-card-radius, var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-lg))) )"
+    },
+    {
+      "stylesheet": "card.css",
+      "selector": ".kit-card",
+      "property": "box-shadow",
+      "value": "var(--kit-shadow-sm)"
+    },
+    {
+      "stylesheet": "card.css",
+      "selector": ".kit-card",
+      "property": "color",
+      "value": "var(--kit-color-text)"
     },
     {
       "stylesheet": "collapsible.css",

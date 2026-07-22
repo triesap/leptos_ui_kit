@@ -1,0 +1,40 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json",
+  "schemaVersion": "0.9.0-alpha",
+  "name": "badge",
+  "kind": "ui",
+  "version": "0.9.0-alpha",
+  "title": "Badge",
+  "description": "A pure-CSS Leptos inline badge primitive.",
+  "leptos": {
+    "version": "0.9.0-alpha",
+    "routerVersion": "0.9.0-alpha",
+    "renderModes": ["csr", "hydrate", "ssr"]
+  },
+  "accessibility": {
+    "behaviors": [{ "name": "inline-text-semantics", "required": true }],
+    "notes": ["Use Status or Alert for content that must be announced dynamically."]
+  },
+  "files": [
+    {
+      "source": "ui/badge.rs",
+      "target": { "kind": "ui", "path": "badge.rs", "exports": ["Badge"] }
+    }
+  ],
+  "styles": [
+    {
+      "source": "styles/badge.css",
+      "target": { "kind": "managed-css-block", "id": "badge" }
+    }
+  ],
+  "registryDependencies": ["tokens"],
+  "cargoPlan": [
+    {
+      "crate": "leptos",
+      "source": { "kind": "version", "version": "0.9.0-alpha" },
+      "features": [],
+      "required": true
+    }
+  ],
+  "extra": {}
+}

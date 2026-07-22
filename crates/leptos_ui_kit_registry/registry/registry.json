@@ -38,8 +38,20 @@
       "path": "ui/anchor.json"
     },
     {
+      "name": "avatar",
+      "path": "ui/avatar.json"
+    },
+    {
+      "name": "badge",
+      "path": "ui/badge.json"
+    },
+    {
       "name": "button",
       "path": "ui/button.json"
+    },
+    {
+      "name": "card",
+      "path": "ui/card.json"
     },
     {
       "name": "collapsible",

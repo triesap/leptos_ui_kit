@@ -1,0 +1,19 @@
+/* leptos-ui-kit:start badge */
+@layer leptos-ui-kit.components {
+.kit-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(
+    --kit-badge-radius,
+    var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full)))
+  );
+  padding: 0.125rem 0.5rem;
+  background: var(--kit-color-surface-hover);
+  color: var(--kit-color-text);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+}
+}
+/* leptos-ui-kit:end badge */

@@ -42,13 +42,16 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         serde_json::from_str(COMPATIBILITY_FIXTURE).expect("parse pinned compatibility fixture");
 
     assert_eq!(fixture.fixture_version, 1);
-    assert_eq!(fixture.row_count, 214);
+    assert_eq!(fixture.row_count, 223);
     assert_eq!(fixture.rows.len(), fixture.row_count);
     assert_eq!(
         fixture.rows_by_stylesheet,
         BTreeMap::from([
             ("anchor.css".to_owned(), 8),
+            ("avatar.css".to_owned(), 1),
+            ("badge.css".to_owned(), 3),
             ("button.css".to_owned(), 31),
+            ("card.css".to_owned(), 5),
             ("collapsible.css".to_owned(), 13),
             ("dialog.css".to_owned(), 48),
             ("field.css".to_owned(), 45),
@@ -128,7 +131,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         unapproved.is_empty(),
         "unapproved component tokens: {unapproved:?}"
     );
-    assert_eq!(current_names.len(), 236);
+    assert_eq!(current_names.len(), 242);
     assert!(current_names.contains("--kit-button-radius"));
     assert!(current_names.contains("--kit-spinner-radius"));
 

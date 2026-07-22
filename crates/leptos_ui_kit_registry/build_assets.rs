@@ -60,7 +60,7 @@ impl AssetSpec {
     }
 }
 
-pub const ASSET_SPECS: [AssetSpec; 74] = [
+pub const ASSET_SPECS: [AssetSpec; 83] = [
     AssetSpec::same(
         "registry/contracts/component-customization-v1.json",
         AssetKind::Json,
@@ -69,7 +69,10 @@ pub const ASSET_SPECS: [AssetSpec; 74] = [
     AssetSpec::same("registry/foundation/tokens.json", AssetKind::Json),
     AssetSpec::same("registry/registry.json", AssetKind::Json),
     AssetSpec::same("registry/styles/anchor.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/avatar.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/badge.css", AssetKind::Css),
     AssetSpec::same("registry/styles/button.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/card.css", AssetKind::Css),
     AssetSpec::same("registry/styles/collapsible.css", AssetKind::Css),
     AssetSpec::same("registry/styles/dialog.css", AssetKind::Css),
     AssetSpec::same("registry/styles/field.css", AssetKind::Css),
@@ -80,8 +83,14 @@ pub const ASSET_SPECS: [AssetSpec; 74] = [
     AssetSpec::same("registry/styles/tokens.css", AssetKind::Css),
     AssetSpec::same("registry/ui/anchor.json", AssetKind::Json),
     AssetSpec::same("registry/ui/anchor.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/avatar.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/avatar.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/badge.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/badge.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/button.json", AssetKind::Json),
     AssetSpec::same("registry/ui/button.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/card.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/card.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/collapsible.json", AssetKind::Json),
     AssetSpec::same("registry/ui/collapsible/content.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/collapsible/mod.rs", AssetKind::Rust),
