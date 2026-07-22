@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/component-customization.schema.json",
+  "title": "leptos_ui_kit component customization contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "contractId", "revision", "properties"],
+  "properties": {
+    "$schema": {
+      "const": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/component-customization.schema.json"
+    },
+    "schemaVersion": { "const": "0.9.0-alpha" },
+    "contractId": { "const": "leptos-ui-kit-component-customization" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "properties": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/property" }
+    }
+  },
+  "$defs": {
+    "property": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "scope",
+        "cssProperty",
+        "valueKind",
+        "role",
+        "fallback",
+        "inherits",
+        "geometryCritical",
+        "stability"
+      ],
+      "properties": {
+        "name": { "type": "string", "pattern": "^--kit-[a-z0-9-]+$" },
+        "scope": { "enum": ["semantic", "component"] },
+        "owner": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+        "cssProperty": { "const": "border-radius" },
+        "valueKind": { "const": "border-radius" },
+        "role": {
+          "enum": ["default", "control", "surface", "overlay", "indicator", "geometry-critical"]
+        },
+        "fallback": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^--kit-[a-z0-9-]+$" },
+          "uniqueItems": true
+        },
+        "naturalFallback": { "type": "string", "minLength": 1 },
+        "inherits": { "const": true },
+        "geometryCritical": { "type": "boolean" },
+        "stability": { "enum": ["experimental", "stable", "deprecated"] },
+        "deprecatedSince": { "type": "string", "minLength": 1 },
+        "replacement": { "type": "string", "pattern": "^--kit-[a-z0-9-]+$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "scope": { "const": "component" } } },
+          "then": { "required": ["owner"] },
+          "else": { "not": { "required": ["owner"] } }
+        },
+        {
+          "if": { "properties": { "stability": { "const": "deprecated" } } },
+          "then": { "required": ["deprecatedSince", "replacement"] },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["deprecatedSince"] },
+                { "required": ["replacement"] }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

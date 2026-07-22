@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
-const SCHEMAS: [&str; 4] = [
+const SCHEMAS: [&str; 5] = [
+    "component-customization.schema.json",
     "kit.schema.json",
     "registry-item.schema.json",
     "registry.schema.json",

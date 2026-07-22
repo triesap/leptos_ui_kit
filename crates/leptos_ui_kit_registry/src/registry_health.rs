@@ -241,7 +241,7 @@ impl std::error::Error for RegistryHealthError {
 )]
 pub fn validate_built_in_registry_health() -> Result<(), RegistryHealthError> {
     let snapshot = built_in_registry_snapshot().map_err(snapshot_health_error)?;
-    debug_assert_eq!(snapshot.schema_count(), 6);
+    debug_assert_eq!(snapshot.schema_count(), 7);
     Ok(())
 }
 
@@ -740,6 +740,16 @@ fn snapshot_health_error(error: SnapshotError) -> RegistryHealthError {
         } => RegistryHealthError::InvalidThemeContract {
             path: logical_path.into(),
             source,
+        },
+        SnapshotError::InvalidComponentCustomization {
+            logical_path,
+            source,
+        } => RegistryHealthError::BuiltInAsset {
+            kind: RegistryHealthFileKind::RegistrySource,
+            source: BuiltInAssetError::InvalidContent {
+                logical_path: logical_path.into(),
+                reason: source.to_string(),
+            },
         },
         SnapshotError::InvalidThemeContractSchema {
             logical_path,

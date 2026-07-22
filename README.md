@@ -41,6 +41,25 @@ Nested theme scopes work directly. When a dialog must inherit a nested scope,
 pass a `portal_mount` inside it. After upgrading the kit, run `sync`; untouched
 managed blocks migrate automatically and edited blocks remain unchanged.
 
+### Component customization
+
+Theme tokens describe portable design decisions. Optional component custom
+properties provide the runtime CSS API and are governed separately by
+`registry/contracts/component-customization-v1.json`.
+
+Radius customization follows this precedence:
+
+```text
+component property -> semantic role -> --kit-radius-default -> reference radius
+```
+
+For example, an application may set `--kit-radius-default` once, refine all
+controls with `--kit-radius-control`, and still override one component with
+`--kit-button-radius`. Shape-critical geometry such as the spinner remains
+circular unless its exact component property is set explicitly. Component
+radius properties accept the complete CSS `border-radius` value, including
+multi-corner and elliptical forms.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Licensed under either the MIT License or the Apache License, Version 2.0, at your option.

@@ -3,6 +3,7 @@
 //! Registry layer for configuration and item resolution.
 
 mod builtin_registry;
+mod component_customization;
 mod config;
 mod detect;
 mod embedded_assets;
@@ -11,6 +12,13 @@ mod registry_health;
 mod theme_contract;
 mod token_abi;
 
+pub use component_customization::{
+    COMPONENT_CUSTOMIZATION_CONTRACT_ID, COMPONENT_CUSTOMIZATION_SCHEMA_URL,
+    COMPONENT_CUSTOMIZATION_SCHEMA_VERSION, ComponentCustomizationContract,
+    ComponentCustomizationError, ComponentCustomizationProperty, ComponentCustomizationScope,
+    CssProperty, CssValueKind, CustomizationStability, RadiusRole,
+    load_built_in_component_customization_contract, parse_component_customization_contract_str,
+};
 pub use config::{
     ConfigError, DEFAULT_CSS_PATH, DEFAULT_KIT_CONFIG_PATH, DEFAULT_KIT_DIR, DEFAULT_UI_DIR,
     DesiredItemConfig, DesiredItemName, InstallConfig, InstallRoots, KIT_SCHEMA_URL, KitConfig,

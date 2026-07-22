@@ -9,9 +9,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError, RegistryItem,
-    RegistryRoot, ResolvedRegistryTargets, SCHEMA_VERSION, THEME_CONTRACT_SCHEMA_URL,
+    COMPONENT_CUSTOMIZATION_SCHEMA_URL, ComponentCustomizationError, KIT_SCHEMA_URL,
+    REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, RegistryError, RegistryItem, RegistryRoot,
+    ResolvedRegistryTargets, SCHEMA_VERSION, THEME_CONTRACT_SCHEMA_URL,
     THEME_INTEGRATION_SCHEMA_URL, TOKEN_CONTRACT_SCHEMA_URL, ThemeContract, ThemeContractError,
+    component_customization::parse_component_customization_contract_str,
     embedded_assets::{
         AssetProvider, AssetProviderError, EmbeddedAssetKind, embedded_asset_inventory,
         embedded_asset_provider, validate_logical_path,
@@ -26,11 +28,14 @@ use crate::{
 
 const REGISTRY_ROOT_PATH: &str = "registry/registry.json";
 const THEME_CONTRACT_PATH: &str = "registry/contracts/theme-v1.json";
+const COMPONENT_CUSTOMIZATION_CONTRACT_PATH: &str =
+    "registry/contracts/component-customization-v1.json";
 const TOKENS_MANIFEST_PATH: &str = "registry/foundation/tokens.json";
 const TOKENS_CSS_PATH: &str = "registry/styles/tokens.css";
 const JSON_SCHEMA_DRAFT_2020_12_URL: &str = "https://json-schema.org/draft/2020-12/schema";
 const THEME_CONTRACT_SCHEMA_PATH: &str = "schema/0.9.0-alpha/theme-contract.schema.json";
-const SCHEMA_PATHS: [&str; 6] = [
+const SCHEMA_PATHS: [&str; 7] = [
+    "schema/0.9.0-alpha/component-customization.schema.json",
     "schema/0.9.0-alpha/kit.schema.json",
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
@@ -94,6 +99,13 @@ const TOKEN_ABI_SCHEMA_REQUIRED: &[&str] = &[
     "contrastChecks",
     "extensions",
 ];
+const COMPONENT_CUSTOMIZATION_SCHEMA_REQUIRED: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "contractId",
+    "revision",
+    "properties",
+];
 
 struct SchemaContract {
     logical_path: &'static str,
@@ -102,21 +114,27 @@ struct SchemaContract {
     required: &'static [&'static str],
 }
 
-const SCHEMA_CONTRACTS: [SchemaContract; 6] = [
+const SCHEMA_CONTRACTS: [SchemaContract; 7] = [
     SchemaContract {
         logical_path: SCHEMA_PATHS[0],
+        schema_id: COMPONENT_CUSTOMIZATION_SCHEMA_URL,
+        schema_version: SCHEMA_VERSION,
+        required: COMPONENT_CUSTOMIZATION_SCHEMA_REQUIRED,
+    },
+    SchemaContract {
+        logical_path: SCHEMA_PATHS[1],
         schema_id: KIT_SCHEMA_URL,
         schema_version: SCHEMA_VERSION,
         required: KIT_SCHEMA_REQUIRED,
     },
     SchemaContract {
-        logical_path: SCHEMA_PATHS[1],
+        logical_path: SCHEMA_PATHS[2],
         schema_id: REGISTRY_ITEM_SCHEMA_URL,
         schema_version: SCHEMA_VERSION,
         required: REGISTRY_ITEM_SCHEMA_REQUIRED,
     },
     SchemaContract {
-        logical_path: SCHEMA_PATHS[2],
+        logical_path: SCHEMA_PATHS[3],
         schema_id: REGISTRY_SCHEMA_URL,
         schema_version: SCHEMA_VERSION,
         required: REGISTRY_SCHEMA_REQUIRED,
@@ -128,13 +146,13 @@ const SCHEMA_CONTRACTS: [SchemaContract; 6] = [
         required: THEME_CONTRACT_SCHEMA_REQUIRED,
     },
     SchemaContract {
-        logical_path: "schema/0.2.0/theme-integration.schema.json",
+        logical_path: SCHEMA_PATHS[5],
         schema_id: THEME_INTEGRATION_SCHEMA_URL,
         schema_version: "1.0.0",
         required: THEME_INTEGRATION_SCHEMA_REQUIRED,
     },
     SchemaContract {
-        logical_path: "schema/0.2.0/token-contract.schema.json",
+        logical_path: SCHEMA_PATHS[6],
         schema_id: TOKEN_CONTRACT_SCHEMA_URL,
         schema_version: "1.0.0",
         required: TOKEN_ABI_SCHEMA_REQUIRED,
@@ -193,6 +211,7 @@ impl BuiltInRegistrySnapshot {
         let root = parse_root(&assets)?;
         let (items, parsed_items) = parse_items(&assets, &root)?;
         validate_exact_asset_ownership(&assets, &root, &parsed_items)?;
+        validate_component_customization_contract(&assets, &root)?;
         validate_runtime_compatibility_sources(&assets, &parsed_items)?;
         let theme_contract = parse_theme_contract(&assets)?;
         validate_theme_contract_version(&root, &parsed_items, &theme_contract)?;
@@ -371,6 +390,10 @@ pub(crate) enum SnapshotError {
         logical_path: String,
         source: ThemeContractError,
     },
+    InvalidComponentCustomization {
+        logical_path: String,
+        source: ComponentCustomizationError,
+    },
     InvalidThemeContractSchema {
         logical_path: String,
         pointer: &'static str,
@@ -417,6 +440,7 @@ impl SnapshotError {
             | Self::RegistryItemIdentity { logical_path, .. }
             | Self::InvalidRegistryCatalog { logical_path, .. }
             | Self::InvalidThemeContract { logical_path, .. }
+            | Self::InvalidComponentCustomization { logical_path, .. }
             | Self::InvalidThemeContractSchema { logical_path, .. }
             | Self::InvalidThemeCss { logical_path, .. }
             | Self::UnownedRuntimeAsset { logical_path }
@@ -500,6 +524,13 @@ impl fmt::Display for SnapshotError {
                 formatter,
                 "invalid built-in theme contract {logical_path}: {source}"
             ),
+            Self::InvalidComponentCustomization {
+                logical_path,
+                source,
+            } => write!(
+                formatter,
+                "invalid built-in component customization contract {logical_path}: {source}"
+            ),
             Self::InvalidThemeContractSchema {
                 logical_path,
                 pointer,
@@ -561,6 +592,7 @@ impl std::error::Error for SnapshotError {
             | Self::InvalidRegistryItem { source, .. }
             | Self::InvalidRegistryCatalog { source, .. } => Some(source),
             Self::InvalidThemeContract { source, .. } => Some(source),
+            Self::InvalidComponentCustomization { source, .. } => Some(source),
             Self::MissingAsset { .. }
             | Self::UnexpectedAsset { .. }
             | Self::DuplicateAsset { .. }
@@ -759,6 +791,46 @@ fn parse_items(
     Ok((snapshots, parsed))
 }
 
+fn validate_component_customization_contract(
+    assets: &BTreeMap<String, OwnedAsset>,
+    root: &RegistryRoot,
+) -> Result<(), SnapshotError> {
+    let input = asset_text(
+        assets,
+        COMPONENT_CUSTOMIZATION_CONTRACT_PATH,
+        EmbeddedAssetKind::Json,
+    )?;
+    let contract = parse_component_customization_contract_str(input).map_err(|source| {
+        SnapshotError::InvalidComponentCustomization {
+            logical_path: COMPONENT_CUSTOMIZATION_CONTRACT_PATH.to_owned(),
+            source,
+        }
+    })?;
+    let owners = root
+        .items
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(property) = contract.properties.iter().find(|property| {
+        property
+            .owner
+            .as_deref()
+            .is_some_and(|owner| !owners.contains(owner))
+    }) {
+        return Err(SnapshotError::InvalidComponentCustomization {
+            logical_path: COMPONENT_CUSTOMIZATION_CONTRACT_PATH.to_owned(),
+            source: ComponentCustomizationError::InvalidProperty {
+                name: property.name.clone(),
+                reason: format!(
+                    "owner {:?} is not a built-in registry item",
+                    property.owner.as_deref().expect("filtered owned property")
+                ),
+            },
+        });
+    }
+    Ok(())
+}
+
 fn validate_referenced_sources(
     assets: &BTreeMap<String, OwnedAsset>,
     item: &RegistryItem,
@@ -791,7 +863,8 @@ fn validate_exact_asset_ownership(
             (asset.kind == EmbeddedAssetKind::Json
                 && logical_path.starts_with("registry/")
                 && logical_path != REGISTRY_ROOT_PATH
-                && logical_path != THEME_CONTRACT_PATH)
+                && logical_path != THEME_CONTRACT_PATH
+                && logical_path != COMPONENT_CUSTOMIZATION_CONTRACT_PATH)
                 .then_some(logical_path.as_str())
         })
         .collect::<BTreeSet<_>>();
@@ -1868,7 +1941,7 @@ mod tests {
             );
             assert!(snapshot.registry_source("ui/button.rs").is_ok());
             assert_eq!(snapshot.theme_contract().contract_version, "1");
-            assert_eq!(snapshot.schema_count(), 6);
+            assert_eq!(snapshot.schema_count(), 7);
         }
         assert_eq!(provider.enumerations.load(Ordering::SeqCst), 1);
         assert_eq!(provider.lookups.load(Ordering::SeqCst), 0);
@@ -1924,7 +1997,7 @@ mod tests {
         assert!(matches!(
             BuiltInRegistrySnapshot::from_provider(&duplicate),
             Err(SnapshotError::DuplicateAsset { logical_path })
-                if logical_path == "registry/contracts/theme-v1.json"
+                if logical_path == "registry/contracts/component-customization-v1.json"
         ));
 
         let unsorted = MutatedInventoryProvider::new(InventoryMutation::Unsorted);
@@ -1933,8 +2006,8 @@ mod tests {
             Err(SnapshotError::UnsortedAsset {
                 previous,
                 logical_path,
-            }) if previous == "registry/foundation/tokens.json"
-                && logical_path == "registry/contracts/theme-v1.json"
+            }) if previous == "registry/contracts/theme-v1.json"
+                && logical_path == "registry/contracts/component-customization-v1.json"
         ));
     }
 
@@ -1943,7 +2016,9 @@ mod tests {
         for logical_path in [
             "registry/registry.json",
             "registry/ui/button.json",
+            "registry/contracts/component-customization-v1.json",
             "registry/contracts/theme-v1.json",
+            "schema/0.9.0-alpha/component-customization.schema.json",
             "schema/0.9.0-alpha/kit.schema.json",
             "schema/0.9.0-alpha/registry-item.schema.json",
             "schema/0.9.0-alpha/registry.schema.json",
@@ -1963,6 +2038,16 @@ mod tests {
 
     #[test]
     fn malformed_contract_and_every_schema_fail_with_logical_paths() {
+        let mut customization_contract = InMemoryAssetProvider::from_embedded();
+        customization_contract
+            .set_bytes(super::COMPONENT_CUSTOMIZATION_CONTRACT_PATH, b"{")
+            .unwrap();
+        assert!(matches!(
+            BuiltInRegistrySnapshot::from_provider(&customization_contract),
+            Err(SnapshotError::InvalidComponentCustomization { logical_path, .. })
+                if logical_path == super::COMPONENT_CUSTOMIZATION_CONTRACT_PATH
+        ));
+
         let mut contract = InMemoryAssetProvider::from_embedded();
         contract
             .set_bytes("registry/contracts/theme-v1.json", b"{")
@@ -1974,6 +2059,7 @@ mod tests {
         ));
 
         for logical_path in [
+            "schema/0.9.0-alpha/component-customization.schema.json",
             "schema/0.9.0-alpha/kit.schema.json",
             "schema/0.9.0-alpha/registry-item.schema.json",
             "schema/0.9.0-alpha/registry.schema.json",

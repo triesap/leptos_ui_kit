@@ -60,7 +60,11 @@ impl AssetSpec {
     }
 }
 
-pub const ASSET_SPECS: [AssetSpec; 72] = [
+pub const ASSET_SPECS: [AssetSpec; 74] = [
+    AssetSpec::same(
+        "registry/contracts/component-customization-v1.json",
+        AssetKind::Json,
+    ),
     AssetSpec::same("registry/contracts/theme-v1.json", AssetKind::Json),
     AssetSpec::same("registry/foundation/tokens.json", AssetKind::Json),
     AssetSpec::same("registry/registry.json", AssetKind::Json),
@@ -132,6 +136,10 @@ pub const ASSET_SPECS: [AssetSpec; 72] = [
         AssetKind::Json,
     ),
     AssetSpec::same("schema/0.2.0/token-contract.schema.json", AssetKind::Json),
+    AssetSpec::same(
+        "schema/0.9.0-alpha/component-customization.schema.json",
+        AssetKind::Json,
+    ),
     AssetSpec::same("schema/0.9.0-alpha/kit.schema.json", AssetKind::Json),
     AssetSpec::same(
         "schema/0.9.0-alpha/registry-item.schema.json",

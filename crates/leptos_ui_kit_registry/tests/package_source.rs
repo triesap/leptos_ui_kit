@@ -34,8 +34,9 @@ const PACKAGE_BASE: [&str; 5] = [
 
 const REGISTRY_SUPPORT: [&str; 3] = ["build.rs", "build_assets.rs", "build_provenance.rs"];
 
-const REGISTRY_SOURCES: [&str; 9] = [
+const REGISTRY_SOURCES: [&str; 10] = [
     "src/builtin_registry.rs",
+    "src/component_customization.rs",
     "src/config.rs",
     "src/detect.rs",
     "src/embedded_assets.rs",
@@ -148,7 +149,7 @@ const PACKAGES: [PackageSpec; 6] = [
         name: "leptos_ui_kit_registry",
         path_in_vcs: "crates/leptos_ui_kit_registry",
         files: &[],
-        expected_file_count: 96,
+        expected_file_count: 99,
     },
 ];
 

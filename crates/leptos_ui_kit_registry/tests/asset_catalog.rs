@@ -14,12 +14,12 @@ use build_assets::{
 use tempfile::{TempDir, tempdir};
 
 #[test]
-fn catalog_contains_the_exact_sorted_72_asset_inventory() {
+fn catalog_contains_the_exact_sorted_74_asset_inventory() {
     let fixture = AssetFixture::new();
     let generated = fixture.generate();
 
-    assert_eq!(ASSET_SPECS.len(), 72);
-    assert_eq!(generated.assets.len(), 72);
+    assert_eq!(ASSET_SPECS.len(), 74);
+    assert_eq!(generated.assets.len(), 74);
     let logical = generated
         .assets
         .iter()
@@ -32,7 +32,7 @@ fn catalog_contains_the_exact_sorted_72_asset_inventory() {
     );
     assert_eq!(
         logical.first().copied(),
-        Some("registry/contracts/theme-v1.json")
+        Some("registry/contracts/component-customization-v1.json")
     );
     assert_eq!(
         logical.last().copied(),
@@ -70,7 +70,7 @@ fn generated_records_use_stable_out_dir_snapshots() {
     assert!(
         generated
             .rust_source
-            .contains("pub(crate) const EMBEDDED_ASSET_COUNT: usize = 72;")
+            .contains("pub(crate) const EMBEDDED_ASSET_COUNT: usize = 74;")
     );
     assert!(
         generated

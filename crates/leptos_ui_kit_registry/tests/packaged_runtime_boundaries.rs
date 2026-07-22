@@ -34,7 +34,8 @@ fn cargo_vcs_metadata(rev: &str) -> String {
     format!(r#"{{"git":{{"sha1":"{rev}"}},"path_in_vcs":"{EXPECTED_CRATE_PATH}"}}"#)
 }
 
-const EXPECTED_PUBLIC_SCHEMA_PATHS: [&str; 4] = [
+const EXPECTED_PUBLIC_SCHEMA_PATHS: [&str; 5] = [
+    "schema/0.9.0-alpha/component-customization.schema.json",
     "schema/0.9.0-alpha/kit.schema.json",
     "schema/0.9.0-alpha/registry-item.schema.json",
     "schema/0.9.0-alpha/registry.schema.json",
@@ -53,8 +54,9 @@ const EXPECTED_PACKAGE_SUPPORT: [&str; 7] = [
     "build_provenance.rs",
 ];
 
-const EXPECTED_PACKAGE_SOURCES: [&str; 9] = [
+const EXPECTED_PACKAGE_SOURCES: [&str; 10] = [
     "src/builtin_registry.rs",
+    "src/component_customization.rs",
     "src/config.rs",
     "src/detect.rs",
     "src/embedded_assets.rs",
@@ -788,7 +790,7 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
         .filter_map(|spec| spec.source_path.strip_prefix("registry/"))
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 66);
+    assert_eq!(actual.len(), 67);
     let mut case_folded = BTreeSet::new();
     for path in actual {
         assert!(!path.starts_with('/'));
@@ -799,15 +801,16 @@ fn authoring_registry_inventory_is_exact_safe_and_portable() {
 }
 
 #[test]
-fn approved_embedded_inventory_has_72_unique_logical_assets() {
+fn approved_embedded_inventory_has_74_unique_logical_assets() {
     let logical_assets = ASSET_SPECS
         .iter()
         .map(|spec| spec.logical_path.to_owned())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(logical_assets.len(), 72);
+    assert_eq!(logical_assets.len(), 74);
     assert!(logical_assets.contains("registry/registry.json"));
     assert!(logical_assets.contains("registry/contracts/theme-v1.json"));
+    assert!(logical_assets.contains("registry/contracts/component-customization-v1.json"));
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(logical_assets.contains(schema), "{schema}");
     }
@@ -853,7 +856,7 @@ fn registry_crate_package_inventory_is_exact_and_self_contained() {
         .chain(EXPECTED_PACKAGE_TESTS.map(str::to_owned))
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(expected.len(), 95);
+    assert_eq!(expected.len(), 98);
     assert_eq!(actual, expected);
     for schema in EXPECTED_PUBLIC_SCHEMA_PATHS {
         assert!(actual.contains(schema), "missing packaged schema: {schema}");

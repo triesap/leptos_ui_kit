@@ -5,14 +5,20 @@ use std::{
 };
 
 use leptos_ui_kit_registry::{
-    KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL, REGISTRY_SCHEMA_URL, THEME_CONTRACT_SCHEMA_URL,
-    canonical_kit_config, load_built_in_theme_contract, parse_kit_json_str,
-    parse_registry_item_str, parse_registry_root_str, parse_theme_contract_str,
-    validate_registry_graph, validate_registry_manifest_identity,
+    COMPONENT_CUSTOMIZATION_SCHEMA_URL, KIT_SCHEMA_URL, REGISTRY_ITEM_SCHEMA_URL,
+    REGISTRY_SCHEMA_URL, THEME_CONTRACT_SCHEMA_URL, canonical_kit_config,
+    load_built_in_component_customization_contract, load_built_in_theme_contract,
+    parse_component_customization_contract_str, parse_kit_json_str, parse_registry_item_str,
+    parse_registry_root_str, parse_theme_contract_str, validate_registry_graph,
+    validate_registry_manifest_identity,
 };
 use serde_json::{Value, json};
 
-const SCHEMAS: [(&str, &str); 4] = [
+const SCHEMAS: [(&str, &str); 5] = [
+    (
+        "component-customization.schema.json",
+        COMPONENT_CUSTOMIZATION_SCHEMA_URL,
+    ),
     ("kit.schema.json", KIT_SCHEMA_URL),
     ("registry.schema.json", REGISTRY_SCHEMA_URL),
     ("registry-item.schema.json", REGISTRY_ITEM_SCHEMA_URL),
@@ -243,6 +249,21 @@ fn schemas_and_public_parsers_accept_every_canonical_document() {
             .expect("serialize built-in theme contract");
     assert_valid(&theme_validator, &theme, "built-in theme contract");
     parse_theme_contract_str(&json_string(&theme)).expect("parse built-in theme contract");
+
+    let (_, customization_validator) =
+        compile_draft_2020_12_schema(&schema_root().join("component-customization.schema.json"));
+    let customization = serde_json::to_value(
+        load_built_in_component_customization_contract()
+            .expect("load built-in component customization contract"),
+    )
+    .expect("serialize built-in component customization contract");
+    assert_valid(
+        &customization_validator,
+        &customization,
+        "built-in component customization contract",
+    );
+    parse_component_customization_contract_str(&json_string(&customization))
+        .expect("parse built-in component customization contract");
 }
 
 #[test]
@@ -377,6 +398,28 @@ fn schemas_reject_structurally_invalid_documents() {
         &theme_validator,
         &exact_duplicate_token,
         "exact duplicate theme token",
+    );
+
+    let (_, customization_validator) =
+        compile_draft_2020_12_schema(&schema_root().join("component-customization.schema.json"));
+    let raw_customization =
+        read_json(&registry_root().join("contracts/component-customization-v1.json"));
+    let mut component_without_owner = raw_customization.clone();
+    component_without_owner["properties"][5]
+        .as_object_mut()
+        .expect("component property")
+        .remove("owner");
+    assert_invalid(
+        &customization_validator,
+        &component_without_owner,
+        "component customization without owner",
+    );
+    let mut semantic_with_owner = raw_customization;
+    semantic_with_owner["properties"][0]["owner"] = json!("tokens");
+    assert_invalid(
+        &customization_validator,
+        &semantic_with_owner,
+        "semantic customization with owner",
     );
 }
 
