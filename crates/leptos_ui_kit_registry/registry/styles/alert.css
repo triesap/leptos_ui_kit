@@ -1,0 +1,15 @@
+/* leptos-ui-kit:start alert */
+@layer leptos-ui-kit.components {
+.kit-alert {
+  box-sizing: border-box;
+  border: var(--kit-border-width) solid var(--kit-color-border);
+  border-radius: var(
+    --kit-alert-radius,
+    var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-md)))
+  );
+  padding: 0.75rem 1rem;
+  background: var(--kit-color-surface-raised);
+  color: var(--kit-color-text);
+}
+}
+/* leptos-ui-kit:end alert */

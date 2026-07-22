@@ -1,7 +1,8 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 223,
+  "rowCount": 235,
   "rowsByStylesheet": {
+    "alert.css": 4,
     "anchor.css": 8,
     "avatar.css": 1,
     "badge.css": 3,
@@ -11,11 +12,38 @@
     "dialog.css": 48,
     "field.css": 45,
     "menu.css": 38,
+    "progress.css": 3,
+    "separator.css": 3,
+    "skeleton.css": 2,
     "spinner.css": 7,
     "status.css": 4,
     "tabs.css": 20
   },
   "rows": [
+    {
+      "stylesheet": "alert.css",
+      "selector": ".kit-alert",
+      "property": "background",
+      "value": "var(--kit-color-surface-raised)"
+    },
+    {
+      "stylesheet": "alert.css",
+      "selector": ".kit-alert",
+      "property": "border",
+      "value": "var(--kit-border-width) solid var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "alert.css",
+      "selector": ".kit-alert",
+      "property": "border-radius",
+      "value": "var( --kit-alert-radius, var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-md))) )"
+    },
+    {
+      "stylesheet": "alert.css",
+      "selector": ".kit-alert",
+      "property": "color",
+      "value": "var(--kit-color-text)"
+    },
     {
       "stylesheet": "anchor.css",
       "selector": ".kit-anchor",
@@ -1167,6 +1195,54 @@
       "selector": ".kit-menu-trigger:hover:not(:disabled)",
       "property": "background",
       "value": "var(--kit-menu-trigger-background-hover, var(--kit-color-surface-hover))"
+    },
+    {
+      "stylesheet": "progress.css",
+      "selector": ".kit-progress",
+      "property": "accent-color",
+      "value": "var(--kit-color-primary)"
+    },
+    {
+      "stylesheet": "progress.css",
+      "selector": ".kit-progress",
+      "property": "background",
+      "value": "var(--kit-color-surface-hover)"
+    },
+    {
+      "stylesheet": "progress.css",
+      "selector": ".kit-progress",
+      "property": "border-radius",
+      "value": "var( --kit-progress-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
+    },
+    {
+      "stylesheet": "separator.css",
+      "selector": ".kit-separator",
+      "property": "background",
+      "value": "var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "separator.css",
+      "selector": ".kit-separator[data-orientation=\"horizontal\"]",
+      "property": "block-size",
+      "value": "var(--kit-border-width)"
+    },
+    {
+      "stylesheet": "separator.css",
+      "selector": ".kit-separator[data-orientation=\"vertical\"]",
+      "property": "inline-size",
+      "value": "var(--kit-border-width)"
+    },
+    {
+      "stylesheet": "skeleton.css",
+      "selector": ".kit-skeleton",
+      "property": "background",
+      "value": "var(--kit-color-surface-hover)"
+    },
+    {
+      "stylesheet": "skeleton.css",
+      "selector": ".kit-skeleton",
+      "property": "border-radius",
+      "value": "var( --kit-skeleton-radius, var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-sm))) )"
     },
     {
       "stylesheet": "spinner.css",

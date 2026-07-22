@@ -1,0 +1,17 @@
+/* leptos-ui-kit:start progress */
+@layer leptos-ui-kit.components {
+.kit-progress {
+  display: block;
+  inline-size: 100%;
+  block-size: 0.5rem;
+  border: 0;
+  border-radius: var(
+    --kit-progress-radius,
+    var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full)))
+  );
+  overflow: hidden;
+  background: var(--kit-color-surface-hover);
+  accent-color: var(--kit-color-primary);
+}
+}
+/* leptos-ui-kit:end progress */

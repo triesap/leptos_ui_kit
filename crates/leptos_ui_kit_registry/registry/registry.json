@@ -34,6 +34,10 @@
   },
   "items": [
     {
+      "name": "alert",
+      "path": "ui/alert.json"
+    },
+    {
       "name": "anchor",
       "path": "ui/anchor.json"
     },
@@ -74,8 +78,20 @@
       "path": "ui/menu.json"
     },
     {
+      "name": "progress",
+      "path": "ui/progress.json"
+    },
+    {
       "name": "router-link",
       "path": "ui/router-link.json"
+    },
+    {
+      "name": "separator",
+      "path": "ui/separator.json"
+    },
+    {
+      "name": "skeleton",
+      "path": "ui/skeleton.json"
     },
     {
       "name": "spinner",

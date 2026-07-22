@@ -1,0 +1,13 @@
+/* leptos-ui-kit:start skeleton */
+@layer leptos-ui-kit.components {
+.kit-skeleton {
+  display: block;
+  min-block-size: 1rem;
+  border-radius: var(
+    --kit-skeleton-radius,
+    var(--kit-radius-surface, var(--kit-radius-default, var(--kit-radius-sm)))
+  );
+  background: var(--kit-color-surface-hover);
+}
+}
+/* leptos-ui-kit:end skeleton */

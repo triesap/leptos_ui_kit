@@ -2109,6 +2109,7 @@ mod tests {
         assert_eq!(
             entries,
             [
+                ("alert", "ui/alert.json"),
                 ("anchor", "ui/anchor.json"),
                 ("avatar", "ui/avatar.json"),
                 ("badge", "ui/badge.json"),
@@ -2119,7 +2120,10 @@ mod tests {
                 ("field", "ui/field.json"),
                 ("identity", "ui/identity.json"),
                 ("menu", "ui/menu.json"),
+                ("progress", "ui/progress.json"),
                 ("router-link", "ui/router-link.json"),
+                ("separator", "ui/separator.json"),
+                ("skeleton", "ui/skeleton.json"),
                 ("spinner", "ui/spinner.json"),
                 ("status", "ui/status.json"),
                 ("tabs", "ui/tabs.json"),
@@ -2883,6 +2887,37 @@ mod tests {
         let avatar = fs::read_to_string(root.join("ui/avatar.rs")).expect("read avatar source");
         assert!(avatar.contains("alt=alt"));
         assert!(avatar.contains("src=src"));
+    }
+
+    #[test]
+    fn feedback_primitives_encode_their_native_accessibility_contracts() {
+        let root = built_in_registry_root();
+        for (name, marker) in [
+            ("alert", "role=\"alert\""),
+            ("progress", "<progress"),
+            ("separator", "aria-orientation=orientation.as_str()"),
+            ("skeleton", "aria-hidden=\"true\""),
+        ] {
+            let item = load_built_in_registry_item(name)
+                .unwrap_or_else(|error| panic!("load {name}: {error}"));
+            assert_eq!(item.item.registry_dependencies, ["tokens"]);
+            let source = fs::read_to_string(root.join(&item.item.files[0].source))
+                .unwrap_or_else(|error| panic!("read {name} source: {error}"));
+            assert!(source.contains(marker), "{name}");
+        }
+
+        for (name, radius_property) in [
+            ("alert", "--kit-alert-radius"),
+            ("progress", "--kit-progress-radius"),
+            ("skeleton", "--kit-skeleton-radius"),
+        ] {
+            let css = fs::read_to_string(root.join(format!("styles/{name}.css")))
+                .unwrap_or_else(|error| panic!("read {name} CSS: {error}"));
+            assert!(css.contains(radius_property), "{name}");
+        }
+        let separator =
+            fs::read_to_string(root.join("styles/separator.css")).expect("read separator CSS");
+        assert!(!separator.contains("border-radius"));
     }
 
     #[test]
@@ -3951,6 +3986,7 @@ mod tests {
         assert_eq!(
             styled,
             [
+                "alert",
                 "anchor",
                 "avatar",
                 "badge",
@@ -3960,6 +3996,9 @@ mod tests {
                 "dialog",
                 "field",
                 "menu",
+                "progress",
+                "separator",
+                "skeleton",
                 "spinner",
                 "status",
                 "tabs",

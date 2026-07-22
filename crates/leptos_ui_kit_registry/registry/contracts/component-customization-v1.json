@@ -60,6 +60,18 @@
       "stability": "stable"
     },
     {
+      "name": "--kit-alert-radius",
+      "scope": "component",
+      "owner": "alert",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "surface",
+      "fallback": ["--kit-radius-surface", "--kit-radius-default", "--kit-radius-md"],
+      "inherits": true,
+      "geometryCritical": false,
+      "stability": "stable"
+    },
+    {
       "name": "--kit-avatar-radius",
       "scope": "component",
       "owner": "avatar",
@@ -248,6 +260,30 @@
       "role": "control",
       "fallback": ["--kit-radius-control", "--kit-radius-default"],
       "naturalFallback": "calc(var(--kit-radius-md) - 2px)",
+      "inherits": true,
+      "geometryCritical": false,
+      "stability": "stable"
+    },
+    {
+      "name": "--kit-progress-radius",
+      "scope": "component",
+      "owner": "progress",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "indicator",
+      "fallback": ["--kit-radius-indicator", "--kit-radius-default", "--kit-radius-full"],
+      "inherits": true,
+      "geometryCritical": false,
+      "stability": "stable"
+    },
+    {
+      "name": "--kit-skeleton-radius",
+      "scope": "component",
+      "owner": "skeleton",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "surface",
+      "fallback": ["--kit-radius-surface", "--kit-radius-default", "--kit-radius-sm"],
       "inherits": true,
       "geometryCritical": false,
       "stability": "stable"

@@ -60,7 +60,7 @@ impl AssetSpec {
     }
 }
 
-pub const ASSET_SPECS: [AssetSpec; 83] = [
+pub const ASSET_SPECS: [AssetSpec; 95] = [
     AssetSpec::same(
         "registry/contracts/component-customization-v1.json",
         AssetKind::Json,
@@ -68,6 +68,7 @@ pub const ASSET_SPECS: [AssetSpec; 83] = [
     AssetSpec::same("registry/contracts/theme-v1.json", AssetKind::Json),
     AssetSpec::same("registry/foundation/tokens.json", AssetKind::Json),
     AssetSpec::same("registry/registry.json", AssetKind::Json),
+    AssetSpec::same("registry/styles/alert.css", AssetKind::Css),
     AssetSpec::same("registry/styles/anchor.css", AssetKind::Css),
     AssetSpec::same("registry/styles/avatar.css", AssetKind::Css),
     AssetSpec::same("registry/styles/badge.css", AssetKind::Css),
@@ -77,10 +78,15 @@ pub const ASSET_SPECS: [AssetSpec; 83] = [
     AssetSpec::same("registry/styles/dialog.css", AssetKind::Css),
     AssetSpec::same("registry/styles/field.css", AssetKind::Css),
     AssetSpec::same("registry/styles/menu.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/progress.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/separator.css", AssetKind::Css),
+    AssetSpec::same("registry/styles/skeleton.css", AssetKind::Css),
     AssetSpec::same("registry/styles/spinner.css", AssetKind::Css),
     AssetSpec::same("registry/styles/status.css", AssetKind::Css),
     AssetSpec::same("registry/styles/tabs.css", AssetKind::Css),
     AssetSpec::same("registry/styles/tokens.css", AssetKind::Css),
+    AssetSpec::same("registry/ui/alert.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/alert.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/anchor.json", AssetKind::Json),
     AssetSpec::same("registry/ui/anchor.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/avatar.json", AssetKind::Json),
@@ -128,8 +134,14 @@ pub const ASSET_SPECS: [AssetSpec; 83] = [
     AssetSpec::same("registry/ui/menu/radio_item.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/menu/root.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/menu/trigger.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/progress.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/progress.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/router-link.json", AssetKind::Json),
     AssetSpec::same("registry/ui/router_link.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/separator.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/separator.rs", AssetKind::Rust),
+    AssetSpec::same("registry/ui/skeleton.json", AssetKind::Json),
+    AssetSpec::same("registry/ui/skeleton.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/spinner.json", AssetKind::Json),
     AssetSpec::same("registry/ui/spinner.rs", AssetKind::Rust),
     AssetSpec::same("registry/ui/status.json", AssetKind::Json),
