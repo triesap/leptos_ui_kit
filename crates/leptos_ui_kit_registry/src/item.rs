@@ -2115,17 +2115,20 @@ mod tests {
                 ("badge", "ui/badge.json"),
                 ("button", "ui/button.json"),
                 ("card", "ui/card.json"),
+                ("checkbox", "ui/checkbox.json"),
                 ("collapsible", "ui/collapsible.json"),
                 ("dialog", "ui/dialog.json"),
                 ("field", "ui/field.json"),
                 ("identity", "ui/identity.json"),
                 ("menu", "ui/menu.json"),
                 ("progress", "ui/progress.json"),
+                ("radio", "ui/radio.json"),
                 ("router-link", "ui/router-link.json"),
                 ("separator", "ui/separator.json"),
                 ("skeleton", "ui/skeleton.json"),
                 ("spinner", "ui/spinner.json"),
                 ("status", "ui/status.json"),
+                ("switch", "ui/switch.json"),
                 ("tabs", "ui/tabs.json"),
                 ("tokens", "foundation/tokens.json"),
             ]
@@ -2918,6 +2921,29 @@ mod tests {
         let separator =
             fs::read_to_string(root.join("styles/separator.css")).expect("read separator CSS");
         assert!(!separator.contains("border-radius"));
+    }
+
+    #[test]
+    fn selection_controls_are_controlled_and_preserve_native_keyboard_semantics() {
+        let root = built_in_registry_root();
+        for (name, marker, state_marker) in [
+            ("checkbox", "type=\"checkbox\"", "event_target_checked"),
+            ("radio", "type=\"radio\"", "event_target_checked"),
+            ("switch", "role=\"switch\"", "aria-checked"),
+        ] {
+            let item = load_built_in_registry_item(name)
+                .unwrap_or_else(|error| panic!("load {name}: {error}"));
+            let source = fs::read_to_string(root.join(&item.item.files[0].source))
+                .unwrap_or_else(|error| panic!("read {name} source: {error}"));
+            assert!(source.contains(marker), "{name}");
+            assert!(source.contains(state_marker), "{name}");
+            assert!(source.contains("Callback"), "{name}");
+        }
+
+        let radio = fs::read_to_string(root.join("styles/radio.css")).expect("read radio CSS");
+        assert!(radio.contains("--kit-radio-radius, var(--kit-radius-full)"));
+        let switch = fs::read_to_string(root.join("styles/switch.css")).expect("read switch CSS");
+        assert!(switch.contains("--kit-switch-thumb-radius, var(--kit-radius-full)"));
     }
 
     #[test]
@@ -3992,15 +4018,18 @@ mod tests {
                 "badge",
                 "button",
                 "card",
+                "checkbox",
                 "collapsible",
                 "dialog",
                 "field",
                 "menu",
                 "progress",
+                "radio",
                 "separator",
                 "skeleton",
                 "spinner",
                 "status",
+                "switch",
                 "tabs",
             ]
         );

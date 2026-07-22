@@ -120,6 +120,18 @@
       "stability": "stable"
     },
     {
+      "name": "--kit-checkbox-radius",
+      "scope": "component",
+      "owner": "checkbox",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "control",
+      "fallback": ["--kit-radius-control", "--kit-radius-default", "--kit-radius-sm"],
+      "inherits": true,
+      "geometryCritical": false,
+      "stability": "stable"
+    },
+    {
       "name": "--kit-collapsible-trigger-radius",
       "scope": "component",
       "owner": "collapsible",
@@ -277,6 +289,18 @@
       "stability": "stable"
     },
     {
+      "name": "--kit-radio-radius",
+      "scope": "component",
+      "owner": "radio",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "geometry-critical",
+      "fallback": ["--kit-radius-full"],
+      "inherits": true,
+      "geometryCritical": true,
+      "stability": "stable"
+    },
+    {
       "name": "--kit-skeleton-radius",
       "scope": "component",
       "owner": "skeleton",
@@ -292,6 +316,30 @@
       "name": "--kit-spinner-radius",
       "scope": "component",
       "owner": "spinner",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "geometry-critical",
+      "fallback": ["--kit-radius-full"],
+      "inherits": true,
+      "geometryCritical": true,
+      "stability": "stable"
+    },
+    {
+      "name": "--kit-switch-radius",
+      "scope": "component",
+      "owner": "switch",
+      "cssProperty": "border-radius",
+      "valueKind": "border-radius",
+      "role": "indicator",
+      "fallback": ["--kit-radius-indicator", "--kit-radius-default", "--kit-radius-full"],
+      "inherits": true,
+      "geometryCritical": false,
+      "stability": "stable"
+    },
+    {
+      "name": "--kit-switch-thumb-radius",
+      "scope": "component",
+      "owner": "switch",
       "cssProperty": "border-radius",
       "valueKind": "border-radius",
       "role": "geometry-critical",

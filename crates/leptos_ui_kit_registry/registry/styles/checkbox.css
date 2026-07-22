@@ -1,0 +1,31 @@
+/* leptos-ui-kit:start checkbox */
+@layer leptos-ui-kit.components {
+.kit-checkbox {
+  appearance: none;
+  inline-size: 1rem;
+  block-size: 1rem;
+  margin: 0;
+  border: var(--kit-border-width) solid var(--kit-color-border);
+  border-radius: var(
+    --kit-checkbox-radius,
+    var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-sm)))
+  );
+  background: var(--kit-color-surface);
+  cursor: pointer;
+}
+
+.kit-checkbox:checked {
+  background: var(--kit-color-primary);
+}
+
+.kit-checkbox:focus-visible {
+  outline: 2px solid var(--kit-focus-ring);
+  outline-offset: 2px;
+}
+
+.kit-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: var(--kit-disabled-opacity);
+}
+}
+/* leptos-ui-kit:end checkbox */

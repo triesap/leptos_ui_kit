@@ -1,0 +1,42 @@
+/* leptos-ui-kit:start switch */
+@layer leptos-ui-kit.components {
+.kit-switch {
+  display: inline-flex;
+  align-items: center;
+  inline-size: 2rem;
+  block-size: 1.125rem;
+  border: 0;
+  border-radius: var(
+    --kit-switch-radius,
+    var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full)))
+  );
+  padding: 0.125rem;
+  background: var(--kit-color-surface-hover);
+  cursor: pointer;
+}
+.kit-switch[data-state="checked"] {
+  background: var(--kit-color-primary);
+}
+
+.kit-switch:focus-visible {
+  outline: 2px solid var(--kit-focus-ring);
+  outline-offset: 2px;
+}
+
+.kit-switch:disabled {
+  cursor: not-allowed;
+  opacity: var(--kit-disabled-opacity);
+}
+
+.kit-switch-thumb {
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+  border-radius: var(--kit-switch-thumb-radius, var(--kit-radius-full));
+  background: var(--kit-color-surface);
+  transform: translateX(0);
+}
+.kit-switch[data-state="checked"] .kit-switch-thumb {
+  transform: translateX(0.875rem);
+}
+}
+/* leptos-ui-kit:end switch */

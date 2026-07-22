@@ -1,0 +1,28 @@
+/* leptos-ui-kit:start radio */
+@layer leptos-ui-kit.components {
+.kit-radio {
+  appearance: none;
+  inline-size: 1rem;
+  block-size: 1rem;
+  margin: 0;
+  border: var(--kit-border-width) solid var(--kit-color-border);
+  border-radius: var(--kit-radio-radius, var(--kit-radius-full));
+  background: var(--kit-color-surface);
+  cursor: pointer;
+}
+
+.kit-radio:checked {
+  background: var(--kit-color-primary);
+}
+
+.kit-radio:focus-visible {
+  outline: 2px solid var(--kit-focus-ring);
+  outline-offset: 2px;
+}
+
+.kit-radio:disabled {
+  cursor: not-allowed;
+  opacity: var(--kit-disabled-opacity);
+}
+}
+/* leptos-ui-kit:end radio */

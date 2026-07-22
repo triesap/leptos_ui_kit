@@ -1,0 +1,9 @@
+{
+  "$schema": "https://triesap.github.io/leptos_ui_kit/schema/0.9.0-alpha/registry-item.schema.json", "schemaVersion": "0.9.0-alpha",
+  "name": "checkbox", "kind": "ui", "version": "0.9.0-alpha", "title": "Checkbox", "description": "A controlled native Leptos checkbox primitive.",
+  "leptos": { "version": "0.9.0-alpha", "routerVersion": "0.9.0-alpha", "renderModes": ["csr", "hydrate", "ssr"] },
+  "accessibility": { "behaviors": [{ "name": "native-checkbox-semantics", "required": true }, { "name": "controlled-checked-state", "required": true }], "notes": ["Associate a visible label in the consuming form."] },
+  "files": [{ "source": "ui/checkbox.rs", "target": { "kind": "ui", "path": "checkbox.rs", "exports": ["Checkbox"] } }],
+  "styles": [{ "source": "styles/checkbox.css", "target": { "kind": "managed-css-block", "id": "checkbox" } }],
+  "registryDependencies": ["tokens"], "cargoPlan": [{ "crate": "leptos", "source": { "kind": "version", "version": "0.9.0-alpha" }, "features": [], "required": true }], "extra": {}
+}

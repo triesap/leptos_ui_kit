@@ -1,6 +1,6 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 235,
+  "rowCount": 254,
   "rowsByStylesheet": {
     "alert.css": 4,
     "anchor.css": 8,
@@ -8,15 +8,18 @@
     "badge.css": 3,
     "button.css": 31,
     "card.css": 5,
+    "checkbox.css": 6,
     "collapsible.css": 13,
     "dialog.css": 48,
     "field.css": 45,
     "menu.css": 38,
     "progress.css": 3,
+    "radio.css": 6,
     "separator.css": 3,
     "skeleton.css": 2,
     "spinner.css": 7,
     "status.css": 4,
+    "switch.css": 7,
     "tabs.css": 20
   },
   "rows": [
@@ -331,6 +334,24 @@
       "selector": ".kit-card",
       "property": "color",
       "value": "var(--kit-color-text)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox", "property": "background", "value": "var(--kit-color-surface)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox", "property": "border", "value": "var(--kit-border-width) solid var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox", "property": "border-radius", "value": "var( --kit-checkbox-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-sm))) )"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked", "property": "background", "value": "var(--kit-color-primary)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:focus-visible", "property": "outline", "value": "2px solid var(--kit-focus-ring)"
     },
     {
       "stylesheet": "collapsible.css",
@@ -1215,6 +1236,24 @@
       "value": "var( --kit-progress-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
     },
     {
+      "stylesheet": "radio.css", "selector": ".kit-radio", "property": "background", "value": "var(--kit-color-surface)"
+    },
+    {
+      "stylesheet": "radio.css", "selector": ".kit-radio", "property": "border", "value": "var(--kit-border-width) solid var(--kit-color-border)"
+    },
+    {
+      "stylesheet": "radio.css", "selector": ".kit-radio", "property": "border-radius", "value": "var(--kit-radio-radius, var(--kit-radius-full))"
+    },
+    {
+      "stylesheet": "radio.css", "selector": ".kit-radio:checked", "property": "background", "value": "var(--kit-color-primary)"
+    },
+    {
+      "stylesheet": "radio.css", "selector": ".kit-radio:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
+    },
+    {
+      "stylesheet": "radio.css", "selector": ".kit-radio:focus-visible", "property": "outline", "value": "2px solid var(--kit-focus-ring)"
+    },
+    {
       "stylesheet": "separator.css",
       "selector": ".kit-separator",
       "property": "background",
@@ -1309,6 +1348,27 @@
       "selector": ".kit-status",
       "property": "line-height",
       "value": "var(--kit-status-line-height, 1.4)"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "background", "value": "var(--kit-color-surface-hover)"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "border-radius", "value": "var( --kit-switch-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "background", "value": "var(--kit-color-surface)"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "border-radius", "value": "var(--kit-switch-thumb-radius, var(--kit-radius-full))"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch:focus-visible", "property": "outline", "value": "2px solid var(--kit-focus-ring)"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch[data-state=\"checked\"]", "property": "background", "value": "var(--kit-color-primary)"
     },
     {
       "stylesheet": "tabs.css",
