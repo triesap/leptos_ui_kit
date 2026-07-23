@@ -1,6 +1,6 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 254,
+  "rowCount": 256,
   "rowsByStylesheet": {
     "alert.css": 4,
     "anchor.css": 8,
@@ -8,7 +8,7 @@
     "badge.css": 3,
     "button.css": 31,
     "card.css": 5,
-    "checkbox.css": 6,
+    "checkbox.css": 8,
     "collapsible.css": 13,
     "dialog.css": 48,
     "field.css": 45,
@@ -345,7 +345,13 @@
       "stylesheet": "checkbox.css", "selector": ".kit-checkbox", "property": "border-radius", "value": "var( --kit-checkbox-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-sm))) )"
     },
     {
-      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked", "property": "background", "value": "linear-gradient( 45deg, transparent 24%, var(--kit-color-selection-indicator) 24% 76%, transparent 76% ) left 24% top 48% / 20% 20% no-repeat, linear-gradient( -45deg, transparent 37%, var(--kit-color-selection-indicator) 37% 63%, transparent 63% ) left 44% top 28% / 40% 40% no-repeat, var(--kit-color-primary)"
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox-indicator path", "property": "stroke", "value": "var(--kit-color-selection-indicator)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked", "property": "background", "value": "var(--kit-color-primary)"
+    },
+    {
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked:disabled + .kit-checkbox-indicator", "property": "opacity", "value": "var(--kit-disabled-opacity)"
     },
     {
       "stylesheet": "checkbox.css", "selector": ".kit-checkbox:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"

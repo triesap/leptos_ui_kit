@@ -1,7 +1,12 @@
 /* leptos-ui-kit:start checkbox */
 @layer leptos-ui-kit.components {
+.kit-checkbox-root {
+  display: inline-grid;
+}
+
 .kit-checkbox {
   appearance: none;
+  grid-area: 1 / 1;
   inline-size: 1rem;
   block-size: 1rem;
   margin: 0;
@@ -15,20 +20,31 @@
 }
 
 .kit-checkbox:checked {
-  background:
-    linear-gradient(
-      45deg,
-      transparent 24%,
-      var(--kit-color-selection-indicator) 24% 76%,
-      transparent 76%
-    ) left 24% top 48% / 20% 20% no-repeat,
-    linear-gradient(
-      -45deg,
-      transparent 37%,
-      var(--kit-color-selection-indicator) 37% 63%,
-      transparent 63%
-    ) left 44% top 28% / 40% 40% no-repeat,
-    var(--kit-color-primary);
+  background: var(--kit-color-primary);
+}
+
+.kit-checkbox-indicator {
+  grid-area: 1 / 1;
+  inline-size: 100%;
+  block-size: 100%;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.kit-checkbox-indicator path {
+  fill: none;
+  stroke: var(--kit-color-selection-indicator);
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kit-checkbox:checked + .kit-checkbox-indicator {
+  opacity: 1;
+}
+
+.kit-checkbox:checked:disabled + .kit-checkbox-indicator {
+  opacity: var(--kit-disabled-opacity);
 }
 
 .kit-checkbox:focus-visible {

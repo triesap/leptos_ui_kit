@@ -43,7 +43,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         serde_json::from_str(COMPATIBILITY_FIXTURE).expect("parse pinned compatibility fixture");
 
     assert_eq!(fixture.fixture_version, 1);
-    assert_eq!(fixture.row_count, 254);
+    assert_eq!(fixture.row_count, 256);
     assert_eq!(fixture.rows.len(), fixture.row_count);
     assert_eq!(
         fixture.rows_by_stylesheet,
@@ -54,7 +54,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
             ("badge.css".to_owned(), 3),
             ("button.css".to_owned(), 31),
             ("card.css".to_owned(), 5),
-            ("checkbox.css".to_owned(), 6),
+            ("checkbox.css".to_owned(), 8),
             ("collapsible.css".to_owned(), 13),
             ("dialog.css".to_owned(), 48),
             ("field.css".to_owned(), 45),

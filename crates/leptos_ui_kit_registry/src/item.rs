@@ -2942,8 +2942,14 @@ mod tests {
 
         let checkbox =
             fs::read_to_string(root.join("styles/checkbox.css")).expect("read checkbox CSS");
-        assert!(checkbox.contains("linear-gradient"));
+        assert!(checkbox.contains(".kit-checkbox-indicator path"));
         assert!(checkbox.contains("--kit-color-selection-indicator"));
+        let checkbox_source =
+            fs::read_to_string(root.join("ui/checkbox.rs")).expect("read checkbox source");
+        assert!(checkbox_source.contains("viewBox=\"0 0 16 16\""));
+        assert!(checkbox_source.contains("aria-hidden=\"true\""));
+        assert!(checkbox_source.contains("focusable=\"false\""));
+        assert!(checkbox_source.contains("M3.25 8.25 6.5 11.5 12.75 4.75"));
         let radio = fs::read_to_string(root.join("styles/radio.css")).expect("read radio CSS");
         assert!(radio.contains("--kit-radio-radius, var(--kit-radius-full)"));
         assert!(radio.contains("radial-gradient"));
