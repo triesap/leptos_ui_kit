@@ -12,7 +12,13 @@
 }
 
 .kit-radio:checked {
-  background: var(--kit-color-primary);
+  background:
+    radial-gradient(
+      circle,
+      var(--kit-color-primary-foreground) 0 28%,
+      transparent 30%
+    ),
+    var(--kit-color-primary);
 }
 
 .kit-radio:focus-visible {

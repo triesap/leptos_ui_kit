@@ -2940,8 +2940,14 @@ mod tests {
             assert!(source.contains("Callback"), "{name}");
         }
 
+        let checkbox =
+            fs::read_to_string(root.join("styles/checkbox.css")).expect("read checkbox CSS");
+        assert!(checkbox.contains("linear-gradient"));
+        assert!(checkbox.contains("--kit-color-primary-foreground"));
         let radio = fs::read_to_string(root.join("styles/radio.css")).expect("read radio CSS");
         assert!(radio.contains("--kit-radio-radius, var(--kit-radius-full)"));
+        assert!(radio.contains("radial-gradient"));
+        assert!(radio.contains("--kit-color-primary-foreground"));
         let switch = fs::read_to_string(root.join("styles/switch.css")).expect("read switch CSS");
         assert!(switch.contains("--kit-switch-thumb-radius, var(--kit-radius-full)"));
     }

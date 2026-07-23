@@ -345,7 +345,7 @@
       "stylesheet": "checkbox.css", "selector": ".kit-checkbox", "property": "border-radius", "value": "var( --kit-checkbox-radius, var(--kit-radius-control, var(--kit-radius-default, var(--kit-radius-sm))) )"
     },
     {
-      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked", "property": "background", "value": "var(--kit-color-primary)"
+      "stylesheet": "checkbox.css", "selector": ".kit-checkbox:checked", "property": "background", "value": "linear-gradient( 45deg, transparent 42%, var(--kit-color-primary-foreground) 42% 58%, transparent 58% ) 30% 62% / 38% 55% no-repeat, linear-gradient( -45deg, transparent 43%, var(--kit-color-primary-foreground) 43% 57%, transparent 57% ) 68% 48% / 62% 78% no-repeat, var(--kit-color-primary)"
     },
     {
       "stylesheet": "checkbox.css", "selector": ".kit-checkbox:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
@@ -1245,7 +1245,7 @@
       "stylesheet": "radio.css", "selector": ".kit-radio", "property": "border-radius", "value": "var(--kit-radio-radius, var(--kit-radius-full))"
     },
     {
-      "stylesheet": "radio.css", "selector": ".kit-radio:checked", "property": "background", "value": "var(--kit-color-primary)"
+      "stylesheet": "radio.css", "selector": ".kit-radio:checked", "property": "background", "value": "radial-gradient( circle, var(--kit-color-primary-foreground) 0 28%, transparent 30% ), var(--kit-color-primary)"
     },
     {
       "stylesheet": "radio.css", "selector": ".kit-radio:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
