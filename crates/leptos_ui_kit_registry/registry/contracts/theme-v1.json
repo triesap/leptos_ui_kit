@@ -96,6 +96,13 @@
       "description": "Foreground rendered on the primary color."
     },
     {
+      "name": "--kit-color-selection-indicator",
+      "category": "color",
+      "required": true,
+      "default": "#ffffff",
+      "description": "Indicator rendered inside a selected checkbox or radio control."
+    },
+    {
       "name": "--kit-color-secondary",
       "category": "color",
       "required": true,

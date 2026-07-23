@@ -14,9 +14,9 @@
     "rustEmittedOnlyClasses": 3,
     "staticClasses": 49,
     "exports": 55,
-    "externalCustomProperties": 208,
+    "externalCustomProperties": 209,
     "runtimeGeometryProperties": 2,
-    "canonicalTokens": 43
+    "canonicalTokens": 44
   },
   "classes": {
     "cssSelectors": [
@@ -235,6 +235,7 @@
     "--kit-color-secondary",
     "--kit-color-secondary-foreground",
     "--kit-color-secondary-hover",
+    "--kit-color-selection-indicator",
     "--kit-dialog-background",
     "--kit-dialog-border-color",
     "--kit-dialog-border-width",
@@ -414,6 +415,7 @@
     {"name": "--kit-color-secondary", "default": "#ffffff"},
     {"name": "--kit-color-secondary-foreground", "default": "#111827"},
     {"name": "--kit-color-secondary-hover", "default": "#f3f4f6"},
+    {"name": "--kit-color-selection-indicator", "default": "#ffffff"},
     {"name": "--kit-color-success", "default": "#16a34a"},
     {"name": "--kit-color-success-foreground", "default": "#ffffff"},
     {"name": "--kit-color-surface", "default": "#ffffff"},

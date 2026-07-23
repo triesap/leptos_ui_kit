@@ -158,7 +158,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         unapproved.is_empty(),
         "unapproved component tokens: {unapproved:?}"
     );
-    assert_eq!(current_names.len(), 250);
+    assert_eq!(current_names.len(), 251);
     assert!(current_names.contains("--kit-button-radius"));
     assert!(current_names.contains("--kit-spinner-radius"));
 

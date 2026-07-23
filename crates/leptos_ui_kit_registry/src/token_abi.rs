@@ -77,6 +77,11 @@ const TOKENS: &[TokenDef] = &[
         "--kit-color-primary-foreground",
         "\"#ffffff\""
     ),
+    color!(
+        "color.selection-indicator",
+        "--kit-color-selection-indicator",
+        "\"#ffffff\""
+    ),
     color!("color.secondary", "--kit-color-secondary", "\"#ffffff\""),
     color!(
         "color.secondary-hover",
@@ -329,7 +334,7 @@ mod tests {
         assert_eq!(first, token_contract_json().unwrap());
         let value: serde_json::Value = serde_json::from_str(&first).unwrap();
         assert_eq!(value["tokens"].as_array().unwrap().len(), TOKENS.len());
-        assert_eq!(TOKENS.len(), 43);
+        assert_eq!(TOKENS.len(), 44);
         assert!(
             value["canonicalDigest"]
                 .as_str()
