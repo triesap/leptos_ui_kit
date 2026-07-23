@@ -2944,6 +2944,13 @@ mod tests {
             fs::read_to_string(root.join("styles/checkbox.css")).expect("read checkbox CSS");
         assert!(checkbox.contains(".kit-checkbox-indicator path"));
         assert!(checkbox.contains("--kit-color-selection-indicator"));
+        assert!(
+            checkbox
+                .contains(".kit-checkbox-root {\n  display: inline-grid;\n  inline-size: 1rem;")
+        );
+        assert!(checkbox.contains(
+            ".kit-checkbox-indicator {\n  grid-area: 1 / 1;\n  inline-size: 1rem;\n  block-size: 1rem;"
+        ));
         let checkbox_source =
             fs::read_to_string(root.join("ui/checkbox.rs")).expect("read checkbox source");
         assert!(checkbox_source.contains("viewBox=\"0 0 16 16\""));

@@ -2,6 +2,8 @@
 @layer leptos-ui-kit.components {
 .kit-checkbox-root {
   display: inline-grid;
+  inline-size: 1rem;
+  block-size: 1rem;
 }
 
 .kit-checkbox {
@@ -25,8 +27,8 @@
 
 .kit-checkbox-indicator {
   grid-area: 1 / 1;
-  inline-size: 100%;
-  block-size: 100%;
+  inline-size: 1rem;
+  block-size: 1rem;
   pointer-events: none;
   opacity: 0;
 }
