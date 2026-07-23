@@ -13,14 +13,20 @@
     var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full)))
   );
   padding: 0.125rem;
-  background-color: var(--kit-color-surface-hover);
+  background-color: var(
+    --kit-switch-track-background-unchecked,
+    var(--kit-color-border-strong)
+  );
   cursor: pointer;
   transition: background-color
     var(--kit-switch-transition-duration, var(--kit-duration-fast))
     var(--kit-switch-transition-timing, var(--kit-easing-standard));
 }
 .kit-switch[data-state="checked"] {
-  background-color: var(--kit-color-primary);
+  background-color: var(
+    --kit-switch-track-background-checked,
+    var(--kit-color-primary)
+  );
 }
 
 .kit-switch:focus-visible {
@@ -39,7 +45,7 @@
   inline-size: 0.875rem;
   block-size: 0.875rem;
   border-radius: var(--kit-switch-thumb-radius, var(--kit-radius-full));
-  background: var(--kit-color-surface);
+  background: var(--kit-switch-thumb-background, var(--kit-color-surface));
   transform: translateX(0);
   transition: transform
     var(--kit-switch-transition-duration, var(--kit-duration-fast))

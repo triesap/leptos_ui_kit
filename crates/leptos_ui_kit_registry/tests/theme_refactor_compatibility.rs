@@ -96,7 +96,7 @@ fn pinned_theme_refactor_compatibility_surface_remains_available() {
     assert_eq!(fixture.counts.rust_emitted_only_classes, 3);
     assert_eq!(fixture.counts.static_classes, 49);
     assert_eq!(fixture.counts.exports, 55);
-    assert_eq!(fixture.counts.external_custom_properties, 211);
+    assert_eq!(fixture.counts.external_custom_properties, 214);
     assert_eq!(fixture.counts.runtime_geometry_properties, 2);
     assert_eq!(fixture.counts.canonical_tokens, 44);
 

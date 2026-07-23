@@ -1356,7 +1356,7 @@
       "value": "var(--kit-status-line-height, 1.4)"
     },
     {
-      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "background-color", "value": "var(--kit-color-surface-hover)"
+      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "background-color", "value": "var( --kit-switch-track-background-unchecked, var(--kit-color-border-strong) )"
     },
     {
       "stylesheet": "switch.css", "selector": ".kit-switch", "property": "border-radius", "value": "var( --kit-switch-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
@@ -1365,7 +1365,7 @@
       "stylesheet": "switch.css", "selector": ".kit-switch", "property": "transition", "value": "background-color var(--kit-switch-transition-duration, var(--kit-duration-fast)) var(--kit-switch-transition-timing, var(--kit-easing-standard))"
     },
     {
-      "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "background", "value": "var(--kit-color-surface)"
+      "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "background", "value": "var(--kit-switch-thumb-background, var(--kit-color-surface))"
     },
     {
       "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "border-radius", "value": "var(--kit-switch-thumb-radius, var(--kit-radius-full))"
@@ -1380,7 +1380,7 @@
       "stylesheet": "switch.css", "selector": ".kit-switch:focus-visible", "property": "outline", "value": "2px solid var(--kit-focus-ring)"
     },
     {
-      "stylesheet": "switch.css", "selector": ".kit-switch[data-state=\"checked\"]", "property": "background-color", "value": "var(--kit-color-primary)"
+      "stylesheet": "switch.css", "selector": ".kit-switch[data-state=\"checked\"]", "property": "background-color", "value": "var( --kit-switch-track-background-checked, var(--kit-color-primary) )"
     },
     {
       "stylesheet": "tabs.css",

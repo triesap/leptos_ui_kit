@@ -2971,6 +2971,13 @@ mod tests {
         ));
         assert!(switch.contains("--kit-switch-transition-timing, var(--kit-easing-standard)"));
         assert!(switch.contains(
+            "--kit-switch-track-background-unchecked,\n    var(--kit-color-border-strong)"
+        ));
+        assert!(
+            switch.contains("--kit-switch-track-background-checked,\n    var(--kit-color-primary)")
+        );
+        assert!(switch.contains("--kit-switch-thumb-background, var(--kit-color-surface)"));
+        assert!(switch.contains(
             ".kit-switch[data-state=\"checked\"] .kit-switch-thumb {\n  transform: translateX(0.875rem);"
         ));
         assert!(switch.contains(
