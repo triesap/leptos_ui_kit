@@ -18,16 +18,16 @@
   background:
     linear-gradient(
       45deg,
-      transparent 42%,
-      var(--kit-color-selection-indicator) 42% 58%,
-      transparent 58%
-    ) 30% 62% / 38% 55% no-repeat,
+      transparent 24%,
+      var(--kit-color-selection-indicator) 24% 76%,
+      transparent 76%
+    ) left 24% top 48% / 20% 20% no-repeat,
     linear-gradient(
       -45deg,
-      transparent 43%,
-      var(--kit-color-selection-indicator) 43% 57%,
-      transparent 57%
-    ) 68% 48% / 62% 78% no-repeat,
+      transparent 37%,
+      var(--kit-color-selection-indicator) 37% 63%,
+      transparent 63%
+    ) left 44% top 28% / 40% 40% no-repeat,
     var(--kit-color-primary);
 }
 
