@@ -43,7 +43,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         serde_json::from_str(COMPATIBILITY_FIXTURE).expect("parse pinned compatibility fixture");
 
     assert_eq!(fixture.fixture_version, 1);
-    assert_eq!(fixture.row_count, 256);
+    assert_eq!(fixture.row_count, 258);
     assert_eq!(fixture.rows.len(), fixture.row_count);
     assert_eq!(
         fixture.rows_by_stylesheet,
@@ -65,7 +65,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
             ("skeleton.css".to_owned(), 2),
             ("spinner.css".to_owned(), 7),
             ("status.css".to_owned(), 4),
-            ("switch.css".to_owned(), 7),
+            ("switch.css".to_owned(), 9),
             ("tabs.css".to_owned(), 20),
         ])
     );
@@ -158,7 +158,7 @@ fn component_mapping_table_matches_complete_theme_fallback_semantics() {
         unapproved.is_empty(),
         "unapproved component tokens: {unapproved:?}"
     );
-    assert_eq!(current_names.len(), 251);
+    assert_eq!(current_names.len(), 253);
     assert!(current_names.contains("--kit-button-radius"));
     assert!(current_names.contains("--kit-spinner-radius"));
 

@@ -14,7 +14,7 @@
     "rustEmittedOnlyClasses": 3,
     "staticClasses": 49,
     "exports": 55,
-    "externalCustomProperties": 209,
+    "externalCustomProperties": 211,
     "runtimeGeometryProperties": 2,
     "canonicalTokens": 44
   },
@@ -364,6 +364,8 @@
     "--kit-status-font-size",
     "--kit-status-font-weight",
     "--kit-status-line-height",
+    "--kit-switch-transition-duration",
+    "--kit-switch-transition-timing",
     "--kit-tabs-gap",
     "--kit-tabs-list-gap",
     "--kit-tabs-panel-background",

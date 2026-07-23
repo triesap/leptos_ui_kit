@@ -2963,6 +2963,21 @@ mod tests {
         assert!(radio.contains("--kit-color-selection-indicator"));
         let switch = fs::read_to_string(root.join("styles/switch.css")).expect("read switch CSS");
         assert!(switch.contains("--kit-switch-thumb-radius, var(--kit-radius-full)"));
+        assert!(switch.contains(
+            "transition: background-color\n    var(--kit-switch-transition-duration, var(--kit-duration-fast))"
+        ));
+        assert!(switch.contains(
+            "transition: transform\n    var(--kit-switch-transition-duration, var(--kit-duration-fast))"
+        ));
+        assert!(switch.contains("--kit-switch-transition-timing, var(--kit-easing-standard)"));
+        assert!(switch.contains(
+            ".kit-switch[data-state=\"checked\"] .kit-switch-thumb {\n  transform: translateX(0.875rem);"
+        ));
+        assert!(switch.contains(
+            ".kit-switch:dir(rtl)[data-state=\"checked\"] .kit-switch-thumb {\n  transform: translateX(-0.875rem);"
+        ));
+        assert!(switch.contains("@media (prefers-reduced-motion: reduce)"));
+        assert!(switch.contains(".kit-switch,\n  .kit-switch-thumb {\n    transition: none;"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "fixtureVersion": 1,
-  "rowCount": 256,
+  "rowCount": 258,
   "rowsByStylesheet": {
     "alert.css": 4,
     "anchor.css": 8,
@@ -19,7 +19,7 @@
     "skeleton.css": 2,
     "spinner.css": 7,
     "status.css": 4,
-    "switch.css": 7,
+    "switch.css": 9,
     "tabs.css": 20
   },
   "rows": [
@@ -1356,10 +1356,13 @@
       "value": "var(--kit-status-line-height, 1.4)"
     },
     {
-      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "background", "value": "var(--kit-color-surface-hover)"
+      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "background-color", "value": "var(--kit-color-surface-hover)"
     },
     {
       "stylesheet": "switch.css", "selector": ".kit-switch", "property": "border-radius", "value": "var( --kit-switch-radius, var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full))) )"
+    },
+    {
+      "stylesheet": "switch.css", "selector": ".kit-switch", "property": "transition", "value": "background-color var(--kit-switch-transition-duration, var(--kit-duration-fast)) var(--kit-switch-transition-timing, var(--kit-easing-standard))"
     },
     {
       "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "background", "value": "var(--kit-color-surface)"
@@ -1368,13 +1371,16 @@
       "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "border-radius", "value": "var(--kit-switch-thumb-radius, var(--kit-radius-full))"
     },
     {
+      "stylesheet": "switch.css", "selector": ".kit-switch-thumb", "property": "transition", "value": "transform var(--kit-switch-transition-duration, var(--kit-duration-fast)) var(--kit-switch-transition-timing, var(--kit-easing-standard))"
+    },
+    {
       "stylesheet": "switch.css", "selector": ".kit-switch:disabled", "property": "opacity", "value": "var(--kit-disabled-opacity)"
     },
     {
       "stylesheet": "switch.css", "selector": ".kit-switch:focus-visible", "property": "outline", "value": "2px solid var(--kit-focus-ring)"
     },
     {
-      "stylesheet": "switch.css", "selector": ".kit-switch[data-state=\"checked\"]", "property": "background", "value": "var(--kit-color-primary)"
+      "stylesheet": "switch.css", "selector": ".kit-switch[data-state=\"checked\"]", "property": "background-color", "value": "var(--kit-color-primary)"
     },
     {
       "stylesheet": "tabs.css",

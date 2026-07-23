@@ -3,19 +3,24 @@
 .kit-switch {
   display: inline-flex;
   align-items: center;
+  flex: none;
   inline-size: 2rem;
   block-size: 1.125rem;
+  box-sizing: border-box;
   border: 0;
   border-radius: var(
     --kit-switch-radius,
     var(--kit-radius-indicator, var(--kit-radius-default, var(--kit-radius-full)))
   );
   padding: 0.125rem;
-  background: var(--kit-color-surface-hover);
+  background-color: var(--kit-color-surface-hover);
   cursor: pointer;
+  transition: background-color
+    var(--kit-switch-transition-duration, var(--kit-duration-fast))
+    var(--kit-switch-transition-timing, var(--kit-easing-standard));
 }
 .kit-switch[data-state="checked"] {
-  background: var(--kit-color-primary);
+  background-color: var(--kit-color-primary);
 }
 
 .kit-switch:focus-visible {
@@ -29,14 +34,30 @@
 }
 
 .kit-switch-thumb {
+  display: block;
+  flex: none;
   inline-size: 0.875rem;
   block-size: 0.875rem;
   border-radius: var(--kit-switch-thumb-radius, var(--kit-radius-full));
   background: var(--kit-color-surface);
   transform: translateX(0);
+  transition: transform
+    var(--kit-switch-transition-duration, var(--kit-duration-fast))
+    var(--kit-switch-transition-timing, var(--kit-easing-standard));
 }
 .kit-switch[data-state="checked"] .kit-switch-thumb {
   transform: translateX(0.875rem);
+}
+
+.kit-switch:dir(rtl)[data-state="checked"] .kit-switch-thumb {
+  transform: translateX(-0.875rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kit-switch,
+  .kit-switch-thumb {
+    transition: none;
+  }
 }
 }
 /* leptos-ui-kit:end switch */
